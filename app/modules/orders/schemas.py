@@ -21,6 +21,8 @@ class OrderResponse(BaseModel):
     destination_hub: Optional[HubSchema] = None
     delivery_mode: Optional[DeliveryMode]
     status: OrderStatus
+    payment_status: Optional[str] = None
+    mission_id: Optional[str] = None
     planningState: Optional[str] = None
     originPackage: Optional[OriginPackageSchema] = None
     requested_delivery_at: Optional[datetime] = None

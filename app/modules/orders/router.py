@@ -27,25 +27,25 @@ from app.core.config import settings
 router = APIRouter(prefix="/operator/orders", tags=["Orders"])
 allow_operator = RoleChecker([UserRole.OPERATOR, UserRole.ADMIN])
 
-ACTIVE_MISSION_STATUSES = {
-    MissionStatus.SCHEDULED,
-    MissionStatus.IN_PROGRESS,
-    MissionStatus.APPROVED,
-    MissionStatus.FLYING,
-    MissionStatus.ACTIVE_MISSION,
-    MissionStatus.PENDING_APPROVAL,
+ACTIVE_MISSION_STATUS_STRINGS = {
+    "SCHEDULED",
+    "IN_PROGRESS",
+    "APPROVED",
+    "FLYING",
+    "ACTIVE_MISSION",
+    "PENDING_APPROVAL",
 }
 
-COMPLETED_MISSION_STATUSES = {
-    MissionStatus.COMPLETED,
-    MissionStatus.MISSION_COMPLETED,
+COMPLETED_MISSION_STATUS_STRINGS = {
+    "COMPLETED",
+    "MISSION_COMPLETED",
 }
 
-FAILED_MISSION_STATUSES = {
-    MissionStatus.CANCELLED,
-    MissionStatus.FAILED,
-    MissionStatus.REJECTED,
-    MissionStatus.INCIDENT_RETURN,
+FAILED_MISSION_STATUS_STRINGS = {
+    "CANCELLED",
+    "FAILED",
+    "REJECTED",
+    "INCIDENT_RETURN",
 }
 
 
@@ -60,21 +60,21 @@ def calculate_planning_state(order: Order, mission: Mission = None) -> str | Non
     ):
         return None
 
-    # 2. Chỉ những đơn hàng đã được Technician xác nhận nhận hàng tại Hub (AT_HUB)
-    # mới được phép tạo mission hoặc hiển thị trạng thái lập lịch (Issue #2)
+    # 2. Nếu đơn hàng chưa thanh toán hoặc chưa mang tới Hub -> Không ở bước lập lịch
     if order.status != OrderStatus.AT_HUB:
         return None
 
-    # 3. Nếu đơn hàng đã có Mission (khi đã AT_HUB)
+    # 3. Nếu đơn hàng đã có Mission liên kết
     if mission:
+        ms_str = (mission.status.value if hasattr(mission.status, "value") else str(mission.status or "")).upper()
         # Đã bay xong -> Không hiện Ready for planning hay Planned nữa
-        if mission.status in COMPLETED_MISSION_STATUSES or mission.arrived_at is not None:
+        if ms_str in COMPLETED_MISSION_STATUS_STRINGS or mission.arrived_at is not None:
             return None
         # Đang có Mission hiệu lực (Scheduled, Approved, In Progress, Flying...) -> Đã lập lịch (PLANNED)
-        if mission.status in ACTIVE_MISSION_STATUSES:
+        if ms_str in ACTIVE_MISSION_STATUS_STRINGS:
             return "PLANNED"
         # Mission trước đó bị hủy/lỗi -> Cần lập lịch lại
-        if mission.status in FAILED_MISSION_STATUSES:
+        if ms_str in FAILED_MISSION_STATUS_STRINGS:
             return "NEEDS_REPLANNING"
 
     if order.replan_required_at:
@@ -133,10 +133,12 @@ async def list_orders(
         latest_mission = mission_by_order.get(o.id)
         planning_state = calculate_planning_state(o, latest_mission)
         origin_pkg = OriginPackageSchema(
-            received=True if o.status == OrderStatus.AT_HUB else False,
+            received=True if (o.status == OrderStatus.AT_HUB and o.origin_received_at is not None) else False,
             received_at=o.origin_received_at if o.status == OrderStatus.AT_HUB else None
         )
         order_resp = OrderResponse.model_validate(o)
+        order_resp.mission_id = latest_mission.id if latest_mission else None
+        order_resp.payment_status = o.payment_status.value if hasattr(o.payment_status, "value") else str(o.payment_status or "")
         order_resp.planningState = planning_state
         order_resp.originPackage = origin_pkg
         if o.origin_hub_id in hub_dict:
@@ -178,11 +180,13 @@ async def get_order(
     
     planning_state = calculate_planning_state(order, latest_mission)
     origin_pkg = OriginPackageSchema(
-        received=True if order.status == OrderStatus.AT_HUB else False,
+        received=True if (order.status == OrderStatus.AT_HUB and order.origin_received_at is not None) else False,
         received_at=order.origin_received_at if order.status == OrderStatus.AT_HUB else None
     )
     
     order_resp = OrderResponse.model_validate(order)
+    order_resp.mission_id = latest_mission.id if latest_mission else None
+    order_resp.payment_status = order.payment_status.value if hasattr(order.payment_status, "value") else str(order.payment_status or "")
     order_resp.planningState = planning_state
     order_resp.originPackage = origin_pkg
     
@@ -519,9 +523,11 @@ async def update_order(
     latest_mission = mission_result.scalars().first()
 
     resp = OrderResponse.model_validate(order)
+    resp.mission_id = latest_mission.id if latest_mission else None
+    resp.payment_status = order.payment_status.value if hasattr(order.payment_status, "value") else str(order.payment_status or "")
     resp.planningState = calculate_planning_state(order, latest_mission)
     resp.originPackage = OriginPackageSchema(
-        received=bool(order.origin_received_at or order.status == OrderStatus.AT_HUB),
-        received_at=order.origin_received_at,
+        received=bool(order.status == OrderStatus.AT_HUB and order.origin_received_at is not None),
+        received_at=order.origin_received_at if order.status == OrderStatus.AT_HUB else None,
     )
     return resp

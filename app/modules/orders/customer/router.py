@@ -48,19 +48,24 @@ def compute_delivery_status(order: Order, mission: Optional[Mission]) -> tuple[s
     if order.status == OrderStatus.CANCELLED:
         return "CANCELLED", "Đã hủy"
     if mission is None:
+        if order.status == OrderStatus.AWAITING_DROP_OFF:
+            return "AWAITING_DROP_OFF", "Chờ mang hàng đến Hub"
+        if order.status == OrderStatus.AT_HUB:
+            return "AT_HUB", "Đã nhận tại Hub, chờ lên lịch bay"
+        if order.payment_status == PaymentStatus.PAID:
+            return "PAID", "Đã thanh toán, chờ gửi hàng"
         return "PENDING", "Chờ xử lý"
-    ms = mission.status
-    if mission.arrival_confirmed_at is not None or ms in (
-        MissionStatus.MISSION_COMPLETED, MissionStatus.COMPLETED
-    ):
+    
+    ms_str = (mission.status.value if hasattr(mission.status, "value") else str(mission.status or "")).upper()
+    if mission.arrival_confirmed_at is not None or ms_str in ("MISSION_COMPLETED", "COMPLETED"):
         return "DELIVERED", "Đã giao"
     if mission.arrived_at is not None:
         return "ARRIVED_AT_HUB", "Đã tới hub đích, chờ nhận"
-    if ms in (MissionStatus.FLYING, MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION):
+    if ms_str in ("FLYING", "IN_PROGRESS", "ACTIVE_MISSION"):
         return "IN_DELIVERY", "Đang giao"
-    if ms in (MissionStatus.SCHEDULED, MissionStatus.APPROVED, MissionStatus.PENDING_APPROVAL):
+    if ms_str in ("SCHEDULED", "APPROVED", "PENDING_APPROVAL"):
         return "SCHEDULED", "Đã lên lịch"
-    if ms in (MissionStatus.CANCELLED, MissionStatus.REJECTED, MissionStatus.FAILED):
+    if ms_str in ("CANCELLED", "REJECTED", "FAILED"):
         return "CANCELLED", "Đã hủy"
     return "PROCESSING", "Đang xử lý"
 
