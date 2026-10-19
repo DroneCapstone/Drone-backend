@@ -4,6 +4,7 @@ from sqlalchemy import select, and_, or_, func
 from datetime import timedelta, datetime, timezone
 import math
 
+from app.core.timezone import get_vn_naive_datetime, get_vn_datetime
 from app.database.db import get_async_db
 from app.shared.dependencies import RoleChecker, CurrentUser
 from app.shared.roles import UserRole
@@ -269,8 +270,7 @@ async def create_incident(
     user: CurrentUser = Depends(allow_operator),
     db: AsyncSession = Depends(get_async_db),
 ):
-    from datetime import timezone
-    now = datetime.now(timezone.utc)
+    now = get_vn_datetime()
     incident = Incident(
         mission_id=body.mission_id,
         drone_id=body.drone_id,
@@ -2399,8 +2399,8 @@ async def create_mission(
             to_hub_id=leg_item["to_hub_id"],
             battery_id=leg_battery_id,
             status=MissionLegStatus.PENDING,
-            created_at=datetime.now(),
-            updated_at=datetime.now()
+            created_at=get_vn_naive_datetime(),
+            updated_at=get_vn_naive_datetime()
         )
         db.add(m_leg)
 
@@ -2410,7 +2410,7 @@ async def create_mission(
         estimated_energy_wh=round(total_energy_wh, 2),
         estimated_duration_m=float(duration_min),
         risk_level=selected_schema.risk.capitalize() if (selected_schema and selected_schema.risk) else "Low",
-        predicted_at=datetime.now(timezone.utc)
+        predicted_at=get_vn_datetime()
     )
     db.add(ai_pred)
 
@@ -2428,12 +2428,12 @@ async def create_mission(
         category="Mission Planning",
         content=rec_content,
         is_applied=True,
-        created_at=datetime.now(timezone.utc)
+        created_at=get_vn_datetime()
     )
     db.add(ai_rec)
 
     # 4. Ghi nhận thời gian planning trên Order
-    order.planning_at = datetime.now()
+    order.planning_at = get_vn_naive_datetime()
 
     await db.commit()
     await db.refresh(mission)

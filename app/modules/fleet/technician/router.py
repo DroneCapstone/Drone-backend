@@ -3,6 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text, cast, String
 
+from app.core.timezone import get_vn_naive_datetime, get_vn_datetime
+
 from app.database.db import get_async_db
 from app.shared.dependencies import RoleChecker, CurrentUser
 from app.shared.roles import UserRole
@@ -335,7 +337,7 @@ async def confirm_arrival(
     ):
         raise HTTPException(status_code=400, detail="Arrival already confirmed")
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
     dest_hub_id = mission.destination_hub_id or (int(user.hub_id) if (user.hub_id and str(user.hub_id).isdigit()) else None)
 
     # ── 1. Cập nhật Mission (rời danh sách Transit đang hoạt động sang History) ──
@@ -733,7 +735,7 @@ async def create_maintenance_record(
         diagnosis=body.diagnosis,
         corrective_action=body.corrective_action,
         resulting_drone_status=body.resulting_drone_status,
-        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        created_at=get_vn_naive_datetime(),
     )
     db.add(record)
     await db.flush()
@@ -744,7 +746,7 @@ async def create_maintenance_record(
             maintenance_record_id=record.id,
             item_name=item.item_name,
             is_completed=item.is_completed,
-            checked_at=datetime.now(timezone.utc).replace(tzinfo=None) if item.is_completed else None,
+            checked_at=get_vn_naive_datetime() if item.is_completed else None,
         )
         db.add(inspection_item)
         items.append(inspection_item)
@@ -812,7 +814,7 @@ async def create_maintenance_schedule(
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
     next_inspection = now + timedelta(days=body.interval_days) if body.interval_days else None
     schedule = MaintenanceSchedule(
         drone_id=body.drone_id,
@@ -1011,14 +1013,14 @@ async def update_inspection(
     wo.action_taken = body.action_taken
     wo.status = body.status
     if body.status == WorkOrderStatus.COMPLETED:
-        wo.resolved_at = datetime.now(timezone.utc)
+        wo.resolved_at = get_vn_naive_datetime()
     log = WorkOrderLog(
         work_order_id=wo.id,
         action="inspection_update",
         from_status=old_status,
         to_status=body.status.value,
         changed_by=user.id,
-        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        created_at=get_vn_naive_datetime(),
     )
     db.add(log)
     await db.commit()
@@ -1092,7 +1094,7 @@ async def confirm_relay_arrival(
             detail="Không tìm thấy chặng bay đang hoạt động. Tất cả legs đã hoàn thành?"
         )
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
 
     # Không phải leg cuối cùng → đây là relay hub, không phải hub đích
     if next_leg is None:
@@ -1328,7 +1330,7 @@ async def swap_battery_at_relay(
             detail=f"Pin {new_battery.id} đang được giữ chỗ bởi một nhiệm vụ bay đang hoạt động khác."
         )
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
     old_battery_id = mission.battery_id
 
     # Tháo pin cũ
@@ -1414,7 +1416,7 @@ async def dispatch_drone(
             detail=f"Mission phải ở trạng thái READY (đã lắp/thay pin) trước khi dispatch. Hiện tại: {mission.handling_status}."
         )
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
 
     # Tìm leg tiếp theo cần bay (PENDING)
     next_leg_result = await db.execute(

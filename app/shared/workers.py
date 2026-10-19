@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from app.core.timezone import get_vn_naive_datetime, get_vn_datetime
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.missions.models import Mission, MissionStatus, TelemetryLog
@@ -18,7 +19,7 @@ async def run_approval_deadline_watcher(db: AsyncSession):
     Worker 1: Quản lý đếm ngược (Approval Deadline Watcher)
     Tự động hủy các chuyến bay chưa được duyệt khi đã quá giờ scheduled_time.
     """
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
     result = await db.execute(
         select(Mission).where(
             and_(
@@ -66,7 +67,7 @@ async def run_telemetry_signal_loss_watcher(db: AsyncSession):
     """
     Worker 2: Quét log, mất tín hiệu quá 3s tự tạo Incident và đẩy thông báo cho Operator
     """
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
     threshold_time = now - timedelta(seconds=3)
     
     # Tìm các chuyến bay đang bay
@@ -216,7 +217,7 @@ async def run_pickup_reminder_watcher(db: AsyncSession):
       thông báo nhắc gần nhất của kiện (reference_id == PICKUP_REMINDER_REF); chỉ gửi
       thông báo mới nếu đã đủ 5 tiếng kể từ lần nhắc gần nhất (hoặc kể từ arrived_at nếu chưa nhắc lần nào).
     """
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
 
     # Lấy các kiện đang chờ khách tới nhận (drone đã đáp hub đích: arrived_at != None, khách chưa nhận: arrival_confirmed_at == None)
     result = await db.execute(

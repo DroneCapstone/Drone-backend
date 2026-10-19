@@ -4,6 +4,7 @@ from sqlalchemy import select, cast, String, and_
 from datetime import datetime, timezone
 from typing import Optional
 from pydantic import BaseModel
+from app.core.timezone import get_vn_naive_datetime
 
 from app.database.db import get_async_db
 from app.shared.dependencies import RoleChecker, CurrentUser, get_current_user
@@ -286,7 +287,7 @@ async def receive_outbound_delivery(
     if order.payment_status != PaymentStatus.PAID:
         raise HTTPException(status_code=400, detail="Order chưa được thanh toán")
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
 
     # Nếu đơn đã ở trạng thái AT_HUB rồi thì xử lý idempotent (không báo lỗi)
     if order.status == OrderStatus.AT_HUB:
@@ -667,7 +668,7 @@ async def confirm_pickup(
     if mission.arrival_confirmed_at is not None and mission.status == MissionStatus.MISSION_COMPLETED:
         raise HTTPException(status_code=400, detail="Pickup already confirmed")
         
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
     mission.arrival_confirmed_at = now
     mission.arrival_confirmed_by = user.id
     mission.status = MissionStatus.MISSION_COMPLETED

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Union, Optional, List
 import math
 
+from app.core.timezone import get_vn_naive_datetime
 from app.database.db import get_async_db
 from app.shared.dependencies import RoleChecker, CurrentUser
 from app.shared.roles import UserRole
@@ -50,7 +51,7 @@ FAILED_MISSION_STATUS_STRINGS = {
 
 
 def calculate_planning_state(order: Order, mission: Mission = None) -> str | None:
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
 
     # 1. Đơn hàng đã hủy, đang giao hoặc đã giao tới Hub đích -> Không còn ở bước lập lịch
     if order.status in (
@@ -448,7 +449,7 @@ async def cancel_order(
             detail=f"Chỉ có thể huỷ order đang PENDING, hiện tại: {order.status}"
         )
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
     order.status = OrderStatus.CANCELLED
     order.cancelled_at = now
     order.updated_at = now
@@ -510,7 +511,7 @@ async def update_order(
     if body.planning_at is not None:
         order.planning_at = body.planning_at
 
-    order.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    order.updated_at = get_vn_naive_datetime()
     await db.commit()
     await db.refresh(order)
 
