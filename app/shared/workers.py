@@ -145,14 +145,15 @@ async def run_battery_charging_simulation(db: AsyncSession):
     - Việc áp dụng mô hình toán học này vào phần mềm giúp Digital Twin của hệ thống Drone mô phỏng chính xác
       khoảng thời gian chết (downtime), giúp AI điều phối quyết định việc lấy pin 85% đi bay ngay thay vì đợi sạc đầy 100%.
     """
-    from app.modules.fleet.models import Battery
+    from app.modules.fleet.models import Battery, batteries_status
     
-    # Tìm các pin đang ở Hub (drone_id IS NULL) và pin chưa đầy
+    # Tìm các pin đang ở Hub (drone_id IS NULL), đang ACTIVE và pin chưa đầy
     result = await db.execute(
         select(Battery).where(
             and_(
                 Battery.current_hub_id.isnot(None),
                 Battery.drone_id.is_(None),
+                Battery.status == batteries_status.ACTIVE,
                 Battery.charge_level_pct < 100
             )
         )
@@ -176,6 +177,7 @@ async def run_battery_charging_simulation(db: AsyncSession):
             
         # Làm tròn số và chặn trần tối đa ở 100%
         battery.charge_level_pct = min(round(new_charge), 100)
+        battery.update_at = datetime.now(timezone.utc)
         
     await db.commit()
 
