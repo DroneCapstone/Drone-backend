@@ -493,7 +493,7 @@ async def list_drones(
 
 @router.get("/drones/{drone_id}", response_model=DroneProfileResponse)
 async def get_drone_profile(
-    drone_id: int,
+    drone_id: str,
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -554,7 +554,7 @@ async def get_drone_profile(
 
 @router.patch("/drones/{drone_id}/status", response_model=DroneProfileResponse)
 async def update_drone_status(
-    drone_id: int,
+    drone_id: str,
     body: DroneStatusUpdate,
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
@@ -675,7 +675,7 @@ async def mark_battery_charged(
 
 @router.get("/drones/{drone_id}/maintenance-history", response_model=list[MaintenanceHistoryItem])
 async def get_drone_maintenance_history(
-    drone_id: int,
+    drone_id: str,
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -689,7 +689,7 @@ async def get_drone_maintenance_history(
 
 @router.get("/maintenance-records/{drone_id}", response_model=list[MaintenanceRecordResponse])
 async def get_maintenance_records(
-    drone_id: int,
+    drone_id: str,
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -794,7 +794,7 @@ async def list_maintenance_schedules(
 
 @router.get("/maintenance-schedules/drone/{drone_id}", response_model=list[MaintenanceScheduleResponse])
 async def get_drone_maintenance_schedules(
-    drone_id: int,
+    drone_id: str,
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):

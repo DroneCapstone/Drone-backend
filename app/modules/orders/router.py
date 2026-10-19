@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func
 from datetime import datetime, timezone
+from typing import Union, Optional, List
 import math
 
 from app.database.db import get_async_db
@@ -225,7 +226,7 @@ async def _get_reserved_battery_ids(db: AsyncSession, exclude_order_id: str | No
     return reserved_ids
 
 
-def _build_battery_eligible_schema(b: Battery, drone_id: int | None = None) -> BatteryEligibleSchema:
+def _build_battery_eligible_schema(b: Battery, drone_id: Union[str, int, None] = None) -> BatteryEligibleSchema:
     cap_wh = float(b.capacity_wh or 0.0)
     charge_pct = int(b.charge_level_pct if b.charge_level_pct is not None else 100)
     avail_energy_wh = round(cap_wh * (charge_pct / 100.0), 2)
@@ -359,7 +360,7 @@ async def get_eligible_drones(
 @router.get("/{order_id}/eligible-batteries", response_model=EligibleBatteriesResponse)
 async def get_eligible_batteries_for_order(
     order_id: str,
-    drone_id: int = Query(..., description="ID của Drone được chọn thực hiện nhiệm vụ"),
+    drone_id: str = Query(..., description="ID của Drone được chọn thực hiện nhiệm vụ"),
     user: CurrentUser = Depends(allow_operator),
     db: AsyncSession = Depends(get_async_db),
 ):

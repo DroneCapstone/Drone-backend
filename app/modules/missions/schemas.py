@@ -99,7 +99,7 @@ class RouteOptionSchema(BaseModel):
     risk: str
     recommended: bool
     reason: Optional[str] = None
-    suggestedDroneId: Optional[int] = None
+    suggestedDroneId: Optional[Union[str, int]] = None
     # Thông tin viên pin được assign cho Drone thực hiện nhiệm vụ (Chặng 1)
     assignedBatteryId: Optional[str] = None
     assignedBatterySerial: Optional[str] = None
@@ -118,7 +118,7 @@ class MissionResponse(BaseModel):
     order_id: Optional[str] = None
     customer_id: Optional[str] = None
     operator_id: Optional[str] = None
-    drone_id: Optional[int] = None
+    drone_id: Optional[Union[str, int]] = None
     battery_id: Optional[Union[str, int]] = None
     battery_serial: Optional[str] = None
     battery_model: Optional[str] = None
@@ -161,7 +161,7 @@ class MissionResponse(BaseModel):
     risk: Optional[str] = None
     recommended: Optional[bool] = True
     reason: Optional[str] = None
-    suggestedDroneId: Optional[int] = None
+    suggestedDroneId: Optional[Union[str, int]] = None
     relay_battery_status: list[HubBatteryStatus] = []
     scheduled_route: Optional[RouteOptionSchema] = None
     routes: list[RouteOptionSchema] = []
@@ -171,7 +171,7 @@ class MissionResponse(BaseModel):
 
 
 class ApproveRejectRequest(BaseModel):
-    drone_id: Optional[int] = None
+    drone_id: Optional[Union[str, int]] = None
     battery_id: Optional[str] = None
     operator_id: Optional[str] = None
     reason: Optional[str] = None
@@ -235,7 +235,7 @@ class TelemetryIngestResponse(BaseModel):
 
 class LiveTrackingDrone(BaseModel):
     mission_id: str
-    drone_id: Optional[int]
+    drone_id: Optional[Union[str, int]]
     status: MissionStatus
     latest_lat: Optional[float]
     latest_lng: Optional[float]
@@ -262,13 +262,13 @@ class LiveTrackingResponse(BaseModel):
 
 class MissionPlanningAnalyzeRequest(BaseModel):
     orderId: str
-    droneId: int
+    droneId: Union[str, int]
     batteryId: Optional[str] = None
     battery_id: Optional[str] = None
 
 class MissionPlanningAnalyzeResponse(BaseModel):
     orderId: Optional[str] = None
-    droneId: Optional[int] = None
+    droneId: Optional[Union[str, int]] = None
     assignedBatteryId: Optional[str] = None
     assignedBatterySerial: Optional[str] = None
     assignedBatteryModel: Optional[str] = None
@@ -279,10 +279,11 @@ class MissionPlanningAnalyzeResponse(BaseModel):
 
 class MissionCreateRequest(BaseModel):
     orderId: str
-    droneId: int
+    droneId: Union[str, int]
     batteryId: Optional[str] = None
     battery_id: Optional[str] = None
     routeId: str
+
     route_string: Optional[str] = None
     legs_detail: Optional[list[RouteLegSchema]] = None
     relay_battery_ids: Optional[Dict[Union[int, str], str]] = None

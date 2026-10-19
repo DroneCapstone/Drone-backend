@@ -195,8 +195,9 @@ async def create_order(
         raise HTTPException(status_code=400, detail="Package weight must be between 0.1 kg and 10.0 kg (Size XL limit).")
 
     from app.shared.id_generator import generate_sequential_id
+    from app.core.timezone import get_vn_naive_datetime
     order_id = await generate_sequential_id(db, Order, "ORD")
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = get_vn_naive_datetime()
 
     origin_hub = await db.get(Hub, body.origin_hub_id)
     dest_hub = await db.get(Hub, body.destination_hub_id)

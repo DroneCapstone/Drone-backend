@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime
 from app.modules.missions.models import OrderStatus, DeliveryMode
 
@@ -69,7 +69,7 @@ class EligibleBatteriesResponse(BaseModel):
     order_id: Optional[str] = None
     hub_id: int
     hub_name: Optional[str] = None
-    drone_id: int
+    drone_id: Union[str, int]
     drone_name: Optional[str] = None
     drone_model: str
     compatible_battery_models: List[str] = []

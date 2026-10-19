@@ -94,8 +94,9 @@ class Mission(Base):
     order_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     customer_id: Mapped[str | None] = mapped_column(String, nullable=True)
     operator_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    drone_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    drone_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     battery_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     pickup_location_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     dropoff_location_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     payload_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -170,8 +171,9 @@ class Incident(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     mission_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    drone_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    drone_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     reporter_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
     severity: Mapped[IncidentSeverity] = mapped_column(
         SAEnum(IncidentSeverity, name="risk_level", create_type=False, values_callable=lambda x: [e.value for e in x])
     )

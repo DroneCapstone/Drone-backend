@@ -317,20 +317,6 @@ async def update_incident_status(
     return incident
 
 
-@router.get("/{mission_id}", response_model=MissionResponse, summary="Lấy thông tin chi tiết một mission")
-async def get_mission(
-    mission_id: str,
-    user: CurrentUser = Depends(allow_operator),
-    db: AsyncSession = Depends(get_async_db),
-):
-    """Trả về toàn bộ thông tin mission kèm chi tiết tuyến đường đã lên lịch (giống cấu trúc mission-planning/analyze)."""
-    mission = await db.get(Mission, mission_id)
-
-    if not mission:
-        raise HTTPException(status_code=404, detail="Mission not found")
-    return await build_mission_detail_response(db, mission)
-
-
 
 '''
 @router.post("/{mission_id}/approve", response_model=MissionResponse)
@@ -643,6 +629,7 @@ from app.modules.ai_predictions.models import AIPrediction, AIRecommendation
 from app.modules.ai_predictions.service import predict_flight_energy, haversine_distance
 from app.modules.missions.technician.router import DRONE_BATTERY_COMPATIBILITY, get_compatible_battery_models
 from app.shared.id_generator import generate_sequential_id
+from app.core.timezone import get_vn_naive_datetime
 from typing import Optional
 
 
@@ -2054,7 +2041,7 @@ async def build_mission_detail_response(
 
 @router.get("/eligible-batteries", summary="Lấy danh sách Pin khả dụng tương thích với Drone khi tạo Mission")
 async def get_eligible_batteries_for_mission_planning(
-    drone_id: int = Query(..., description="ID của Drone được chọn thực hiện nhiệm vụ"),
+    drone_id: str = Query(..., description="ID của Drone được chọn thực hiện nhiệm vụ"),
     order_id: Optional[str] = Query(None, description="ID đơn hàng để lọc theo Hub xuất phát"),
     hub_id: Optional[int] = Query(None, description="ID Hub xuất phát (nếu không truyền order_id)"),
     user: CurrentUser = Depends(allow_operator),
@@ -2328,7 +2315,7 @@ async def create_mission(
         payload_weight=order.payload_kg,
         distance_m=round(total_dist_km * 1000, 2),
         delivery_fee=order.delivery_fee,
-        scheduled_time=order.requested_delivery_at or datetime.now(),
+        scheduled_time=order.requested_delivery_at or get_vn_naive_datetime(),
         status=MissionStatus.SCHEDULED,
         handling_status=HandlingStatus.AT_HUB,
         operator_id=user.id
@@ -2466,6 +2453,21 @@ async def create_mission(
         print(f"[EMAIL] Lỗi gửi mission scheduled email: {e}")
 
     return await build_mission_detail_response(db, mission)
+
+
+@router.get("/{mission_id}", response_model=MissionResponse, summary="Lấy thông tin chi tiết một mission")
+async def get_mission(
+    mission_id: str,
+    user: CurrentUser = Depends(allow_operator),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Trả về toàn bộ thông tin mission kèm chi tiết tuyến đường đã lên lịch (giống cấu trúc mission-planning/analyze)."""
+    mission = await db.get(Mission, mission_id)
+
+    if not mission:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    return await build_mission_detail_response(db, mission)
+
 
 
 
