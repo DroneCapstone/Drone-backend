@@ -110,6 +110,8 @@ class RouteOptionSchema(BaseModel):
     # Battery feasibility & kế hoạch thay pin ở các Hub trung gian
     feasible: bool = True
     infeasible_reason: Optional[str] = None
+    is_selectable: bool = True
+    unselectable_reason: Optional[str] = None
     relay_battery_status: list[HubBatteryStatus] = []
 
 
