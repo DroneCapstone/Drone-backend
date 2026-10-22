@@ -510,6 +510,10 @@ def _build_battery_eligible_schema(
         is_selectable = False
         status_str = "INSTALLED_ON_OTHER_DRONE"
         unavailable_reason = f"Đang được gắn trên Drone #{b.drone_id}"
+    elif charge_pct < 100:
+        is_selectable = False
+        status_str = "CHARGING"
+        unavailable_reason = f"Pin chưa sạc đầy ({charge_pct}% < 100%), không thể chọn để cất cánh"
 
     return BatteryEligibleSchema(
         id=b.id,
@@ -578,11 +582,45 @@ async def get_eligible_drones(
     total_drones_result = await db.execute(select(func.count(Drone.id)).where(Drone.current_hub_id == hub.id))
     total_drones = total_drones_result.scalar() or 0
 
+    # Cross-Hub fallback: nếu Hub lấy hàng không có Drone phù hợp, tự động tìm Drone từ Hub khác
+    is_cross_hub_mode = False
+    all_hubs_map = {hub.id: hub}
+    if not eligible_drones:
+        is_cross_hub_mode = True
+        hubs_res = await db.execute(select(Hub).where(Hub.status == 'ACTIVE'))
+        all_hubs = hubs_res.scalars().all()
+        if not all_hubs:
+            all_hubs = (await db.execute(select(Hub))).scalars().all()
+        all_hubs_map = {h.id: h for h in all_hubs}
+
+        other_drones_query = select(Drone).where(and_(
+            Drone.current_hub_id != hub.id,
+            Drone.status == DroneStatus.AVAILABLE,
+            Drone.payload_capacity_kg >= (order.payload_kg or 0)
+        )).order_by(Drone.id)
+        other_drones = [d for d in (await db.execute(other_drones_query)).scalars().all() if d.id not in busy_drone_ids]
+        if other_drones:
+            def _drone_dist(d_cand):
+                cand_hub = all_hubs_map.get(d_cand.current_hub_id)
+                if not cand_hub:
+                    return float('inf')
+                return haversine_distance(
+                    cand_hub.latitude or 0, cand_hub.longitude or 0,
+                    hub.latitude or 0, hub.longitude or 0
+                )
+            other_drones.sort(key=_drone_dist)
+            eligible_drones = other_drones
+
     reserved_info_map = await _get_reserved_battery_info_map(db, exclude_order_id=order_id)
     eligible_drone_ids = {d.id for d in eligible_drones}
 
-    # Lấy tất cả pin ACTIVE tại Origin Hub hoặc đang gắn trên các drone đủ điều kiện (bao gồm cả pin đang bận để hiển thị)
-    bat_filters = [Battery.current_hub_id == hub.id]
+    # Lấy tất cả pin ACTIVE tại Origin Hub hoặc tại Home Hub của drone cross-hub (bao gồm cả pin đang bận để hiển thị)
+    bat_hub_ids = {hub.id}
+    if is_cross_hub_mode:
+        for d in eligible_drones:
+            if d.current_hub_id:
+                bat_hub_ids.add(d.current_hub_id)
+    bat_filters = [Battery.current_hub_id.in_(list(bat_hub_ids))]
     if eligible_drone_ids:
         bat_filters.append(Battery.drone_id.in_(eligible_drone_ids))
 
@@ -592,16 +630,18 @@ async def get_eligible_drones(
     ).order_by(Battery.id)
     hub_batteries = [
         b for b in (await db.execute(bats_stmt)).scalars().all()
-        if (b.current_hub_id == hub.id or (b.drone_id is not None and b.drone_id in eligible_drone_ids))
+        if (b.current_hub_id in bat_hub_ids or (b.drone_id is not None and b.drone_id in eligible_drone_ids))
         and (b.drone_id is None or b.drone_id in eligible_drone_ids)
     ]
 
     drones_schema_list: list[DroneEligibleSchema] = []
     for d in eligible_drones:
         compat_models = await get_compatible_battery_models(db, d.model)
+        d_hub_id = d.current_hub_id or hub.id
         d_bats = [
             b for b in hub_batteries
-            if (b.drone_id is None or b.drone_id == d.id)
+            if (b.current_hub_id == d_hub_id or b.drone_id == d.id)
+            and (b.drone_id is None or b.drone_id == d.id)
             and (not compat_models or (b.battery_model and b.battery_model in compat_models))
         ]
         # Ưu tiên:
@@ -616,8 +656,18 @@ async def get_eligible_drones(
                 b.id,
             )
         )
-        installed_bat = next((b for b in d_bats if b.drone_id == d.id and b.id not in reserved_info_map), None)
-        default_bat = next((b for b in d_bats if b.id not in reserved_info_map), None)
+        installed_bat = next((b for b in d_bats if b.drone_id == d.id and b.id not in reserved_info_map and (b.charge_level_pct or 0) >= 100), None)
+        default_bat = next((b for b in d_bats if b.id not in reserved_info_map and (b.charge_level_pct or 0) >= 100), None)
+
+        d_hub = all_hubs_map.get(d.current_hub_id) if is_cross_hub_mode else hub
+        d_is_cross = (d.current_hub_id is not None and d.current_hub_id != hub.id)
+        has_ready_bat = (installed_bat is not None or default_bat is not None)
+
+        d_selectable = True
+        d_unavail_reason = None
+        if not d_is_cross and not has_ready_bat:
+            d_selectable = False
+            d_unavail_reason = "Hub hiện không còn viên pin tương thích nào đạt 100% để cất cánh (toàn bộ pin < 100% đang sạc hoặc đã được gán cho nhiệm vụ khác)"
 
         drones_schema_list.append(
             DroneEligibleSchema(
@@ -630,15 +680,107 @@ async def get_eligible_drones(
                 default_battery_id=default_bat.id if default_bat else None,
                 compatible_battery_models=compat_models,
                 eligible_batteries=[_build_battery_eligible_schema(b, d.id, reserved_info_map) for b in d_bats],
+                current_hub_id=d.current_hub_id,
+                current_hub_name=d_hub.name if d_hub else None,
+                current_hub_code=d_hub.code or d_hub.name if d_hub else None,
+                is_cross_hub=d_is_cross,
+                is_selectable=d_selectable,
+                unavailable_reason=d_unavail_reason,
             )
         )
+
+    # Kiểm tra xem có Drone nội bộ (local) nào thực sự có pin sẵn sàng để cất cánh không
+    has_mission_ready_local = any((not d.is_cross_hub and d.is_selectable) for d in drones_schema_list)
+
+    # Nếu tất cả Drone nội bộ đều không có pin sẵn sàng (hoặc Hub không có drone) và chưa ở chế độ cross-hub:
+    # Tự động bổ sung các Drone từ Hub khác (Cross-Hub) có sẵn pin để Operator không bị bế tắc
+    if not has_mission_ready_local and not is_cross_hub_mode:
+        hubs_res = await db.execute(select(Hub).where(Hub.status == 'ACTIVE'))
+        all_hubs = hubs_res.scalars().all() or (await db.execute(select(Hub))).scalars().all()
+        all_hubs_map = {h.id: h for h in all_hubs}
+
+        other_drones_query = select(Drone).where(and_(
+            Drone.current_hub_id != hub.id,
+            Drone.status == DroneStatus.AVAILABLE,
+            Drone.payload_capacity_kg >= (order.payload_kg or 0)
+        )).order_by(Drone.id)
+        other_drones = [d for d in (await db.execute(other_drones_query)).scalars().all() if d.id not in busy_drone_ids]
+
+        if other_drones:
+            def _drone_dist(d_cand):
+                cand_hub = all_hubs_map.get(d_cand.current_hub_id)
+                if not cand_hub:
+                    return float('inf')
+                return haversine_distance(
+                    cand_hub.latitude or 0, cand_hub.longitude or 0,
+                    hub.latitude or 0, hub.longitude or 0
+                )
+            other_drones.sort(key=_drone_dist)
+
+            other_hub_ids = {d.current_hub_id for d in other_drones if d.current_hub_id}
+            other_drone_ids = {d.id for d in other_drones}
+            if other_hub_ids:
+                other_bats_stmt = select(Battery).where(
+                    Battery.status == batteries_status.ACTIVE,
+                    or_(
+                        Battery.current_hub_id.in_(list(other_hub_ids)),
+                        Battery.drone_id.in_(other_drone_ids)
+                    )
+                ).order_by(Battery.id)
+                other_hub_batteries = (await db.execute(other_bats_stmt)).scalars().all()
+            else:
+                other_hub_batteries = []
+
+            for d in other_drones:
+                compat_models = await get_compatible_battery_models(db, d.model)
+                d_bats = [
+                    b for b in other_hub_batteries
+                    if (b.current_hub_id == d.current_hub_id or b.drone_id == d.id)
+                    and (b.drone_id is None or b.drone_id == d.id)
+                    and (not compat_models or (b.battery_model and b.battery_model in compat_models))
+                ]
+                d_bats.sort(
+                    key=lambda b: (
+                        0 if b.id not in reserved_info_map else 1,
+                        0 if (b.drone_id == d.id and (b.charge_level_pct or 0) >= 100) else (1 if (b.charge_level_pct or 0) >= 100 else 2),
+                        -(b.charge_level_pct or 0),
+                        -float(b.capacity_wh or 0.0),
+                        b.id,
+                    )
+                )
+                inst_bat = next((b for b in d_bats if b.drone_id == d.id and b.id not in reserved_info_map and (b.charge_level_pct or 0) >= 100), None)
+                def_bat = next((b for b in d_bats if b.id not in reserved_info_map and (b.charge_level_pct or 0) >= 100), None)
+                has_bat = (inst_bat is not None or def_bat is not None)
+
+                # Chỉ đưa vào danh sách nếu Drone ở Hub khác có pin khả dụng tại Hub đó
+                if has_bat:
+                    d_hub = all_hubs_map.get(d.current_hub_id)
+                    drones_schema_list.append(
+                        DroneEligibleSchema(
+                            id=d.id,
+                            name=d.name,
+                            model=d.model,
+                            maxPayloadKg=d.payload_capacity_kg,
+                            battery_level_pct=d.battery_level_pct,
+                            installed_battery_id=inst_bat.id if inst_bat else None,
+                            default_battery_id=def_bat.id if def_bat else None,
+                            compatible_battery_models=compat_models,
+                            eligible_batteries=[_build_battery_eligible_schema(b, d.id, reserved_info_map) for b in d_bats],
+                            current_hub_id=d.current_hub_id,
+                            current_hub_name=d_hub.name if d_hub else None,
+                            current_hub_code=d_hub.code or d_hub.name if d_hub else None,
+                            is_cross_hub=True,
+                            is_selectable=True,
+                            unavailable_reason=None,
+                        )
+                    )
 
     return EligibleDronesResponse(
         hub=HubEligibleSchema(
             id=hub.id,
             name=hub.name or f"Hub {hub.id}",
             totalDrones=total_drones,
-            availableDrones=len(eligible_drones)
+            availableDrones=len([d for d in drones_schema_list if d.is_selectable])
         ),
         drones=drones_schema_list,
         batteries=[_build_battery_eligible_schema(b, None, reserved_info_map) for b in hub_batteries],
@@ -697,7 +839,7 @@ async def get_eligible_batteries_for_order(
             b.id,
         )
     )
-    default_bat = next((b for b in bats if b.id not in reserved_info_map), None)
+    default_bat = next((b for b in bats if b.id not in reserved_info_map and (b.charge_level_pct or 0) >= 100), None)
 
     return EligibleBatteriesResponse(
         order_id=order.id,

@@ -79,6 +79,12 @@ class DroneEligibleSchema(BaseModel):
     default_battery_id: Optional[str] = None
     compatible_battery_models: List[str] = []
     eligible_batteries: List[BatteryEligibleSchema] = []
+    current_hub_id: Optional[int] = None
+    current_hub_name: Optional[str] = None
+    current_hub_code: Optional[str] = None
+    is_cross_hub: bool = False
+    is_selectable: bool = True
+    unavailable_reason: Optional[str] = None
 
 class HubEligibleSchema(BaseModel):
     id: int

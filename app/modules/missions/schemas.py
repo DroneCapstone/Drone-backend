@@ -63,6 +63,10 @@ class RouteLegSchema(BaseModel):
     battery_energy_wh: Optional[float] = None
     battery_consumption_pct: Optional[int] = None
     remaining_battery_pct: Optional[int] = None
+    leg_type: str = "DISPATCH"  # DISPATCH (bay sang nhận hàng) hoặc DELIVERY (giao hàng)
+    is_dispatch: bool = False
+    payload_kg: Optional[float] = None
+    note: Optional[str] = None
 
 
 class HubBatteryStatus(BaseModel):
@@ -113,6 +117,14 @@ class RouteOptionSchema(BaseModel):
     is_selectable: bool = True
     unselectable_reason: Optional[str] = None
     relay_battery_status: list[HubBatteryStatus] = []
+    # Cross-Hub Drone Dispatch: thông tin điều phối Drone từ Hub khác sang Hub nhận hàng
+    is_cross_hub: bool = False
+    drone_home_hub_id: Optional[int] = None
+    drone_home_hub_name: Optional[str] = None
+    drone_home_hub_code: Optional[str] = None
+    pickup_hub_id: Optional[int] = None
+    pickup_hub_name: Optional[str] = None
+    pickup_hub_code: Optional[str] = None
 
 
 class MissionResponse(BaseModel):
@@ -281,6 +293,13 @@ class MissionPlanningAnalyzeResponse(BaseModel):
     assignedBatteryCapacityWh: Optional[float] = None
     assignedBatteryChargePct: Optional[int] = None
     assignedBatteryEnergyWh: Optional[float] = None
+    droneCurrentHubId: Optional[int] = None
+    droneCurrentHubName: Optional[str] = None
+    droneCurrentHubCode: Optional[str] = None
+    isCrossHubDispatch: bool = False
+    pickupHubId: Optional[int] = None
+    pickupHubName: Optional[str] = None
+    pickupHubCode: Optional[str] = None
     routes: list[RouteOptionSchema]
 
 class MissionCreateRequest(BaseModel):
