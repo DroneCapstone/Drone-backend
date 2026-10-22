@@ -780,6 +780,84 @@ def _compute_battery_energy_wh(battery: Optional[Battery], default_capacity_wh: 
 
 
 
+async def _get_reserved_battery_info_map(
+    db: AsyncSession,
+    exclude_order_id: Optional[str] = None,
+    exclude_mission_id: Optional[str] = None,
+) -> dict[str, dict]:
+    """
+    Trả về mapping thông tin chi tiết nhiệm vụ giữ chỗ cho từng viên pin:
+    battery_id -> {
+        "mission_id": str,
+        "mission_code": str,
+        "mission_status": str,
+        "drone_id": str | None,
+        "order_id": str | None,
+        "reason": str,
+    }
+    """
+    active_statuses = [
+        MissionStatus.SCHEDULED,
+        MissionStatus.IN_PROGRESS,
+        MissionStatus.APPROVED,
+        MissionStatus.FLYING,
+        MissionStatus.ACTIVE_MISSION,
+    ]
+    info_map: dict[str, dict] = {}
+
+    m_stmt = select(Mission).where(
+        Mission.status.in_(active_statuses),
+        Mission.battery_id.is_not(None),
+    )
+    if exclude_order_id:
+        m_stmt = m_stmt.where(Mission.order_id != exclude_order_id)
+    if exclude_mission_id:
+        m_stmt = m_stmt.where(Mission.id != exclude_mission_id)
+
+    m_res = await db.execute(m_stmt)
+    for m in m_res.scalars().all():
+        if m.battery_id:
+            m_status = m.status.value if hasattr(m.status, "value") else str(m.status)
+            info_map[m.battery_id] = {
+                "mission_id": m.id,
+                "mission_code": m.id,
+                "mission_status": m_status,
+                "drone_id": m.drone_id,
+                "order_id": m.order_id,
+                "reason": f"Đang được sử dụng bởi Nhiệm vụ #{m.id} ({m_status})",
+            }
+
+    leg_stmt = (
+        select(MissionLeg, Mission)
+        .join(Mission, MissionLeg.mission_id == Mission.id)
+        .where(
+            Mission.status.in_(active_statuses),
+            MissionLeg.status.in_([MissionLegStatus.PENDING, MissionLegStatus.IN_PROGRESS]),
+            MissionLeg.battery_id.is_not(None),
+        )
+    )
+    if exclude_order_id:
+        leg_stmt = leg_stmt.where(Mission.order_id != exclude_order_id)
+    if exclude_mission_id:
+        leg_stmt = leg_stmt.where(Mission.id != exclude_mission_id)
+
+    leg_res = await db.execute(leg_stmt)
+    for leg, m in leg_res.all():
+        if leg.battery_id:
+            m_status = m.status.value if hasattr(m.status, "value") else str(m.status)
+            seq_info = f"Chặng {leg.sequence_no}" if leg.sequence_no else "Chặng trung gian"
+            info_map[leg.battery_id] = {
+                "mission_id": m.id,
+                "mission_code": m.id,
+                "mission_status": m_status,
+                "drone_id": m.drone_id,
+                "order_id": m.order_id,
+                "reason": f"Đang được sử dụng bởi Nhiệm vụ #{m.id} ({seq_info} - {m_status})",
+            }
+
+    return info_map
+
+
 async def _get_reserved_batteries_and_virtual_holds(
     db: AsyncSession,
     relay_hub_ids: Optional[list[int]] = None,
@@ -2211,7 +2289,9 @@ async def get_eligible_batteries_for_mission_planning(
     if not target_hub_id:
         target_hub_id = drone.current_hub_id
 
-    reserved_battery_ids, _ = await _get_reserved_batteries_and_virtual_holds(db)
+    reserved_info_map = await _get_reserved_battery_info_map(
+        db, exclude_order_id=order_id.strip() if order_id else None
+    )
     compatible_models = await get_compatible_battery_models(db, drone.model)
     default_cap = DEFAULT_DRONE_BATTERY_CAPACITY_WH.get(drone.model or "", 130.0)
 
@@ -2228,15 +2308,33 @@ async def get_eligible_batteries_for_mission_planning(
 
     eligible_list = []
     for b in all_bats:
-        if b.id in reserved_battery_ids:
-            continue
         if target_hub_id is not None and b.current_hub_id != target_hub_id and b.drone_id != drone.id:
-            continue
-        if b.drone_id is not None and b.drone_id != drone.id:
             continue
         if compatible_models and b.battery_model and b.battery_model not in compatible_models:
             continue
         cap_wh, charge_pct, avail_energy_wh = _compute_battery_energy_wh(b, default_cap)
+        is_installed = (b.drone_id == drone.id)
+
+        is_selectable = True
+        status_str = "READY"
+        assigned_mission_id = None
+        assigned_mission_code = None
+        assigned_mission_status = None
+        unavailable_reason = None
+
+        res_info = reserved_info_map.get(b.id)
+        if res_info:
+            is_selectable = False
+            status_str = "ASSIGNED_TO_MISSION"
+            assigned_mission_id = res_info.get("mission_id")
+            assigned_mission_code = res_info.get("mission_code")
+            assigned_mission_status = res_info.get("mission_status")
+            unavailable_reason = res_info.get("reason")
+        elif b.drone_id is not None and b.drone_id != drone.id:
+            is_selectable = False
+            status_str = "INSTALLED_ON_OTHER_DRONE"
+            unavailable_reason = f"Đang được gắn trên Drone #{b.drone_id}"
+
         eligible_list.append({
             "id": b.id,
             "serial_number": b.serial_number,
@@ -2246,18 +2344,26 @@ async def get_eligible_batteries_for_mission_planning(
             "available_energy_wh": round(avail_energy_wh, 2),
             "current_hub_id": b.current_hub_id,
             "drone_id": b.drone_id,
-            "is_installed_on_drone": b.drone_id == drone.id,
-            "available_status": "READY",
+            "is_installed_on_drone": is_installed,
+            "available_status": status_str,
+            "is_selectable": is_selectable,
+            "assigned_mission_id": assigned_mission_id,
+            "assigned_mission_code": assigned_mission_code,
+            "assigned_mission_status": assigned_mission_status,
+            "unavailable_reason": unavailable_reason,
         })
 
     eligible_list.sort(
         key=lambda item: (
+            1 if item["is_selectable"] else 0,
             1 if item["is_installed_on_drone"] else 0,
             item["available_energy_wh"],
             item["charge_level_pct"],
         ),
         reverse=True,
     )
+
+    default_battery_id = next((item["id"] for item in eligible_list if item["is_selectable"]), None)
 
     return {
         "order_id": order_id.strip() if order_id else None,
@@ -2266,7 +2372,7 @@ async def get_eligible_batteries_for_mission_planning(
         "drone_name": drone.name,
         "drone_model": drone.model,
         "compatible_battery_models": compatible_models,
-        "default_battery_id": eligible_list[0]["id"] if eligible_list else None,
+        "default_battery_id": default_battery_id,
         "batteries": eligible_list,
     }
 

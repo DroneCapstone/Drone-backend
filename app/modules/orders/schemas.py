@@ -63,6 +63,11 @@ class BatteryEligibleSchema(BaseModel):
     drone_id: Optional[Union[str, int]] = None
     is_installed_on_drone: bool = False
     available_status: Optional[str] = "Ready"
+    is_selectable: bool = True
+    assigned_mission_id: Optional[str] = None
+    assigned_mission_code: Optional[str] = None
+    assigned_mission_status: Optional[str] = None
+    unavailable_reason: Optional[str] = None
 
 class DroneEligibleSchema(BaseModel):
     id: Union[str, int]
