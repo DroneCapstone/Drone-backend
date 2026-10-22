@@ -215,6 +215,12 @@ class TelemetryDataResponse(TelemetryDataCreate):
     weather_precipitation: Optional[float] = None
     weather_pressure: Optional[float] = None
     weather_cloud_cover: Optional[float] = None
+    # ── Failsafe In-flight Status ─────────────────────────────
+    failsafe_status: Optional[str] = "SAFE"
+    failsafe_alert: Optional[str] = None
+    is_diverted: bool = False
+    divert_hub_id: Optional[int] = None
+    divert_hub_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -272,6 +278,12 @@ class LiveTrackingDrone(BaseModel):
     weather_precipitation: Optional[float] = None
     weather_pressure: Optional[float] = None
     weather_cloud_cover: Optional[float] = None
+    # ── Failsafe In-flight Status ─────────────────────────────
+    failsafe_status: Optional[str] = "SAFE"
+    failsafe_alert: Optional[str] = None
+    is_diverted: bool = False
+    divert_hub_id: Optional[int] = None
+    divert_hub_name: Optional[str] = None
 
 
 class LiveTrackingResponse(BaseModel):
@@ -318,3 +330,62 @@ class MissionCreateRequest(BaseModel):
 
 
 
+
+
+# ── Failsafe & Dynamic In-flight Divert Schemas ───────────────
+
+class FailsafeEvaluateRequest(BaseModel):
+    current_lat: Optional[float] = None
+    current_lng: Optional[float] = None
+    current_altitude: Optional[float] = 50.0
+    override_battery_pct: Optional[float] = None
+    override_wind_speed: Optional[float] = None
+    simulate_wind_anomaly: bool = False  # Giả lập gặp gió lớn ngược chiều (> 8 m/s) làm suy hao pin nhanh
+
+class FailsafeHubInfo(BaseModel):
+    hub_id: int
+    hub_code: Optional[str] = None
+    hub_name: str
+    latitude: float
+    longitude: float
+    distance_km: float
+    estimated_battery_needed_pct: float
+    estimated_remaining_pct: float
+    is_safe: bool
+
+class FailsafeEvaluateResponse(BaseModel):
+    mission_id: str
+    current_status: str
+    drone_id: Optional[Union[str, int]] = None
+    current_lat: float
+    current_lng: float
+    current_battery_pct: float
+    wind_speed: float
+    wind_warning: bool
+    status: str  # SAFE | WARNING | RTH_TRIGGERED | DIVERT_TRIGGERED | EMERGENCY_LAND_TRIGGERED
+    tier: int    # 0: Bình thường | 1: RTH | 2: Divert Hub | 3: Emergency Landing
+    action: str  # CONTINUE | RETURN_TO_HOME | DIVERT_TO_HUB | EMERGENCY_LAND
+    reason: str
+    pnr_reached: bool
+    target_hub: Optional[FailsafeHubInfo] = None
+    origin_hub: Optional[FailsafeHubInfo] = None
+    recommended_hub: Optional[FailsafeHubInfo] = None
+    available_emergency_hubs: list[FailsafeHubInfo] = []
+    divert_route: list[dict] = []
+    can_execute: bool = False
+
+class FailsafeExecuteRequest(BaseModel):
+    action: str  # RETURN_TO_HOME | DIVERT_TO_HUB | EMERGENCY_LAND
+    target_hub_id: Optional[int] = None
+    reason: Optional[str] = "Phát hiện suy hao pin bất thường giữa chặng"
+
+class FailsafeExecuteResponse(BaseModel):
+    mission_id: str
+    previous_status: str
+    current_status: str
+    action_taken: str
+    target_hub_id: Optional[int] = None
+    target_hub_name: Optional[str] = None
+    incident_id: Optional[int] = None
+    alert_id: Optional[int] = None
+    message: str

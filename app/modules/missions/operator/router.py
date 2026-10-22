@@ -20,6 +20,8 @@ from app.modules.missions.schemas import (
     TelemetryDataCreate, TelemetryDataResponse,
     LiveTrackingResponse, LiveTrackingDrone,
     HubCheckpointResponse, TelemetryIngestResponse,
+    FailsafeEvaluateRequest, FailsafeEvaluateResponse,
+    FailsafeExecuteRequest, FailsafeExecuteResponse, FailsafeHubInfo,
 )
 from app.modules.fleet.models import Drone, Battery, DroneStatus, batteries_status
 from app.modules.fleet.schemas import CheckAvailabilityRequest, AvailabilityResponse, AvailableBatterySchema
@@ -239,6 +241,20 @@ async def get_live_tracking(
             for t in recent_logs
         ]
 
+    # Lấy Incidents gần nhất cho các mission đang bay để phục vụ cảnh báo Failsafe
+    incidents_res = await db.execute(
+        select(Incident)
+        .where(
+            Incident.mission_id.in_(mission_ids),
+            Incident.status.in_([IncidentStatus.OPEN, IncidentStatus.INVESTIGATING]),
+        )
+        .order_by(Incident.id.desc())
+    )
+    incidents_by_mid = {}
+    for inc in incidents_res.scalars().all():
+        if inc.mission_id not in incidents_by_mid:
+            incidents_by_mid[inc.mission_id] = inc
+
     drones = []
     for mission in flying_missions:
         log = latest_logs.get(mission.id)
@@ -307,6 +323,31 @@ async def get_live_tracking(
             bat_obj.charge_level_pct if bat_obj and bat_obj.charge_level_pct is not None else None
         )
 
+        inc = incidents_by_mid.get(mission.id)
+        failsafe_status = "SAFE"
+        failsafe_alert = None
+        is_diverted = False
+        divert_hub_id = None
+        divert_hub_name = None
+
+        if inc and "[FAILSAFE DIVERT]" in (inc.description or ""):
+            failsafe_status = "DIVERTED"
+            failsafe_alert = inc.description
+            is_diverted = True
+            divert_hub_id = mission.destination_hub_id
+            if divert_hub_id and divert_hub_id in hubs_map:
+                divert_hub_name = hubs_map[divert_hub_id].name
+        elif inc and "[FAILSAFE RTH]" in (inc.description or ""):
+            failsafe_status = "RTH"
+            failsafe_alert = inc.description
+            is_diverted = True
+            divert_hub_id = mission.origin_hub_id
+            if divert_hub_id and divert_hub_id in hubs_map:
+                divert_hub_name = hubs_map[divert_hub_id].name
+        elif bat_pct is not None and bat_pct < 20:
+            failsafe_status = "WARNING"
+            failsafe_alert = f"Cảnh báo pin thấp: {bat_pct}% (tiệm cận ngưỡng an toàn 20%)"
+
         drones.append(
             LiveTrackingDrone(
                 mission_id=mission.id,
@@ -334,6 +375,12 @@ async def get_live_tracking(
                 weather_precipitation=log.weather_precipitation if log else None,
                 weather_pressure=log.weather_pressure if log else None,
                 weather_cloud_cover=log.weather_cloud_cover if log else None,
+                # Failsafe in-flight fields
+                failsafe_status=failsafe_status,
+                failsafe_alert=failsafe_alert,
+                is_diverted=is_diverted,
+                divert_hub_id=divert_hub_id,
+                divert_hub_name=divert_hub_name,
             )
         )
 
@@ -3440,5 +3487,487 @@ async def emergency_land(
             f"Emergency landing kích hoạt thành công. "
             f"Incident #{incident.id} và MaintenanceAlert #{alert.id} đã được tạo. "
             f"Drone #{mission.drone_id} chuyển sang MAINTENANCE."
+        ),
+    )
+
+
+
+# ── 3-Tier Failsafe Engine & Dynamic In-flight Divert ────────────────────────────
+
+CRUISE_ALTITUDE_M = 50.0            # Độ cao tĩnh không đô thị chuẩn (50m - 80m theo QCVN)
+CRUISE_SPEED_MS = 12.0              # Vận tốc bay hành trình (12 m/s ~ 43.2 km/h)
+SAFE_BATTERY_RESERVE_PCT = 20.0     # Ngưỡng dự phòng an toàn bắt buộc khi tới đích (20%)
+EMERGENCY_LAND_PCT = 10.0           # Ngưỡng cạn kiệt bắt buộc hạ cánh thẳng đứng (< 10%)
+HIGH_WIND_THRESHOLD_MS = 8.0        # Ngưỡng gió bất lợi cấp 5 Beaufort (8 m/s)
+BASE_CONSUMPTION_PCT_PER_KM = 2.0   # Mức tiêu thụ pin chuẩn: 2.0% mỗi km bay
+
+
+@router.post("/{mission_id}/failsafe-eval", response_model=FailsafeEvaluateResponse)
+async def evaluate_mission_failsafe(
+    mission_id: str,
+    body: FailsafeEvaluateRequest = FailsafeEvaluateRequest(),
+    user: CurrentUser = Depends(allow_operator),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Operator & Simulator] Đánh giá an toàn chuyến bay theo cơ chế 3-Tier Failsafe Engine.**
+    Phát hiện sụt pin bất thường, gió lớn, tính toán điểm không thể quay đầu (PNR),
+    và tự động đề xuất chuyển hướng hạ cánh khẩn cấp (Dynamic In-flight Divert).
+    """
+    mission = await db.get(Mission, mission_id)
+    if not mission:
+        raise HTTPException(status_code=404, detail="Mission not found")
+
+    # 1. Lấy thông tin Drone & Battery
+    drone = await db.get(Drone, str(mission.drone_id)) if mission.drone_id else None
+    battery = await db.get(Battery, str(mission.battery_id)) if mission.battery_id else None
+
+    # 2. Lấy Telemetry log mới nhất
+    latest_log_res = await db.execute(
+        select(TelemetryLog)
+        .where(TelemetryLog.mission_id == mission_id)
+        .order_by(TelemetryLog.timestamp.desc())
+        .limit(1)
+    )
+    latest_log = latest_log_res.scalars().first()
+
+    # 3. Lấy chặng bay hiện tại (Leg đang IN_PROGRESS hoặc chặng đầu tiên PENDING)
+    leg_res = await db.execute(
+        select(MissionLeg)
+        .where(MissionLeg.mission_id == mission_id)
+        .order_by(MissionLeg.sequence_no.asc())
+    )
+    all_legs = leg_res.scalars().all()
+    curr_leg = None
+    for l in all_legs:
+        if l.status == MissionLegStatus.IN_PROGRESS:
+            curr_leg = l
+            break
+    if not curr_leg and all_legs:
+        curr_leg = all_legs[0]
+
+    # Lấy tọa độ trạm gốc và trạm đích của chặng
+    origin_hub_id = curr_leg.from_hub_id if curr_leg and curr_leg.from_hub_id else mission.origin_hub_id
+    target_hub_id = curr_leg.to_hub_id if curr_leg and curr_leg.to_hub_id else mission.destination_hub_id
+
+    origin_hub = await db.get(Hub, origin_hub_id) if origin_hub_id else None
+    target_hub = await db.get(Hub, target_hub_id) if target_hub_id else None
+
+    # Tọa độ hiện tại của Drone
+    curr_lat = body.current_lat
+    curr_lng = body.current_lng
+    if curr_lat is None or curr_lng is None:
+        if latest_log:
+            curr_lat = latest_log.latitude
+            curr_lng = latest_log.longitude
+        elif origin_hub and origin_hub.latitude and origin_hub.longitude:
+            curr_lat = origin_hub.latitude
+            curr_lng = origin_hub.longitude
+        else:
+            curr_lat = 10.7769
+            curr_lng = 106.7009
+
+    # Mức pin hiện tại
+    if body.override_battery_pct is not None:
+        curr_bat = max(0.0, min(100.0, float(body.override_battery_pct)))
+    elif drone and drone.battery_level_pct is not None:
+        curr_bat = float(drone.battery_level_pct)
+    elif battery and battery.charge_level_pct is not None:
+        curr_bat = float(battery.charge_level_pct)
+    else:
+        curr_bat = 100.0
+
+    # Vận tốc gió
+    if body.override_wind_speed is not None:
+        wind_spd = float(body.override_wind_speed)
+    elif body.simulate_wind_anomaly:
+        wind_spd = 11.5  # Gió cấp 6 Beaufort (> 10.8 m/s)
+    elif latest_log and latest_log.weather_wind_speed is not None:
+        wind_spd = float(latest_log.weather_wind_speed)
+    else:
+        wind_spd = 3.2
+
+    # Đánh giá gió & mức tiêu thụ pin hiệu dụng
+    wind_warning = wind_spd > HIGH_WIND_THRESHOLD_MS
+    wind_factor = (1.0 + (wind_spd - HIGH_WIND_THRESHOLD_MS) * 0.12) if wind_warning else 1.0
+    effective_consumption_per_km = BASE_CONSUMPTION_PCT_PER_KM * wind_factor
+
+    def _calc_dist_km(lat1, lon1, lat2, lon2):
+        if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
+            return 999.0
+        R = 6371.0
+        p1, p2 = math.radians(lat1), math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lon2 - lon1)
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return round(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 3)
+
+    # 4. Tính toán chặng đến Đích và quay về Gốc
+    dist_to_dest_km = _calc_dist_km(curr_lat, curr_lng, target_hub.latitude if target_hub else None, target_hub.longitude if target_hub else None)
+    pct_to_dest = round(dist_to_dest_km * effective_consumption_per_km, 2)
+    rem_at_dest = round(curr_bat - pct_to_dest, 2)
+
+    dist_to_origin_km = _calc_dist_km(curr_lat, curr_lng, origin_hub.latitude if origin_hub else None, origin_hub.longitude if origin_hub else None)
+    pct_to_origin = round(dist_to_origin_km * effective_consumption_per_km, 2)
+    rem_at_origin = round(curr_bat - pct_to_origin, 2)
+
+    pnr_reached = (dist_to_origin_km >= dist_to_dest_km) or (rem_at_origin < SAFE_BATTERY_RESERVE_PCT)
+
+    target_info = FailsafeHubInfo(
+        hub_id=target_hub.id if target_hub else 0,
+        hub_code=target_hub.code if target_hub else "",
+        hub_name=target_hub.name if target_hub else "Unknown Target Hub",
+        latitude=target_hub.latitude if target_hub else 0.0,
+        longitude=target_hub.longitude if target_hub else 0.0,
+        distance_km=dist_to_dest_km,
+        estimated_battery_needed_pct=pct_to_dest,
+        estimated_remaining_pct=rem_at_dest,
+        is_safe=(rem_at_dest >= SAFE_BATTERY_RESERVE_PCT),
+    ) if target_hub else None
+
+    origin_info = FailsafeHubInfo(
+        hub_id=origin_hub.id if origin_hub else 0,
+        hub_code=origin_hub.code if origin_hub else "",
+        hub_name=origin_hub.name if origin_hub else "Unknown Origin Hub",
+        latitude=origin_hub.latitude if origin_hub else 0.0,
+        longitude=origin_hub.longitude if origin_hub else 0.0,
+        distance_km=dist_to_origin_km,
+        estimated_battery_needed_pct=pct_to_origin,
+        estimated_remaining_pct=rem_at_origin,
+        is_safe=(rem_at_origin >= SAFE_BATTERY_RESERVE_PCT),
+    ) if origin_hub else None
+
+    # 5. Quét tất cả Hubs để tìm trạm dự phòng khẩn cấp an toàn nhất
+    hubs_res = await db.execute(select(Hub).where(and_(Hub.latitude.isnot(None), Hub.longitude.isnot(None))))
+    all_hubs = hubs_res.scalars().all()
+
+    emergency_candidates: list[FailsafeHubInfo] = []
+    for h in all_hubs:
+        d_km = _calc_dist_km(curr_lat, curr_lng, h.latitude, h.longitude)
+        needed_pct = round(d_km * effective_consumption_per_km, 2)
+        rem_pct = round(curr_bat - needed_pct, 2)
+        is_safe = rem_pct >= EMERGENCY_LAND_PCT
+        info = FailsafeHubInfo(
+            hub_id=h.id,
+            hub_code=h.code,
+            hub_name=h.name,
+            latitude=h.latitude,
+            longitude=h.longitude,
+            distance_km=d_km,
+            estimated_battery_needed_pct=needed_pct,
+            estimated_remaining_pct=rem_pct,
+            is_safe=is_safe,
+        )
+        if is_safe:
+            emergency_candidates.append(info)
+
+    # Lọc trạm khác đích hiện tại để làm trạm chuyển hướng dự phòng
+    alt_candidates = [c for c in emergency_candidates if (target_hub is None or c.hub_id != target_hub.id)]
+    tier_a_hubs = sorted([c for c in alt_candidates if c.estimated_remaining_pct >= SAFE_BATTERY_RESERVE_PCT], key=lambda x: x.distance_km)
+    tier_b_hubs = sorted([c for c in alt_candidates if c.estimated_remaining_pct >= EMERGENCY_LAND_PCT], key=lambda x: x.distance_km)
+
+    recommended_hub = tier_a_hubs[0] if tier_a_hubs else (tier_b_hubs[0] if tier_b_hubs else None)
+
+    # 6. Ra quyết định 3-Tier Failsafe Engine
+    divert_route = []
+    if curr_bat < EMERGENCY_LAND_PCT or (not emergency_candidates):
+        # TIER 3: Mức pin nguy cấp cạn kiệt (< 10%)
+        status = "EMERGENCY_LAND_TRIGGERED"
+        tier = 3
+        action = "EMERGENCY_LAND"
+        reason = (
+            f"Mức pin nguy cấp ({curr_bat:.1f}%) không đủ duy trì bay tới bất kỳ trạm nào an toàn. "
+            f"Kích hoạt hạ cánh khẩn cấp thẳng đứng có kiểm soát tại vị trí an toàn định trước."
+        )
+        can_execute = True
+
+    elif rem_at_dest < SAFE_BATTERY_RESERVE_PCT or (wind_warning and rem_at_dest < 25.0):
+        # Vi phạm ngưỡng an toàn 20% khi tới đích!
+        if (not pnr_reached) and rem_at_origin >= SAFE_BATTERY_RESERVE_PCT and origin_info:
+            # TIER 1: Chưa qua PNR -> Return-to-Home
+            status = "RTH_TRIGGERED"
+            tier = 1
+            action = "RETURN_TO_HOME"
+            recommended_hub = origin_info
+            reason = (
+                f"Trước điểm PNR: Gặp bất lợi thời tiết/sụt pin khiến dự phóng tới đích chỉ còn {rem_at_dest:.1f}% (< 20%). "
+                f"Tự động kích hoạt Return-to-Home (RTH) quay đầu về trạm gốc {origin_hub.name if origin_hub else ''} "
+                f"(dự phóng tiếp đất an toàn với {rem_at_origin:.1f}% pin)."
+            )
+            can_execute = True
+        elif recommended_hub:
+            # TIER 2: Đã qua PNR -> Dynamic In-flight Divert to Nearest Relay Hub
+            status = "DIVERT_TRIGGERED"
+            tier = 2
+            action = "DIVERT_TO_HUB"
+            reason = (
+                f"Phát hiện suy hao pin bất thường ({curr_bat:.1f}%). "
+                f"Dự phóng tới đích chỉ còn {rem_at_dest:.1f}% (vi phạm ngưỡng an toàn 20%). "
+                f"Tự động kích hoạt chuyển hướng khẩn cấp về {recommended_hub.hub_name} cách {recommended_hub.distance_km:.2f}km "
+                f"(dự kiến tiếp đất an toàn với {recommended_hub.estimated_remaining_pct:.1f}% pin để sạc/đổi pin)."
+            )
+            can_execute = True
+        else:
+            status = "EMERGENCY_LAND_TRIGGERED"
+            tier = 3
+            action = "EMERGENCY_LAND"
+            reason = f"Không tìm thấy trạm dự phòng khả dụng trong bán kính an toàn. Kích hoạt hạ cánh khẩn cấp."
+            can_execute = True
+    else:
+        # TIER 0: An toàn hoặc Cảnh báo nhẹ
+        if rem_at_dest < 25.0 or wind_warning:
+            status = "WARNING"
+            tier = 0
+            action = "CONTINUE"
+            reason = (
+                f"Cảnh báo: Pin dự phóng tại đích còn {rem_at_dest:.1f}% (tiệm cận ngưỡng an toàn 20%). "
+                f"{'Gió mạnh ' + str(wind_spd) + 'm/s (> 8m/s). ' if wind_warning else ''}"
+                f"Hệ thống duy trì giám sát telemetry liên tục."
+            )
+            can_execute = False
+        else:
+            status = "SAFE"
+            tier = 0
+            action = "CONTINUE"
+            reason = f"Chuyến bay ổn định. Pin dự kiến khi tới trạm đích còn {rem_at_dest:.1f}% (đạt chuẩn an toàn >= 20%)."
+            can_execute = False
+
+    # 7. Sinh waypoints cho đường bay chuyển hướng khẩn cấp (vẽ line màu cam/đỏ trên bản đồ)
+    if action in ("DIVERT_TO_HUB", "RETURN_TO_HOME") and recommended_hub:
+        target_lat = recommended_hub.latitude
+        target_lng = recommended_hub.longitude
+        STEPS = 6
+        for i in range(STEPS + 1):
+            t = i / float(STEPS)
+            wp_lat = round(curr_lat + (target_lat - curr_lat) * t, 6)
+            wp_lng = round(curr_lng + (target_lng - curr_lng) * t, 6)
+            divert_route.append({
+                "step": i,
+                "latitude": wp_lat,
+                "longitude": wp_lng,
+                "altitude": CRUISE_ALTITUDE_M,
+            })
+
+    return FailsafeEvaluateResponse(
+        mission_id=mission.id,
+        current_status=mission.status.value if hasattr(mission.status, "value") else str(mission.status),
+        drone_id=mission.drone_id,
+        current_lat=round(curr_lat, 6),
+        current_lng=round(curr_lng, 6),
+        current_battery_pct=round(curr_bat, 1),
+        wind_speed=round(wind_spd, 1),
+        wind_warning=wind_warning,
+        status=status,
+        tier=tier,
+        action=action,
+        reason=reason,
+        pnr_reached=pnr_reached,
+        target_hub=target_info,
+        origin_hub=origin_info,
+        recommended_hub=recommended_hub,
+        available_emergency_hubs=tier_a_hubs + tier_b_hubs,
+        divert_route=divert_route,
+        can_execute=can_execute,
+    )
+
+
+@router.post("/{mission_id}/failsafe-execute", response_model=FailsafeExecuteResponse)
+async def execute_mission_failsafe(
+    mission_id: str,
+    body: FailsafeExecuteRequest,
+    user: CurrentUser = Depends(allow_operator),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Operator & System] Thực thi hành động an toàn theo quyết định của Failsafe Engine.**
+    - DIVERT_TO_HUB: Chuyển hướng chặng bay sang Hub an toàn lân cận, tạo Incident HIGH, tạo MaintenanceAlert.
+    - RETURN_TO_HOME: Quay đầu về Hub xuất phát, tạo Incident MEDIUM.
+    - EMERGENCY_LAND: Hạ cánh khẩn cấp thẳng đứng, chuyển Drone sang MAINTENANCE.
+    """
+    from app.modules.system.models import Notification, NotificationType
+    from app.modules.auth.models import User, ROLE_NAME_TO_ID
+    from app.shared.roles import UserRole as _Role
+
+    mission = await db.get(Mission, mission_id)
+    if not mission:
+        raise HTTPException(status_code=404, detail="Mission not found")
+
+    active_statuses = {
+        MissionStatus.FLYING,
+        MissionStatus.IN_PROGRESS,
+        MissionStatus.ACTIVE_MISSION,
+        MissionStatus.APPROVED,
+    }
+    if mission.status not in active_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Không thể thực thi failsafe cho mission đang ở trạng thái '{mission.status.value}'. "
+                   f"Chỉ áp dụng cho mission đang hoạt động (Flying/In Progress/Approved)."
+        )
+
+    now = get_vn_naive_datetime()
+    previous_status = mission.status.value if hasattr(mission.status, "value") else str(mission.status)
+
+    # 1. Xử lý hạ cánh khẩn cấp (EMERGENCY_LAND)
+    if body.action == "EMERGENCY_LAND":
+        mission.status = MissionStatus.INCIDENT_RETURN
+        mission.end_time = now
+
+        incident = Incident(
+            mission_id=mission.id,
+            drone_id=str(mission.drone_id) if mission.drone_id else None,
+            reporter_id=user.id,
+            severity=IncidentSeverity.HIGH,
+            description=f"[EMERGENCY LAND - FAILSAFE] Mission #{mission_id} — {body.reason}",
+            status=IncidentStatus.OPEN,
+            reported_at=now,
+            requires_technical_inspection=True,
+        )
+        db.add(incident)
+        await db.flush()
+
+        alert = MaintenanceAlert(
+            drone_id=str(mission.drone_id) if mission.drone_id else None,
+            source="FailsafeEmergencyLand",
+            incident_id=incident.id,
+            mission_id=str(mission.id),
+            title=f"Hạ cánh khẩn cấp Failsafe — Drone #{mission.drone_id} cần kiểm tra ngay",
+            status="Pending",
+            created_at=now,
+        )
+        db.add(alert)
+        await db.flush()
+
+        if mission.drone_id:
+            drone = await db.get(Drone, str(mission.drone_id))
+            if drone:
+                drone.status = DroneStatus.MAINTENANCE
+
+        await db.commit()
+
+        return FailsafeExecuteResponse(
+            mission_id=mission.id,
+            previous_status=previous_status,
+            current_status=MissionStatus.INCIDENT_RETURN.value,
+            action_taken="EMERGENCY_LAND",
+            incident_id=incident.id,
+            alert_id=alert.id,
+            message="Kích hoạt hạ cánh khẩn cấp thành công. Drone chuyển sang MAINTENANCE.",
+        )
+
+    # 2. Xử lý Chuyển hướng sang Hub lân cận (DIVERT_TO_HUB) hoặc Quay về gốc (RETURN_TO_HOME)
+    target_hub_id = body.target_hub_id
+    if body.action == "RETURN_TO_HOME":
+        target_hub_id = mission.origin_hub_id
+
+    if not target_hub_id:
+        raise HTTPException(status_code=400, detail="Thiếu target_hub_id cho hành động chuyển hướng khẩn cấp.")
+
+    target_hub = await db.get(Hub, target_hub_id)
+    if not target_hub:
+        raise HTTPException(status_code=404, detail=f"Target Hub #{target_hub_id} not found")
+
+    # Lấy chặng bay đang IN_PROGRESS hoặc chặng đầu tiên PENDING để chuyển hướng đích
+    leg_res = await db.execute(
+        select(MissionLeg)
+        .where(MissionLeg.mission_id == mission_id)
+        .order_by(MissionLeg.sequence_no.asc())
+    )
+    all_legs = leg_res.scalars().all()
+    curr_leg = None
+    for l in all_legs:
+        if l.status == MissionLegStatus.IN_PROGRESS:
+            curr_leg = l
+            break
+    if not curr_leg and all_legs:
+        curr_leg = all_legs[0]
+        curr_leg.status = MissionLegStatus.IN_PROGRESS
+
+    if curr_leg:
+        curr_leg.to_hub_id = target_hub.id
+
+    # Đóng/xóa các chặng phía sau vì hành trình đã được chuyển hướng sang trạm dự phòng
+    if curr_leg:
+        for l in all_legs:
+            if (l.sequence_no or 0) > (curr_leg.sequence_no or 0):
+                await db.delete(l)
+
+    mission.destination_hub_id = target_hub.id
+
+    # Tạo Incident ghi nhận sự cố chuyển hướng
+    incident_tag = "[FAILSAFE DIVERT]" if body.action == "DIVERT_TO_HUB" else "[FAILSAFE RTH]"
+    incident = Incident(
+        mission_id=mission.id,
+        drone_id=str(mission.drone_id) if mission.drone_id else None,
+        reporter_id=user.id,
+        severity=IncidentSeverity.HIGH if body.action == "DIVERT_TO_HUB" else IncidentSeverity.MEDIUM,
+        description=f"{incident_tag} Mission #{mission_id} tự động chuyển hướng sang {target_hub.name} (Hub #{target_hub.id}). Lý do: {body.reason}",
+        status=IncidentStatus.INVESTIGATING,
+        reported_at=now,
+        requires_technical_inspection=True,
+    )
+    db.add(incident)
+    await db.flush()
+
+    # Tạo MaintenanceAlert
+    alert = MaintenanceAlert(
+        drone_id=str(mission.drone_id) if mission.drone_id else None,
+        source="FailsafeDivert",
+        incident_id=incident.id,
+        mission_id=str(mission.id),
+        title=f"Failsafe chuyển hướng — Drone #{mission.drone_id} đáp tại {target_hub.name} cần kiểm tra pin",
+        status="Pending",
+        created_at=now,
+    )
+    db.add(alert)
+    await db.flush()
+
+    # Gửi Thông báo cho Operator & Customer
+    op_role_id = ROLE_NAME_TO_ID.get(_Role.OPERATOR)
+    op_result = await db.execute(select(User.id).where(User.role_id == op_role_id))
+    operator_ids = op_result.scalars().all()
+
+    notif_title = f"🚨 CHUYỂN HƯỚNG KHẨN CẤP — Mission #{mission_id}"
+    notif_msg = (
+        f"Hệ thống Failsafe đã kích hoạt chuyển hướng chuyến bay #{mission_id} "
+        f"(Drone #{mission.drone_id}) sang {target_hub.name} (Hub #{target_hub.id}). "
+        f"Lý do: {body.reason}."
+    )
+    for op_id in operator_ids:
+        db.add(Notification(
+            user_id=op_id,
+            title=notif_title,
+            message=notif_msg,
+            notifications_type=NotificationType.SYSTEM_ALERT,
+            mission_id=str(mission.id),
+            reference_id=str(incident.id),
+            created_at=now,
+        ))
+
+    if mission.customer_id:
+        db.add(Notification(
+            user_id=mission.customer_id,
+            title="Thông báo hành trình chuyến bay",
+            message=f"Chuyến bay #{mission_id} đang tạm thời chuyển hướng sang trạm kỹ thuật {target_hub.name} để kiểm tra an toàn tối ưu.",
+            notifications_type=NotificationType.MISSION_STATUS,
+            mission_id=str(mission.id),
+            created_at=now,
+        ))
+
+    await db.commit()
+
+    return FailsafeExecuteResponse(
+        mission_id=mission.id,
+        previous_status=previous_status,
+        current_status=mission.status.value if hasattr(mission.status, "value") else str(mission.status),
+        action_taken=body.action,
+        target_hub_id=target_hub.id,
+        target_hub_name=target_hub.name,
+        incident_id=incident.id,
+        alert_id=alert.id,
+        message=(
+            f"Failsafe {body.action} thực thi thành công. "
+            f"Tuyến bay đã được chuyển hướng về {target_hub.name}. "
+            f"Incident #{incident.id} và MaintenanceAlert #{alert.id} đã được tạo."
         ),
     )

@@ -30,10 +30,16 @@ from app.modules.system.models import Hub
 from app.modules.fleet.models import Drone, Battery
 
 
-# ── Cấu hình ─────────────────────────────────────────────────────────────────
+# ── Cấu hình & Thông số kỹ thuật chuẩn hóa ────────────────────────────────────
 
 INTERVAL_SEC = 3        # Giây giữa mỗi điểm telemetry
 STEPS_PER_LEG = 20      # Số điểm nội suy mỗi chặng (tăng lên để mượt hơn)
+
+# Thông số tĩnh không đô thị & bay an toàn (Theo chuẩn QCVN & Luật Phòng không)
+CRUISE_ALTITUDE = 50.0  # Độ cao bay hành trình tĩnh không đô thị chuẩn (50m - 80m)
+CRUISE_SPEED = 12.0     # Vận tốc bay hành trình (12 m/s ~ 43.2 km/h)
+MAX_WIND_LIMIT = 8.0    # Ngưỡng gió an toàn tối đa (8.0 m/s ~ Cấp 5 Beaufort)
+SAFE_BATTERY_RESERVE_PCT = 20.0 # Ngưỡng pin an toàn tối thiểu (20%)
 
 
 # ── Haversine helper ──────────────────────────────────────────────────────────
@@ -157,9 +163,9 @@ async def simulate_mission_flight(mission_id: str) -> None:
     for idx, (lat, lng) in enumerate(waypoints):
         await asyncio.sleep(INTERVAL_SEC)
 
-        # Giả lập sensor values
-        altitude     = round(50.0 + math.sin(idx * 0.3) * 5, 2)
-        speed        = round(12.0 + math.cos(idx * 0.2) * 3, 2)
+        # Giả lập sensor values chuẩn hóa
+        altitude     = round(CRUISE_ALTITUDE + math.sin(idx * 0.3) * 3, 2)
+        speed        = round(CRUISE_SPEED + math.cos(idx * 0.2) * 1.5, 2)
         battery_volt = round(max(18.0, battery_volt - 0.04), 2)
         energy_wh    = round(energy_wh + 0.8, 3)
         wind_speed   = round(2.0 + math.sin(idx * 0.5) * 1.5 + random.uniform(-0.2, 0.2), 2)
@@ -222,6 +228,7 @@ async def simulate_mission_flight(mission_id: str) -> None:
                     f"[SIMULATOR] [{idx+1:>3}/{total_points}] "
                     f"({lat:.6f}, {lng:.6f}) "
                     f"alt={altitude}m spd={speed}m/s bat={battery_volt}V pin={new_charge_pct}%"
+                    + (f" ⚠️ [FAILSAFE WARNING: PIN THẤP < 20%]" if new_charge_pct < SAFE_BATTERY_RESERVE_PCT else "")
                 )
 
             except Exception as e:
