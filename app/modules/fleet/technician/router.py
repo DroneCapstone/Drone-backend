@@ -513,21 +513,72 @@ async def confirm_arrival(
                         order_obj.origin_hub_id = receiving_hub_id
                     order_obj.updated_at = now
 
-                    # Thông báo cho Customer: đơn hàng tạm hoãn do sự cố kỹ thuật và đang được sắp xếp lại
-                    if order_obj.customer_id:
-                        from app.modules.system.models import Notification as _Notif, NotificationType as _NT
-                        db.add(_Notif(
-                            user_id=order_obj.customer_id,
-                            title="Đơn hàng tạm hoãn do sự cố kỹ thuật",
-                            message=(
-                                f"Đơn hàng #{order_obj.id} gặp sự cố trong quá trình bay và đã được đưa về "
-                                f"{hub_name or 'Hub an toàn'}. Hệ thống đang sắp xếp chuyến bay thay thế."
-                            ),
-                            notifications_type=_NT.MISSION_STATUS,
-                            reference_id=f"DRONE_INCIDENT_{mission.id}",
-                            mission_id=str(mission.id),
-                            created_at=now,
-                        ))
+                    # Chỉ gửi email + notification nếu mission đang IN_PROGRESS/FLYING (không gửi nếu mission đã hoàn thành)
+                    if mission.status in [MissionStatus.IN_PROGRESS, MissionStatus.FLYING, MissionStatus.ACTIVE_MISSION, MissionStatus.SCHEDULED]:
+                        # Gửi email cho cả sender (customer) và receiver
+                        incident_detail = ""
+                        if body and body.issue_description:
+                            incident_detail = body.issue_description.strip()
+                        elif open_incident and open_incident.description:
+                            incident_detail = open_incident.description.strip()
+                        
+                        # Email cho sender (khách hàng gửi hàng)
+                        if order_obj.sender_email:
+                            from app.core.email import send_incident_notification_email
+                            await send_incident_notification_email(
+                                to_email=order_obj.sender_email,
+                                order_id=order_obj.id,
+                                incident_detail=incident_detail,
+                                role="sender"
+                            )
+                        
+                        # Email cho receiver (khách hàng nhận hàng)
+                        if order_obj.receiver_email:
+                            from app.core.email import send_incident_notification_email
+                            await send_incident_notification_email(
+                                to_email=order_obj.receiver_email,
+                                order_id=order_obj.id,
+                                incident_detail=incident_detail,
+                                role="receiver"
+                            )
+                        
+                        # Notification cho sender (customer)
+                        if order_obj.customer_id:
+                            from app.modules.system.models import Notification as _Notif, NotificationType as _NT
+                            db.add(_Notif(
+                                user_id=order_obj.customer_id,
+                                title="⚠️ Sự cố chuyến bay — Đơn hàng tạm hoãn",
+                                message=(
+                                    f"Đơn hàng #{order_obj.id} gặp sự cố kỹ thuật và đã được đưa về "
+                                    f"{hub_name or 'Hub an toàn'}. "
+                                    f"Hệ thống đang sắp xếp lại chuyến bay. "
+                                    f"Chi tiết: {incident_detail or 'Đợi xác nhận từ kỹ thuật viên'}"
+                                ),
+                                notifications_type=_NT.MISSION_STATUS,
+                                reference_id=f"DRONE_INCIDENT_{mission.id}",
+                                mission_id=str(mission.id),
+                                created_at=now,
+                            ))
+                        
+                        # Notification cho receiver (recipient) nếu có user_id
+                        # Giả sử receiver_id được lưu trong Order hoặc cần lấy từ customer lookup
+                        # Hiện tại chỉ có sender_email/receiver_email, nên skip receiver notification tạm
+                    else:
+                        # Mission đã hoàn thành, chỉ gửi notification nội bộ
+                        if order_obj.customer_id:
+                            from app.modules.system.models import Notification as _Notif, NotificationType as _NT
+                            db.add(_Notif(
+                                user_id=order_obj.customer_id,
+                                title="Đơn hàng tạm hoãn do sự cố kỹ thuật",
+                                message=(
+                                    f"Đơn hàng #{order_obj.id} gặp sự cố trong quá trình bay và đã được đưa về "
+                                    f"{hub_name or 'Hub an toàn'}. Hệ thống đang sắp xếp chuyến bay thay thế."
+                                ),
+                                notifications_type=_NT.MISSION_STATUS,
+                                reference_id=f"DRONE_INCIDENT_{mission.id}",
+                                mission_id=str(mission.id),
+                                created_at=now,
+                            ))
                 else:
                     # Chuyến bay đáp hub đích thành công
                     order_obj.status = OrderStatus.DELIVERED_TO_HUB

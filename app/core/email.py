@@ -302,3 +302,75 @@ async def send_refund_email(
     except Exception as e:
         print(f"[EMAIL] Lỗi gửi refund email: {e}")
         return False
+
+
+async def send_incident_notification_email(
+    to_email: str,
+    order_id: str,
+    incident_detail: str = "",
+    role: str = "sender",  # "sender" hoặc "receiver"
+) -> bool:
+    """
+    Gửi email thông báo sự cố chuyến bay cho khách hàng (sender hoặc receiver).
+    """
+    if role == "sender":
+        role_label = "Khách hàng gửi hàng"
+        message_body = f"""
+        <p>Xin chào khách hàng gửi hàng,</p>
+        <p>Chúng tôi rất tiếc phải thông báo rằng đơn hàng <b>#{order_id}</b> của bạn gặp sự cố kỹ thuật trong quá trình vận chuyển bằng drone.</p>
+        <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 12px; margin: 16px 0;">
+            <p><b>Chi tiết sự cố:</b> {incident_detail or 'Đợi xác nhận từ kỹ thuật viên'}</p>
+        </div>
+        <p>Kiện hàng đã được đưa về kho an toàn và chúng tôi đang sắp xếp lại chuyến bay. Bạn sẽ nhận được thông báo tiếp theo khi chuyến bay được lên lịch lại.</p>
+        <p>Cảm ơn bạn đã sử dụng dịch vụ DroneOptAI.</p>
+        """
+    else:  # receiver
+        role_label = "Khách hàng nhận hàng"
+        message_body = f"""
+        <p>Xin chào khách hàng nhận hàng,</p>
+        <p>Chúng tôi rất tiếc phải thông báo rằng đơn hàng <b>#{order_id}</b> gặp sự cố kỹ thuật trong quá trình vận chuyển bằng drone.</p>
+        <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 12px; margin: 16px 0;">
+            <p><b>Chi tiết sự cố:</b> {incident_detail or 'Đợi xác nhận từ kỹ thuật viên'}</p>
+        </div>
+        <p>Kiện hàng đã được đưa về kho an toàn. Chúng tôi sẽ liên hệ với bạn khi chuyến bay được sắp xếp lại và hàng sẽ được gửi đến bạn vào thời gian phù hợp.</p>
+        <p>Cảm ơn sự kiên nhẫn của bạn.</p>
+        """
+    
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background-color: #dc2626; padding: 20px; text-align: center;">
+            <h1 style="color: #ffffff; margin: 0;">⚠️ Thông báo sự cố DroneOptAI</h1>
+        </div>
+        <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
+            {message_body}
+            <p style="color: #6b7280; font-size: 13px; margin-top: 16px;">
+                Nếu bạn có thắc mắc, vui lòng liên hệ hỗ trợ qua email này.
+            </p>
+        </div>
+        <div style="padding: 12px; text-align: center; color: #9ca3af; font-size: 12px;">
+            DroneOptAI — Hệ thống giao hàng bằng drone
+        </div>
+    </div>
+    """
+
+    try:
+        response = httpx.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "api-key": settings.BREVO_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
+                "to": [{"email": to_email}],
+                "subject": f"[DroneOptAI] ⚠️ Sự cố chuyến bay — Đơn hàng {order_id}",
+                "htmlContent": html_body,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        print(f"[EMAIL] Gửi incident notification email thành công đến {to_email} ({role_label})")
+        return True
+    except Exception as e:
+        print(f"[EMAIL] Lỗi gửi incident email: {e}")
+        return False
