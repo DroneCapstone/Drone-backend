@@ -423,6 +423,18 @@ async def refund_order(
         
         await db.commit()
         
+        # Gửi email hoàn tiền cho khách hàng gửi hàng (sender)
+        if order.sender_email:
+            from app.core.email import send_refund_email
+            await send_refund_email(
+                to_email=order.sender_email,
+                order_id=order_id,
+                refund_amount=refund_amount,
+                refund_reason=body.reason,
+            )
+        else:
+            print(f"[REFUND] Order {order_id} không có sender_email, bỏ qua gửi email")
+        
         return RefundResponse(
             message="Hoàn tiền thành công",
             order_id=order_id,
@@ -470,3 +482,52 @@ async def cancel_payment(
     await db.commit()
 
     return {"message": "Đã huỷ payment link", "order_id": order_id}
+
+
+# ── Danh sách giao dịch (Admin xem toàn bộ transactions) ────────────────────────
+
+@router.get(
+    "/transactions",
+    summary="Admin xem danh sách toàn bộ giao dịch",
+)
+async def get_transactions(
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Danh sách toàn bộ giao dịch trong hệ thống (Admin only).
+    
+    Response: Danh sách transactions với fields:
+    - payment_id
+    - order_id
+    - customer_id
+    - amount
+    - payment_status
+    - paid_at
+    - refund_at
+    - refund_amount
+    - refund_reason
+    - created_at
+    """
+    from app.modules.payments.schemas import TransactionResponse
+    
+    result = await db.execute(select(Order))
+    orders = result.scalars().all()
+    
+    transactions = [
+        TransactionResponse(
+            payment_id=order.id,
+            order_id=order.id,
+            customer_id=order.customer_id,
+            amount=order.delivery_fee or 0,
+            payment_status=order.payment_status.value if order.payment_status else "UNPAID",
+            paid_at=order.paid_at,
+            refund_at=order.refund_at,
+            refund_amount=order.refund_amount,
+            refund_reason=order.refund_reason,
+            created_at=order.created_at,
+        )
+        for order in orders
+    ]
+    
+    return transactions

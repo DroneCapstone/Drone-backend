@@ -242,3 +242,63 @@ async def send_hub_arrival_email(
     except Exception as e:
         print(f"[EMAIL] Lỗi gửi hub arrival email: {e}")
         return False
+
+
+async def send_refund_email(
+    to_email: str,
+    order_id: str,
+    refund_amount: float,
+    refund_reason: str,
+) -> bool:
+    """
+    Gửi email thông báo hoàn tiền cho khách hàng gửi hàng (shipper/sender).
+    """
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background-color: #16a34a; padding: 20px; text-align: center;">
+            <h1 style="color: #ffffff; margin: 0;">💰 DroneOptAI</h1>
+        </div>
+        <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
+            <h2 style="color: #111827;">Hoàn tiền đã được xử lý</h2>
+            <p>Xin chào,</p>
+            <p>Chúng tôi đã xử lý hoàn tiền cho đơn hàng của bạn. Vui lòng xem thông tin chi tiết dưới đây:</p>
+            
+            <div style="background-color: #ffffff; border: 1px solid #e5e7eb; padding: 16px; margin: 16px 0; border-radius: 6px;">
+                <p><b>Mã đơn hàng:</b> {order_id}</p>
+                <p><b>Số tiền hoàn:</b> {refund_amount:,.0f} VNĐ</p>
+                <p><b>Lý do hoàn tiền:</b> {refund_reason}</p>
+            </div>
+            
+            <p style="color: #4b5563;">Tiền hoàn sẽ được chuyển về tài khoản ngân hàng của bạn trong vòng 1-3 ngày làm việc.</p>
+            
+            <p style="color: #6b7280; font-size: 13px; margin-top: 12px;">
+                Nếu bạn có thắc mắc, vui lòng liên hệ hỗ trợ qua email này.
+            </p>
+        </div>
+        <div style="padding: 12px; text-align: center; color: #9ca3af; font-size: 12px;">
+            DroneOptAI — Hệ thống giao hàng bằng drone
+        </div>
+    </div>
+    """
+
+    try:
+        response = httpx.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "api-key": settings.BREVO_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
+                "to": [{"email": to_email}],
+                "subject": f"[DroneOptAI] Hoàn tiền đơn hàng {order_id} 💰",
+                "htmlContent": html_body,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        print(f"[EMAIL] Gửi refund email thành công đến {to_email}")
+        return True
+    except Exception as e:
+        print(f"[EMAIL] Lỗi gửi refund email: {e}")
+        return False
