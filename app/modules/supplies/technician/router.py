@@ -548,3 +548,175 @@ async def get_my_hub_transactions(
         }
         for r in rows
     ]
+
+
+# ══════════════════════════════════════════════════════════════════
+# REPLACEMENT REQUESTS (Technician)
+# Yêu cầu thay thế pin hoặc linh kiện
+# ══════════════════════════════════════════════════════════════════
+
+from app.modules.supplies.models import (
+    ReplacementRequest, ReplacementType, ReplacementStatus,
+)
+
+
+class ReplacementRequestCreate(BaseModel):
+    type: ReplacementType                        # BATTERY hoặc PART
+    damaged_item_id: Optional[str] = None        # battery_id / drone_id bị hỏng
+    part_category_id: Optional[int] = None       # bắt buộc nếu type=PART
+    quantity: int = 1
+    reason: str
+    photo_urls: Optional[List[str]] = None
+
+
+class ReplacementRequestOut(BaseModel):
+    request_id: int
+    type: str
+    damaged_item_id: Optional[str] = None
+    part_category_id: Optional[int] = None
+    part_name: Optional[str] = None
+    quantity: int
+    reason: str
+    status: str
+    hub_id: int
+    requested_by: str
+    photo_urls: Optional[List[str]] = None
+    supplied_item_id: Optional[str] = None
+    supplied_at: Optional[datetime] = None
+    rejection_reason: Optional[str] = None
+    created_at: datetime
+
+    class Config: from_attributes = True
+
+
+@router.post("/replacement-requests", response_model=ReplacementRequestOut,
+             summary="Tạo yêu cầu thay thế pin hoặc linh kiện")
+async def create_replacement_request(
+    body: ReplacementRequestCreate,
+    db: AsyncSession = Depends(get_async_db),
+    user: CurrentUser = Depends(allow_tech),
+):
+    hub_id = _get_tech_hub(user)
+
+    if body.type == ReplacementType.PART and not body.part_category_id:
+        raise HTTPException(status_code=400, detail="part_category_id là bắt buộc khi type=PART.")
+    if body.quantity < 1:
+        raise HTTPException(status_code=400, detail="Số lượng tối thiểu là 1.")
+
+    now = datetime.now(timezone.utc)
+    req = ReplacementRequest(
+        requested_by=user.id,
+        hub_id=hub_id,
+        type=body.type,
+        damaged_item_id=body.damaged_item_id,
+        part_category_id=body.part_category_id,
+        quantity=body.quantity,
+        reason=body.reason,
+        photo_urls=body.photo_urls,
+        status=ReplacementStatus.AWAITING_SUPPLY,
+        created_at=now,
+    )
+    db.add(req)
+    await db.commit()
+    await db.refresh(req)
+
+    # Notify Admin
+    try:
+        from app.modules.system.models import Notification, NotificationType
+        from app.modules.auth.models import User as _User, ROLE_NAME_TO_ID as _ROLE_MAP
+        from app.shared.roles import UserRole as _Role
+        _admin_role = _ROLE_MAP.get(_Role.ADMIN)
+        if _admin_role:
+            _admin_ids = (await db.execute(
+                select(_User.id).where(_User.role_id == _admin_role)
+            )).scalars().all()
+            type_label = "pin" if body.type == ReplacementType.BATTERY else "linh kiện"
+            for _uid in _admin_ids:
+                db.add(Notification(
+                    user_id=_uid,
+                    title=f"🔄 Yêu cầu thay {type_label} mới — Hub #{hub_id}",
+                    message=(
+                        f"Technician yêu cầu thay {body.quantity}x {type_label}. "
+                        f"Lý do: {body.reason[:80]}. Cần Admin cấp phát."
+                    ),
+                    notifications_type=NotificationType.MAINTENANCE,
+                    reference_id=f"REPLACEMENT_{req.id}",
+                    created_at=now,
+                ))
+            await db.commit()
+    except Exception:
+        pass
+
+    part_name = None
+    if req.part_category_id:
+        cat = await db.get(PartCategory, req.part_category_id)
+        part_name = cat.name if cat else None
+
+    return ReplacementRequestOut(
+        request_id=req.id, type=req.type.value, damaged_item_id=req.damaged_item_id,
+        part_category_id=req.part_category_id, part_name=part_name,
+        quantity=req.quantity, reason=req.reason, status=req.status.value,
+        hub_id=req.hub_id, requested_by=req.requested_by,
+        photo_urls=req.photo_urls, created_at=req.created_at,
+    )
+
+
+@router.get("/replacement-requests", response_model=List[ReplacementRequestOut],
+            summary="Danh sách yêu cầu thay thế của Technician")
+async def list_my_replacement_requests(
+    status: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_async_db),
+    user: CurrentUser = Depends(allow_tech),
+):
+    hub_id = _get_tech_hub(user)
+    q = select(ReplacementRequest).where(
+        and_(ReplacementRequest.requested_by == user.id,
+             ReplacementRequest.hub_id == hub_id)
+    ).order_by(ReplacementRequest.created_at.desc())
+    if status: q = q.where(ReplacementRequest.status == status)
+    if type: q = q.where(ReplacementRequest.type == type)
+
+    rows = (await db.execute(q)).scalars().all()
+    cat_ids = list({r.part_category_id for r in rows if r.part_category_id})
+    cats = {}
+    if cat_ids:
+        cats = {c.id: c.name for c in (await db.execute(
+            select(PartCategory).where(PartCategory.id.in_(cat_ids))
+        )).scalars().all()}
+
+    return [
+        ReplacementRequestOut(
+            request_id=r.id, type=r.type.value, damaged_item_id=r.damaged_item_id,
+            part_category_id=r.part_category_id, part_name=cats.get(r.part_category_id),
+            quantity=r.quantity, reason=r.reason, status=r.status.value,
+            hub_id=r.hub_id, requested_by=r.requested_by,
+            photo_urls=r.photo_urls, supplied_item_id=r.supplied_item_id,
+            supplied_at=r.supplied_at, rejection_reason=r.rejection_reason,
+            created_at=r.created_at,
+        ) for r in rows
+    ]
+
+
+@router.get("/replacement-requests/{request_id}", response_model=ReplacementRequestOut,
+            summary="Chi tiết yêu cầu thay thế")
+async def get_my_replacement_request(
+    request_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    user: CurrentUser = Depends(allow_tech),
+):
+    req = await db.get(ReplacementRequest, request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Yêu cầu không tồn tại.")
+    if req.requested_by != user.id and user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Không có quyền xem yêu cầu này.")
+    cat = await db.get(PartCategory, req.part_category_id) if req.part_category_id else None
+    return ReplacementRequestOut(
+        request_id=req.id, type=req.type.value, damaged_item_id=req.damaged_item_id,
+        part_category_id=req.part_category_id, part_name=cat.name if cat else None,
+        quantity=req.quantity, reason=req.reason, status=req.status.value,
+        hub_id=req.hub_id, requested_by=req.requested_by,
+        photo_urls=req.photo_urls, supplied_item_id=req.supplied_item_id,
+        supplied_at=req.supplied_at, rejection_reason=req.rejection_reason,
+        created_at=req.created_at,
+    )

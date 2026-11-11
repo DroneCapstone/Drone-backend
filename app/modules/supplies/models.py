@@ -165,3 +165,75 @@ class PartsRequest(Base):
     actual_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ── Replacement Request ────────────────────────────────────────────
+
+class ReplacementType(str, enum.Enum):
+    BATTERY = "BATTERY"   # Yêu cầu thay pin
+    PART    = "PART"      # Yêu cầu thay linh kiện
+
+
+class ReplacementStatus(str, enum.Enum):
+    AWAITING_SUPPLY = "AWAITING_SUPPLY"  # Chờ Admin cấp phát
+    SUPPLIED        = "SUPPLIED"          # Admin đã cấp phát thành công
+    REJECTED        = "REJECTED"          # Admin từ chối
+
+
+class ReplacementRequest(Base):
+    """
+    Yêu cầu thay thế pin hoặc linh kiện từ Technician.
+
+    - type=BATTERY → yêu cầu thay viên pin mới cho drone/hub
+    - type=PART    → yêu cầu thay linh kiện từ tồn kho Hub
+
+    Admin xử lý:
+    - SUPPLIED: cấp phát + trừ kho + notify Tech
+    - REJECTED: ghi rejection_reason + notify Tech
+
+    Không có trạng thái RECEIVED — Technician không cần xác nhận.
+    """
+    __tablename__ = "replacement_requests"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
+    # Người yêu cầu
+    requested_by: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    hub_id: Mapped[int] = mapped_column(Integer, ForeignKey("hubs.id"), nullable=False, index=True)
+
+    # Loại yêu cầu
+    type: Mapped[ReplacementType] = mapped_column(
+        SAEnum(ReplacementType, name="replacement_type_enum", create_type=True,
+               values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+    )
+
+    # Item bị hỏng (drone_id / battery_id / part label)
+    damaged_item_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Nếu type=PART → liên kết với PartCategory
+    part_category_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("part_categories.id"), nullable=True, index=True
+    )
+
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)        # lý do yêu cầu
+    photo_urls: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # Trạng thái
+    status: Mapped[ReplacementStatus] = mapped_column(
+        SAEnum(ReplacementStatus, name="replacement_status_enum", create_type=True,
+               values_callable=lambda x: [e.value for e in x]),
+        nullable=False, default=ReplacementStatus.AWAITING_SUPPLY, index=True,
+    )
+
+    # Admin review
+    reviewed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Cấp phát
+    supplied_item_id: Mapped[str | None] = mapped_column(String, nullable=True)  # battery_id or part_category_id
+    supplied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

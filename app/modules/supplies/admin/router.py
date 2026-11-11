@@ -37,6 +37,7 @@ from app.modules.supplies.models import (
 )
 from app.modules.missions.models import Mission, MissionStatus
 from app.modules.system.models import Hub
+from app.modules.fleet.models import Battery
 
 router = APIRouter(prefix="/admin/supplies", tags=["Admin - Supplies"])
 allow_admin = RoleChecker([UserRole.ADMIN])
@@ -1023,4 +1024,293 @@ async def bulk_receive(
         "hub_name": hub.name,
         "items": results,
         "total_cost": round(total_cost, 0),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# REPLACEMENT REQUESTS (Admin)
+# Danh sách, chi tiết, Confirm Supply, Reject
+# ══════════════════════════════════════════════════════════════════
+
+from app.modules.supplies.models import (
+    ReplacementRequest, ReplacementType, ReplacementStatus,
+)
+from app.modules.fleet.models import Battery, batteries_status
+
+
+class ReplacementRequestOut(BaseModel):
+    request_id: int
+    type: str
+    damaged_item_id: Optional[str] = None
+    part_category_id: Optional[int] = None
+    part_name: Optional[str] = None
+    quantity: int
+    reason: str
+    status: str
+    hub_id: int
+    requested_by: str
+    photo_urls: Optional[List[str]] = None
+    supplied_item_id: Optional[str] = None
+    supplied_at: Optional[datetime] = None
+    rejection_reason: Optional[str] = None
+    hub_stock_available: Optional[int] = None
+    created_at: datetime
+    reviewed_at: Optional[datetime] = None
+
+    class Config: from_attributes = True
+
+
+class SupplyBody(BaseModel):
+    supplied_item_id: Optional[str] = None  # battery_id nếu type=BATTERY, bỏ qua nếu type=PART
+    admin_note: Optional[str] = None
+
+
+class RejectBody(BaseModel):
+    rejection_reason: str
+
+
+@router.get("/replacement-requests", response_model=List[ReplacementRequestOut],
+            summary="Danh sách tất cả Replacement Requests")
+async def list_all_replacement_requests(
+    status: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+    hub_id: Optional[int] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_async_db),
+    user: CurrentUser = Depends(allow_admin),
+):
+    q = select(ReplacementRequest).order_by(
+        ReplacementRequest.created_at.desc()
+    ).limit(limit)
+    if status: q = q.where(ReplacementRequest.status == status)
+    if type:   q = q.where(ReplacementRequest.type == type)
+    if hub_id: q = q.where(ReplacementRequest.hub_id == hub_id)
+
+    rows = (await db.execute(q)).scalars().all()
+
+    cat_ids = list({r.part_category_id for r in rows if r.part_category_id})
+    cats = {}
+    if cat_ids:
+        cats = {c.id: c.name for c in (await db.execute(
+            select(PartCategory).where(PartCategory.id.in_(cat_ids))
+        )).scalars().all()}
+
+    # Tồn kho hiện tại cho PART requests
+    inv_map = {}
+    part_requests = [(r.hub_id, r.part_category_id) for r in rows
+                     if r.type == ReplacementType.PART and r.part_category_id]
+    if part_requests:
+        hub_ids_q = list({p[0] for p in part_requests})
+        pid_q = list({p[1] for p in part_requests})
+        inv_map = {(i.hub_id, i.part_category_id): i.quantity
+                   for i in (await db.execute(
+                       select(HubSupply).where(and_(
+                           HubSupply.hub_id.in_(hub_ids_q),
+                           HubSupply.part_category_id.in_(pid_q),
+                       ))
+                   )).scalars().all()}
+
+    return [
+        ReplacementRequestOut(
+            request_id=r.id, type=r.type.value, damaged_item_id=r.damaged_item_id,
+            part_category_id=r.part_category_id, part_name=cats.get(r.part_category_id),
+            quantity=r.quantity, reason=r.reason, status=r.status.value,
+            hub_id=r.hub_id, requested_by=r.requested_by,
+            photo_urls=r.photo_urls, supplied_item_id=r.supplied_item_id,
+            supplied_at=r.supplied_at, rejection_reason=r.rejection_reason,
+            hub_stock_available=inv_map.get((r.hub_id, r.part_category_id)),
+            created_at=r.created_at, reviewed_at=r.reviewed_at,
+        ) for r in rows
+    ]
+
+
+@router.get("/replacement-requests/{request_id}", response_model=ReplacementRequestOut,
+            summary="Chi tiết Replacement Request")
+async def get_replacement_request(
+    request_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    user: CurrentUser = Depends(allow_admin),
+):
+    req = await db.get(ReplacementRequest, request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Yêu cầu không tồn tại.")
+    cat = await db.get(PartCategory, req.part_category_id) if req.part_category_id else None
+    stock = None
+    if req.type == ReplacementType.PART and req.part_category_id:
+        inv = (await db.execute(
+            select(HubSupply).where(and_(
+                HubSupply.hub_id == req.hub_id,
+                HubSupply.part_category_id == req.part_category_id,
+            ))
+        )).scalar_one_or_none()
+        stock = inv.quantity if inv else 0
+    return ReplacementRequestOut(
+        request_id=req.id, type=req.type.value, damaged_item_id=req.damaged_item_id,
+        part_category_id=req.part_category_id, part_name=cat.name if cat else None,
+        quantity=req.quantity, reason=req.reason, status=req.status.value,
+        hub_id=req.hub_id, requested_by=req.requested_by,
+        photo_urls=req.photo_urls, supplied_item_id=req.supplied_item_id,
+        supplied_at=req.supplied_at, rejection_reason=req.rejection_reason,
+        hub_stock_available=stock, created_at=req.created_at, reviewed_at=req.reviewed_at,
+    )
+
+
+@router.patch("/replacement-requests/{request_id}/supply",
+              summary="Confirm Supply — cấp phát pin hoặc linh kiện")
+async def confirm_supply(
+    request_id: int,
+    body: SupplyBody,
+    db: AsyncSession = Depends(get_async_db),
+    user: CurrentUser = Depends(allow_admin),
+):
+    """
+    Admin xác nhận cấp phát:
+
+    - **type=BATTERY**: `supplied_item_id` = battery_id được cấp. Cập nhật battery.current_hub_id.
+    - **type=PART**: trừ tồn kho HubSupply, ghi SupplyTransaction.
+    - Chỉ xử lý khi status = AWAITING_SUPPLY → tránh trừ kho 2 lần.
+    - Gửi notification cho Technician sau khi cấp phát.
+    """
+    req = await db.get(ReplacementRequest, request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Yêu cầu không tồn tại.")
+    if req.status != ReplacementStatus.AWAITING_SUPPLY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Yêu cầu đang ở trạng thái '{req.status.value}', không thể cấp phát."
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if req.type == ReplacementType.BATTERY:
+        # Validate battery tồn tại và ở đúng hub
+        bat_id = body.supplied_item_id
+        if not bat_id:
+            raise HTTPException(status_code=400, detail="Cần truyền supplied_item_id (battery_id) cho BATTERY request.")
+        bat = await db.get(Battery, bat_id)
+        if not bat:
+            raise HTTPException(status_code=404, detail=f"Battery '{bat_id}' không tồn tại.")
+        if bat.drone_id:
+            raise HTTPException(status_code=400, detail=f"Battery '{bat_id}' đang gắn trên drone, không thể cấp phát.")
+        # Chuyển battery về hub yêu cầu
+        bat.current_hub_id = req.hub_id
+        bat.update_at = now
+        req.supplied_item_id = bat_id
+
+    elif req.type == ReplacementType.PART:
+        if not req.part_category_id:
+            raise HTTPException(status_code=400, detail="part_category_id không tồn tại trên yêu cầu này.")
+        # Kiểm tra và trừ tồn kho
+        inv = (await db.execute(
+            select(HubSupply).where(and_(
+                HubSupply.hub_id == req.hub_id,
+                HubSupply.part_category_id == req.part_category_id,
+            ))
+        )).scalar_one_or_none()
+
+        if not inv or inv.quantity < req.quantity:
+            avail = inv.quantity if inv else 0
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tồn kho Hub #{req.hub_id} chỉ còn {avail} đơn vị, cần {req.quantity}."
+            )
+        inv.quantity -= req.quantity
+        inv.updated_at = now
+        req.supplied_item_id = str(req.part_category_id)
+
+        # Ghi SupplyTransaction
+        cat = await db.get(PartCategory, req.part_category_id)
+        db.add(SupplyTransaction(
+            hub_id=req.hub_id,
+            part_category_id=req.part_category_id,
+            quantity_delta=-req.quantity,
+            reason=SupplyTxnReason.REPAIR_USE,
+            performed_by=user.id,
+            reference_id=f"REPLACEMENT_{req.id}",
+            note=f"Admin cấp phát cho replacement request #{req.id}: "
+                 f"{req.quantity}x {cat.name if cat else '?'}",
+            created_at=now,
+        ))
+
+    # Cập nhật request
+    req.status = ReplacementStatus.SUPPLIED
+    req.reviewed_by = user.id
+    req.reviewed_at = now
+    req.supplied_at = now
+
+    await db.commit()
+
+    # Notify Technician
+    try:
+        from app.modules.system.models import Notification, NotificationType
+        type_label = "pin" if req.type == ReplacementType.BATTERY else "linh kiện"
+        db.add(Notification(
+            user_id=req.requested_by,
+            title=f"✅ Yêu cầu #{request_id} — {type_label} đã được cấp phát",
+            message=(
+                f"Admin đã cấp phát {req.quantity}x {type_label} cho yêu cầu của bạn. "
+                f"Item ID: {req.supplied_item_id}."
+            ),
+            notifications_type=NotificationType.MAINTENANCE,
+            reference_id=f"REPLACEMENT_{req.id}",
+            created_at=now,
+        ))
+        await db.commit()
+    except Exception:
+        pass
+
+    return {
+        "message": f"Đã cấp phát thành công.",
+        "request_id": request_id,
+        "status": ReplacementStatus.SUPPLIED.value,
+        "supplied_item_id": req.supplied_item_id,
+        "supplied_at": req.supplied_at.isoformat(),
+    }
+
+
+@router.patch("/replacement-requests/{request_id}/reject",
+              summary="Từ chối Replacement Request")
+async def reject_replacement_request(
+    request_id: int,
+    body: RejectBody,
+    db: AsyncSession = Depends(get_async_db),
+    user: CurrentUser = Depends(allow_admin),
+):
+    req = await db.get(ReplacementRequest, request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Yêu cầu không tồn tại.")
+    if req.status != ReplacementStatus.AWAITING_SUPPLY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Yêu cầu đang ở trạng thái '{req.status.value}', không thể từ chối."
+        )
+
+    now = datetime.now(timezone.utc)
+    req.status = ReplacementStatus.REJECTED
+    req.reviewed_by = user.id
+    req.reviewed_at = now
+    req.rejection_reason = body.rejection_reason
+    await db.commit()
+
+    # Notify Technician
+    try:
+        from app.modules.system.models import Notification, NotificationType
+        type_label = "pin" if req.type == ReplacementType.BATTERY else "linh kiện"
+        db.add(Notification(
+            user_id=req.requested_by,
+            title=f"❌ Yêu cầu #{request_id} bị từ chối",
+            message=f"Yêu cầu thay {type_label} của bạn đã bị từ chối. Lý do: {body.rejection_reason}",
+            notifications_type=NotificationType.MAINTENANCE,
+            reference_id=f"REPLACEMENT_{req.id}",
+            created_at=now,
+        ))
+        await db.commit()
+    except Exception:
+        pass
+
+    return {
+        "message": "Đã từ chối yêu cầu.",
+        "request_id": request_id,
+        "status": ReplacementStatus.REJECTED.value,
+        "rejection_reason": body.rejection_reason,
     }
