@@ -423,6 +423,18 @@ async def refund_order(
         
         await db.commit()
         
+        # Gửi email hoàn tiền cho khách hàng gửi hàng (sender)
+        if order.sender_email:
+            from app.core.email import send_refund_email
+            await send_refund_email(
+                to_email=order.sender_email,
+                order_id=order_id,
+                refund_amount=refund_amount,
+                refund_reason=body.reason,
+            )
+        else:
+            print(f"[REFUND] Order {order_id} không có sender_email, bỏ qua gửi email")
+        
         return RefundResponse(
             message="Hoàn tiền thành công",
             order_id=order_id,
