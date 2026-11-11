@@ -186,6 +186,35 @@ class HubDetailResponse(BaseModel):
         from_attributes = True
 
 
+class HubTechnicianAssignRequest(BaseModel):
+    technician_id: str
+
+
+class HubTechnicianTransferRequest(BaseModel):
+    new_hub_id: int
+
+
+class HubTechnicianAssignmentResponse(BaseModel):
+    message: str
+    technician_id: str
+    full_name: str
+    email: str
+    hub_id: Optional[int] = None
+    hub_name: Optional[str] = None
+    previous_hub_id: Optional[int] = None
+
+
+class UnassignedTechnicianItem(BaseModel):
+    id: str
+    full_name: str
+    email: str
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 class KPIChartData(BaseModel):
     date: str
     revenue: float
