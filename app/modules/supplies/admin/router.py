@@ -1314,3 +1314,224 @@ async def reject_replacement_request(
         "status": ReplacementStatus.REJECTED.value,
         "rejection_reason": body.rejection_reason,
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+# FINANCIAL OVERVIEW
+# Thu chi đầy đủ: doanh thu thực tế, hoàn tiền, nhập pin, nhập linh kiện
+# GET /admin/supplies/financial-overview
+# ══════════════════════════════════════════════════════════════════
+
+from app.modules.missions.models import Order, PaymentStatus
+from app.modules.fleet.models import Battery, BatteryModelCatalog
+
+
+@router.get("/financial-overview", summary="Financial Overview — Thu chi tổng hợp")
+async def financial_overview(
+    month: Optional[int] = Query(None, ge=1, le=12, description="Tháng (1-12)"),
+    year:  Optional[int] = Query(None, ge=2020,     description="Năm"),
+    db:   AsyncSession = Depends(get_async_db),
+    user: CurrentUser  = Depends(allow_admin),
+):
+    """
+    **Financial Overview** — tổng hợp thu/chi đầy đủ theo kỳ.
+
+    **Thu:**
+    - `paid_revenue` — tổng doanh thu từ các đơn đã thanh toán (payment_status=PAID)
+
+    **Hoàn trả:**
+    - `completed_refunds` — tổng số tiền đã hoàn cho khách (refund_amount)
+
+    **Chi phí nhập hàng (Acquisition Cost — chỉ ghi nhận khi nhập, không tính khi sử dụng):**
+    - `battery_acquisition_cost` — tổng chi phí pin nhập vào hệ thống (batteries.create_at × unit_cost từ catalog)
+    - `parts_acquisition_cost` — tổng chi phí linh kiện nhập kho (supply_transactions reason=Receive × unit_cost)
+
+    **Lịch sử:**
+    - `transaction_history` — danh sách tất cả khoản thu/chi trong kỳ, sắp xếp theo thời gian
+    """
+    now_utc = datetime.now(timezone.utc)
+    target_year = year or now_utc.year
+
+    if month:
+        from calendar import monthrange
+        _, last_day = monthrange(target_year, month)
+        p_start = datetime(target_year, month, 1, tzinfo=timezone.utc)
+        p_end   = datetime(target_year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+        label   = f"Tháng {month:02d}/{target_year}"
+    else:
+        p_start = datetime(target_year, 1, 1, tzinfo=timezone.utc)
+        p_end   = datetime(target_year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        label   = f"Năm {target_year}"
+
+    p_start_naive = p_start.replace(tzinfo=None)
+    p_end_naive   = p_end.replace(tzinfo=None)
+
+    # ── 1. PAID REVENUE ──────────────────────────────────────────
+    paid_orders = (await db.execute(
+        select(Order).where(and_(
+            Order.payment_status == PaymentStatus.PAID,
+            Order.paid_at >= p_start_naive,
+            Order.paid_at <= p_end_naive,
+        ))
+    )).scalars().all()
+
+    paid_revenue = sum(o.delivery_fee or 0 for o in paid_orders)
+
+    # ── 2. COMPLETED REFUNDS ─────────────────────────────────────
+    refunded_orders = (await db.execute(
+        select(Order).where(and_(
+            Order.payment_status == PaymentStatus.REFUNDED,
+            Order.refund_at >= p_start_naive,
+            Order.refund_at <= p_end_naive,
+            Order.refund_amount.isnot(None),
+        ))
+    )).scalars().all()
+
+    completed_refunds = sum(o.refund_amount or 0 for o in refunded_orders)
+
+    # ── 3. BATTERY ACQUISITION COST ──────────────────────────────
+    # Chỉ ghi nhận khi nhập pin mới (create_at trong kỳ)
+    # Tra unit_cost từ BatteryModelCatalog theo battery_model
+    batteries_in_period = (await db.execute(
+        select(Battery).where(and_(
+            Battery.create_at >= p_start,
+            Battery.create_at <= p_end,
+        ))
+    )).scalars().all()
+
+    # Load catalog để tra giá
+    catalog_rows = (await db.execute(select(BatteryModelCatalog))).scalars().all()
+    catalog_map = {c.name: c.unit_cost for c in catalog_rows}
+
+    battery_acquisition_cost = sum(
+        catalog_map.get(b.battery_model, 0) or 0
+        for b in batteries_in_period
+    )
+
+    # ── 4. PARTS ACQUISITION COST ────────────────────────────────
+    # Chỉ ghi nhận khi Admin nhập kho (reason=Receive), không tính khi sử dụng
+    receive_txns = (await db.execute(
+        select(SupplyTransaction, PartCategory)
+        .join(PartCategory, SupplyTransaction.part_category_id == PartCategory.id)
+        .where(and_(
+            SupplyTransaction.reason == SupplyTxnReason.RECEIVE,
+            SupplyTransaction.created_at >= p_start,
+            SupplyTransaction.created_at <= p_end,
+        ))
+    )).all()
+
+    parts_acquisition_cost = sum(
+        (cat.unit_cost or 0) * txn.quantity_delta
+        for txn, cat in receive_txns
+    )
+
+    # ── 5. SUMMARY ───────────────────────────────────────────────
+    total_income  = paid_revenue
+    total_expense = battery_acquisition_cost + parts_acquisition_cost
+    net_cashflow  = total_income - completed_refunds - total_expense
+
+    # ── 6. TRANSACTION HISTORY ───────────────────────────────────
+    history = []
+
+    # Income: paid orders
+    for o in sorted(paid_orders, key=lambda x: x.paid_at or datetime.min):
+        history.append({
+            "date": o.paid_at.isoformat() if o.paid_at else None,
+            "type": "INCOME",
+            "category": "Delivery Fee",
+            "reference_id": o.id,
+            "description": f"Đơn hàng #{o.id} đã thanh toán",
+            "amount": round(o.delivery_fee or 0, 0),
+        })
+
+    # Refunds
+    for o in sorted(refunded_orders, key=lambda x: x.refund_at or datetime.min):
+        history.append({
+            "date": o.refund_at.isoformat() if o.refund_at else None,
+            "type": "REFUND",
+            "category": "Customer Refund",
+            "reference_id": o.id,
+            "description": f"Hoàn tiền đơn #{o.id}: {o.refund_reason or 'N/A'}",
+            "amount": -round(o.refund_amount or 0, 0),
+        })
+
+    # Battery acquisitions
+    for b in sorted(batteries_in_period, key=lambda x: x.create_at or datetime.min):
+        cost = catalog_map.get(b.battery_model, 0) or 0
+        if cost > 0:
+            history.append({
+                "date": b.create_at.isoformat() if b.create_at else None,
+                "type": "EXPENSE",
+                "category": "Battery Acquisition",
+                "reference_id": b.id,
+                "description": f"Nhập pin {b.battery_model or 'N/A'} — #{b.id}",
+                "amount": -round(cost, 0),
+            })
+
+    # Parts acquisitions
+    for txn, cat in sorted(receive_txns, key=lambda x: x[0].created_at):
+        line_cost = (cat.unit_cost or 0) * txn.quantity_delta
+        if line_cost > 0:
+            history.append({
+                "date": txn.created_at.isoformat(),
+                "type": "EXPENSE",
+                "category": "Parts Acquisition",
+                "reference_id": f"TXN-{txn.id}",
+                "description": f"Nhập kho {txn.quantity_delta}x {cat.name} tại Hub #{txn.hub_id}",
+                "amount": -round(line_cost, 0),
+            })
+
+    # Sort by date desc
+    history.sort(key=lambda x: x["date"] or "", reverse=True)
+
+    # ── 7. BREAKDOWN BY CATEGORY ─────────────────────────────────
+    parts_by_cat: dict[str, float] = {}
+    for txn, cat in receive_txns:
+        cost = (cat.unit_cost or 0) * txn.quantity_delta
+        parts_by_cat[cat.name] = parts_by_cat.get(cat.name, 0) + cost
+
+    battery_by_model: dict[str, float] = {}
+    for b in batteries_in_period:
+        cost = catalog_map.get(b.battery_model, 0) or 0
+        if b.battery_model and cost > 0:
+            battery_by_model[b.battery_model] = battery_by_model.get(b.battery_model, 0) + cost
+
+    return {
+        "period": label,
+
+        # ── Thu ──────────────────────────────────────────────────
+        "income": {
+            "paid_revenue": round(paid_revenue, 0),
+            "paid_orders_count": len(paid_orders),
+        },
+
+        # ── Hoàn trả ─────────────────────────────────────────────
+        "refunds": {
+            "completed_refunds": round(completed_refunds, 0),
+            "refunded_orders_count": len(refunded_orders),
+        },
+
+        # ── Chi phí nhập hàng ────────────────────────────────────
+        "acquisition_costs": {
+            "battery_acquisition_cost": round(battery_acquisition_cost, 0),
+            "parts_acquisition_cost":   round(parts_acquisition_cost, 0),
+            "total_acquisition_cost":   round(battery_acquisition_cost + parts_acquisition_cost, 0),
+            "batteries_added":          len(batteries_in_period),
+            "battery_by_model":  {k: round(v, 0) for k, v in sorted(battery_by_model.items(), key=lambda x: -x[1])},
+            "parts_by_category": {k: round(v, 0) for k, v in sorted(parts_by_cat.items(), key=lambda x: -x[1])},
+        },
+
+        # ── Tổng hợp ─────────────────────────────────────────────
+        "summary": {
+            "total_income":   round(total_income, 0),
+            "total_refunds":  round(completed_refunds, 0),
+            "total_expense":  round(total_expense, 0),
+            "net_cashflow":   round(net_cashflow, 0),
+            "profit_margin_pct": round(
+                (net_cashflow / total_income * 100) if total_income > 0 else 0, 1
+            ),
+        },
+
+        # ── Lịch sử ──────────────────────────────────────────────
+        "transaction_history": history,
+    }
