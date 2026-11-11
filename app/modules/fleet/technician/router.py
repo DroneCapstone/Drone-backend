@@ -1489,15 +1489,12 @@ async def update_inspection(
             if battery:
                 battery.work_order_id = None
         
-        # Update drone status based on resulting_drone_status
-        if wo.drone_id:
+        # Update drone status based on resulting_drone_status (technician chọn)
+        if wo.drone_id and body.resulting_drone_status:
             drone = await db.get(Drone, wo.drone_id)
             if drone:
                 try:
-                    # Nếu có resulting_drone_status → cập nhật theo nó
-                    # Nếu không → default là AVAILABLE (sửa xong, sẵn sàng)
-                    new_status = body.resulting_drone_status or "Available"
-                    drone.status = DroneStatus(new_status)
+                    drone.status = DroneStatus(body.resulting_drone_status)
                 except ValueError:
                     pass  # Invalid status, skip
         
