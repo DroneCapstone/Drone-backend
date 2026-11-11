@@ -83,6 +83,32 @@ class ReviewBody(BaseModel):
     admin_note: Optional[str] = None
 
 
+class CategoryOut(BaseModel):
+    id: int
+    name: str
+    category_type: str
+    unit_cost: Optional[float] = None
+    compatible_drone_models: Optional[List[str]] = None
+    description: Optional[str] = None
+    is_active: bool
+
+    class Config: from_attributes = True
+
+
+class HubSupplyOut(BaseModel):
+    hub_id: int
+    hub_name: Optional[str] = None
+    part_category_id: int
+    part_name: str
+    category_type: str
+    unit_cost: Optional[float] = None
+    compatible_drone_models: Optional[List[str]] = None
+    quantity: int
+    min_stock_threshold: int
+    is_low_stock: bool
+    updated_at: Optional[datetime] = None
+
+
 class PartsRequestOut(BaseModel):
     id: int
     requested_by: str
@@ -154,15 +180,27 @@ async def get_supplies_summary(
 
 # ── Categories ─────────────────────────────────────────────────────
 
-@router.get("/categories", summary="Danh mục tất cả loại linh kiện / vật tư")
+@router.get("/categories", response_model=List[CategoryOut],
+            summary="Danh mục linh kiện — ID, Name, Category Type, Unit Cost, Compatible Drone Models, Is Active")
 async def list_categories(
+    is_active: Optional[bool] = Query(None, description="Lọc theo is_active"),
     db: AsyncSession = Depends(get_async_db),
     user: CurrentUser = Depends(allow_admin),
 ):
-    rows = (await db.execute(
-        select(PartCategory).order_by(PartCategory.category_type, PartCategory.name)
-    )).scalars().all()
-    return rows
+    q = select(PartCategory).order_by(PartCategory.category_type, PartCategory.name)
+    if is_active is not None:
+        q = q.where(PartCategory.is_active == is_active)
+    rows = (await db.execute(q)).scalars().all()
+    return [
+        CategoryOut(
+            id=c.id, name=c.name,
+            category_type=c.category_type.value if hasattr(c.category_type, "value") else str(c.category_type),
+            unit_cost=c.unit_cost,
+            compatible_drone_models=c.compatible_drone_models,
+            description=c.description,
+            is_active=c.is_active,
+        ) for c in rows
+    ]
 
 
 @router.post("/categories", status_code=201, summary="Tạo danh mục linh kiện mới")
@@ -210,7 +248,8 @@ async def update_category(
 
 # ── Supplies (stock per hub) ────────────────────────────────────────
 
-@router.get("", summary="Số lượng vật tư theo Hub toàn hệ thống")
+@router.get("", response_model=List[HubSupplyOut],
+            summary="Tồn kho vật tư — Hub ID, Part Category ID, Quantity, Min Stock Threshold")
 async def get_all_supplies(
     hub_id: Optional[int] = Query(None, description="Lọc theo Hub"),
     category_type: Optional[str] = Query(None, description="Lọc theo loại (Motor, Propeller...)"),
@@ -224,30 +263,23 @@ async def get_all_supplies(
         .join(Hub, HubSupply.hub_id == Hub.id)
         .order_by(Hub.name, PartCategory.category_type, PartCategory.name)
     )
-    if hub_id:
-        q = q.where(HubSupply.hub_id == hub_id)
-    if low_stock_only:
-        q = q.where(HubSupply.quantity <= HubSupply.min_stock_threshold)
-    if category_type:
-        q = q.where(PartCategory.category_type == category_type)
+    if hub_id: q = q.where(HubSupply.hub_id == hub_id)
+    if low_stock_only: q = q.where(HubSupply.quantity <= HubSupply.min_stock_threshold)
+    if category_type: q = q.where(PartCategory.category_type == category_type)
 
     rows = (await db.execute(q)).all()
     return [
-        {
-            "id": inv.id,
-            "hub_id": hub.id,
-            "hub_name": hub.name,
-            "part_category_id": cat.id,
-            "part_name": cat.name,
-            "category_type": cat.category_type.value if hasattr(cat.category_type, "value") else str(cat.category_type),
-            "compatible_drone_models": cat.compatible_drone_models,
-            "unit_cost": cat.unit_cost,
-            "quantity": inv.quantity,
-            "min_stock_threshold": inv.min_stock_threshold,
-            "is_low_stock": inv.quantity <= inv.min_stock_threshold,
-            "updated_at": inv.updated_at.isoformat() if inv.updated_at else None,
-        }
-        for inv, cat, hub in rows
+        HubSupplyOut(
+            hub_id=hub.id, hub_name=hub.name,
+            part_category_id=cat.id, part_name=cat.name,
+            category_type=cat.category_type.value if hasattr(cat.category_type, "value") else str(cat.category_type),
+            unit_cost=cat.unit_cost,
+            compatible_drone_models=cat.compatible_drone_models,
+            quantity=inv.quantity,
+            min_stock_threshold=inv.min_stock_threshold,
+            is_low_stock=inv.quantity <= inv.min_stock_threshold,
+            updated_at=inv.updated_at,
+        ) for inv, cat, hub in rows
     ]
 
 
@@ -517,15 +549,16 @@ async def approve_request(
         ))
         await db.commit()
 
-        # Notify Technician: được duyệt
+        # Notify Technician: đề xuất được duyệt
         try:
             from app.modules.system.models import Notification, NotificationType
             db.add(Notification(
                 user_id=req.requested_by,
-                title=f"✅ Đề xuất #{request_id} được duyệt",
+                title=f"✅ Đề xuất linh kiện #{request_id} được duyệt",
                 message=(
-                    f"Đề xuất sử dụng {req.quantity_needed}x {cat.name if cat else 'linh kiện'} "
-                    f"đã được Admin duyệt. Vui lòng tiến hành sửa chữa và xác nhận hoàn tất."
+                    f"Đề xuất sử dụng {req.quantity_needed}x "
+                    f"{cat.name if cat else 'linh kiện'} đã được Admin duyệt. "
+                    f"Vui lòng tiến hành sửa chữa và xác nhận hoàn tất."
                 ),
                 notifications_type=NotificationType.MAINTENANCE,
                 reference_id=f"PARTS_REQUEST_{request_id}",

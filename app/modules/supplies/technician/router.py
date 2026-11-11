@@ -97,7 +97,15 @@ async def list_categories(
     rows = (await db.execute(
         select(PartCategory).where(PartCategory.is_active == True).order_by(PartCategory.name)
     )).scalars().all()
-    return rows
+    return [
+        PartCategoryOut(
+            id=c.id, name=c.name,
+            category_type=c.category_type.value if hasattr(c.category_type, "value") else str(c.category_type),
+            unit_cost=c.unit_cost,
+            compatible_drone_models=c.compatible_drone_models,
+            description=c.description,
+        ) for c in rows
+    ]
 
 
 @router.get("", response_model=List[HubSupplyOut],
