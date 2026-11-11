@@ -412,7 +412,10 @@ async def get_dashboard_kpi(db: AsyncSession = Depends(get_async_db)):
             Mission.status.in_([MissionStatus.MISSION_COMPLETED, MissionStatus.ARRIVAL_COMPLETED])
         )
     )
-    total_revenue = rev_res.scalar() or 0.0
+    gross_revenue = float(rev_res.scalar() or 0.0)
+    from app.modules.system.service import compute_total_procurement_expenses
+    procurement_expenses = await compute_total_procurement_expenses(db)
+    total_revenue = round(gross_revenue - procurement_expenses, 2)
     
     # Revenue Chart (group by date)
     chart_res = await db.execute(

@@ -71,13 +71,20 @@ async def admin_dashboard(
         .where(Order.payment_status == PaymentStatus.REFUNDED)
     )).scalar() or 0
 
+    from app.modules.system.service import compute_total_procurement_expenses
+    total_expenses = await compute_total_procurement_expenses(db)
+    gross_total = round(float(total_rev), 2)
+    net_total = round(gross_total - total_expenses, 2)
+
     revenue = AdminRevenue(
-        total=round(float(total_rev), 2),
+        total=net_total,
         today=round(float(today_rev), 2),
         this_month=round(float(month_rev), 2),
         paid_orders=int(paid_orders),
         pending_payments=round(float(pending_payments_result), 2),
         refunds=round(float(refunds_result), 2),
+        gross_revenue=gross_total,
+        total_expenses=total_expenses,
     )
 
     # ----- Users -----
