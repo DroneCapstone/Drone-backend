@@ -199,6 +199,7 @@ class Order(Base):
     refund_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     refund_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     refund_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    refund_status: Mapped[str | None] = mapped_column(String(50), nullable=True, default="PENDING")  # PENDING, COMPLETED, FAILED, CANCELLED
     # ── Aging Priority fields (NORMAL mode) ──────────────────────────────────
     is_aging_priority: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     aging_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -420,6 +420,7 @@ async def refund_order(
         order.refund_at = now
         order.refund_amount = refund_amount
         order.refund_reason = body.reason
+        order.refund_status = "PENDING"  # Chờ PayOS xác nhận
         
         await db.commit()
         
@@ -531,3 +532,49 @@ async def get_transactions(
     ]
     
     return transactions
+
+
+# ── Danh sách hoàn tiền (Admin xem toàn bộ refunds) ────────────────────────────
+
+@router.get(
+    "/refunds",
+    summary="Admin xem danh sách toàn bộ hoàn tiền",
+)
+async def get_refunds(
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Danh sách toàn bộ giao dịch hoàn tiền trong hệ thống (Admin only).
+    
+    Chỉ lấy Orders có refund_amount > 0.
+    
+    Response: Danh sách refunds với fields:
+    - refund_id (dùng order_id)
+    - order_id
+    - refund_amount
+    - reason
+    - status (PENDING, COMPLETED, FAILED, CANCELLED)
+    - processed_at (refund_at)
+    """
+    from app.modules.payments.schemas import RefundListResponse
+    
+    # Lấy tất cả orders có refund_amount > 0
+    result = await db.execute(
+        select(Order).where(Order.refund_amount > 0)
+    )
+    orders = result.scalars().all()
+    
+    refunds = [
+        RefundListResponse(
+            refund_id=order.id,
+            order_id=order.id,
+            refund_amount=order.refund_amount or 0,
+            reason=order.refund_reason or "N/A",
+            status=order.refund_status or "PENDING",
+            processed_at=order.refund_at,
+        )
+        for order in orders
+    ]
+    
+    return refunds
