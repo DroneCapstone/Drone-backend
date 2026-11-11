@@ -482,3 +482,79 @@ async def cancel_payment(
     await db.commit()
 
     return {"message": "Đã huỷ payment link", "order_id": order_id}
+
+
+# ── Danh sách giao dịch (Admin xem toàn bộ transactions) ────────────────────────
+
+@router.get(
+    "/transactions",
+    summary="Admin xem danh sách toàn bộ giao dịch",
+)
+async def get_transactions(
+    page: int = 1,
+    page_size: int = 20,
+    payment_status: Optional[str] = None,  # Filter by status: "UNPAID", "PAID", "REFUNDED", etc.
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Danh sách toàn bộ giao dịch trong hệ thống (Admin only).
+    
+    Query Parameters:
+    - page: Trang (default: 1)
+    - page_size: Số giao dịch/trang (default: 20)
+    - payment_status: Lọc theo trạng thái ("UNPAID", "PAID", "REFUNDED", "CANCELLED")
+    
+    Response:
+    - total: Tổng số giao dịch
+    - page: Trang hiện tại
+    - page_size: Số giao dịch/trang
+    - transactions: Danh sách giao dịch
+    """
+    # Build query
+    query = select(Order)
+    
+    # Filter by payment_status if provided
+    if payment_status:
+        try:
+            status_enum = PaymentStatus(payment_status.upper())
+            query = query.where(Order.payment_status == status_enum)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid payment_status: {payment_status}")
+    
+    # Count total
+    count_result = await db.execute(select(Order).count())
+    total = count_result.scalar() or 0
+    
+    # Pagination
+    offset = (page - 1) * page_size
+    query = query.order_by(Order.created_at.desc()).offset(offset).limit(page_size)
+    
+    result = await db.execute(query)
+    orders = result.scalars().all()
+    
+    # Map to TransactionResponse
+    from app.modules.payments.schemas import TransactionResponse, TransactionListResponse
+    
+    transactions = [
+        TransactionResponse(
+            payment_id=order.id,  # order_id là payment_id
+            order_id=order.id,
+            customer_id=order.customer_id,
+            amount=order.delivery_fee or 0,
+            payment_status=order.payment_status.value if order.payment_status else "UNPAID",
+            paid_at=order.paid_at,
+            refund_at=order.refund_at,
+            refund_amount=order.refund_amount,
+            refund_reason=order.refund_reason,
+            created_at=order.created_at,
+        )
+        for order in orders
+    ]
+    
+    return TransactionListResponse(
+        total=total,
+        page=page,
+        page_size=page_size,
+        transactions=transactions,
+    )
