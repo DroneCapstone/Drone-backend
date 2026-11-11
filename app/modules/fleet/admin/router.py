@@ -22,8 +22,8 @@ from app.modules.fleet.models import (
     MaintenanceSchedule,
     BatteryModelCatalog,
 )
-from app.modules.system.models import Hub
-from app.modules.auth.models import User
+from app.modules.system.models import Hub, Notification, NotificationType
+from app.modules.auth.models import User, Account
 from app.modules.missions.models import Mission, MissionStatus, TelemetryLog
 from app.modules.ai_predictions.models import AIPrediction
 
@@ -280,6 +280,21 @@ class BatteryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class BatterySupplyRequest(BaseModel):
+    hub_id: int
+    battery_ids: list[str]
+    note: Optional[str] = None
+
+
+class BatterySupplyResponse(BaseModel):
+    message: str
+    hub_id: int
+    hub_name: str
+    supplied_count: int
+    battery_ids: list[str]
+    notified_technician_count: int
 
 
 class BatteryModelCatalogCreate(BaseModel):
@@ -1335,6 +1350,106 @@ async def delete_battery(
         raise HTTPException(status_code=404, detail="Battery not found")
     await db.delete(battery)
     await db.commit()
+
+
+@router.post("/batteries/supply", response_model=BatterySupplyResponse, summary="Phân bổ pin từ kho Admin về Hub & Gửi thông báo cho Technician")
+async def supply_batteries(
+    body: BatterySupplyRequest,
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Admin phân bổ danh sách pin từ kho tổng về Hub cụ thể:
+    1. Kiểm tra Hub tồn tại.
+    2. Cập nhật current_hub_id = hub_id cho các pin được chỉ định.
+    3. Tự động gửi Notification cho các Technician đang hoạt động tại Hub đó.
+    4. Ghi activity_logs với action='BATTERY_SUPPLY'.
+    """
+    hub = await db.get(Hub, body.hub_id)
+    if not hub:
+        raise HTTPException(status_code=404, detail=f"Hub #{body.hub_id} không tồn tại.")
+
+    clean_ids = [str(bid).strip() for bid in body.battery_ids if str(bid).strip()]
+    if not clean_ids:
+        raise HTTPException(status_code=400, detail="Danh sách battery_ids không được rỗng.")
+
+    res = await db.execute(select(Battery).where(Battery.id.in_(clean_ids)))
+    batteries = res.scalars().all()
+    found_ids = {b.id for b in batteries}
+    missing_ids = set(clean_ids) - found_ids
+    if missing_ids:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Không tìm thấy các mã pin sau: {', '.join(sorted(missing_ids))}"
+        )
+
+    # Kiểm tra pin có đang gắn trên drone không
+    in_flight_or_mounted = [b.id for b in batteries if b.drone_id is not None]
+    if in_flight_or_mounted:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Các pin sau đang được gắn trên Drone, không thể điều phối phân bổ: {', '.join(in_flight_or_mounted)}"
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    for b in batteries:
+        b.current_hub_id = body.hub_id
+        b.update_at = now_utc
+
+    # Tìm kỹ thuật viên đang active tại Hub
+    tech_stmt = select(Account).where(
+        Account.role_id == "TECHNICIAN",
+        Account.is_active == True,
+        Account.hub_id == body.hub_id,
+    )
+    techs = (await db.execute(tech_stmt)).scalars().all()
+
+    # Bắn Notification cho các Technician tại Hub
+    for tech in techs:
+        db.add(Notification(
+            user_id=tech.id,
+            title=f"Tiếp nhận {len(batteries)} pin mới từ Admin",
+            message=(
+                f"Admin đã phân bổ {len(batteries)} pin mới về Hub #{hub.id} ({hub.name}). "
+                f"Danh sách mã pin: {', '.join(b.id for b in batteries)}. Vui lòng kiểm tra và tiếp nhận."
+            ),
+            notifications_type=NotificationType.MAINTENANCE,
+            reference_id=f"BATTERY_SUPPLY_HUB_{hub.id}",
+            created_at=now_utc,
+        ))
+
+    await db.commit()
+
+    # Ghi log activity
+    try:
+        from app.modules.system.service import log_activity
+        await log_activity(
+            db,
+            action="BATTERY_SUPPLY",
+            user_id=user.id,
+            role=user.role.value,
+            resource_type="batteries",
+            resource_id=f"SUPPLY-HUB-{hub.id}",
+            description=f"Admin phân bổ {len(batteries)} viên pin về Hub #{hub.id} ({hub.name}). Đã gửi thông báo tới {len(techs)} kỹ thuật viên.",
+            details={
+                "hub_id": hub.id,
+                "hub_name": hub.name,
+                "battery_ids": [b.id for b in batteries],
+                "note": body.note,
+                "notified_technician_ids": [t.id for t in techs],
+            }
+        )
+    except Exception:
+        pass
+
+    return BatterySupplyResponse(
+        message=f"Đã phân bổ thành công {len(batteries)} pin về Hub #{hub.id} ({hub.name}).",
+        hub_id=hub.id,
+        hub_name=hub.name or f"Hub #{hub.id}",
+        supplied_count=len(batteries),
+        battery_ids=[b.id for b in batteries],
+        notified_technician_count=len(techs),
+    )
 
 
 # ── Battery Model Catalog Endpoints ──────────────────────────────────────────
