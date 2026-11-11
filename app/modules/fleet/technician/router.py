@@ -514,7 +514,7 @@ async def confirm_arrival(
                     order_obj.updated_at = now
 
                     # Chỉ gửi email + notification nếu mission đang IN_PROGRESS/FLYING (không gửi nếu mission đã hoàn thành)
-                    if mission.status in [MissionStatus.IN_PROGRESS, MissionStatus.FLYING, MissionStatus.ACTIVE_MISSION]:
+                    if mission.status in [MissionStatus.IN_PROGRESS, MissionStatus.FLYING, MissionStatus.ACTIVE_MISSION, MissionStatus.SCHEDULED]:
                         # Gửi email cho cả sender (customer) và receiver
                         incident_detail = ""
                         if body and body.issue_description:
