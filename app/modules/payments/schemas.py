@@ -17,11 +17,3 @@ class TransactionResponse(BaseModel):
     refund_amount: Optional[float] = None
     refund_reason: Optional[str] = None
     created_at: Optional[datetime] = None
-
-
-class TransactionListResponse(BaseModel):
-    """Response schema cho danh sách giao dịch."""
-    total: int
-    page: int
-    page_size: int
-    transactions: list[TransactionResponse]
