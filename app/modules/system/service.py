@@ -261,3 +261,48 @@ def _build_activity_log(
         "details_json": details,
         "created_at": datetime.now(_tz.utc),
     }
+
+
+async def compute_total_procurement_expenses(db: AsyncSession, start_time: Optional[datetime] = None) -> float:
+    """
+    Tính tổng chi phí mua sắm thiết bị và linh kiện để trừ tiền quỹ/doanh thu Admin:
+    1. Chi phí mua Drone mới (DRONE_ACQUISITION)
+    2. Chi phí nhập lô Pin mới (BATTERY_BATCH_IMPORT / BATTERY_ADD)
+    3. Chi phí nhập vật tư linh kiện (SupplyTransaction - RECEIVE)
+    """
+    from sqlalchemy import select, func
+    from app.modules.system.models import ActivityLog
+    from app.modules.supplies.models import SupplyTransaction, SupplyTxnReason, PartCategory
+
+    total = 0.0
+
+    # 1 & 2: Drone & Battery acquisitions from activity_logs
+    try:
+        q = select(ActivityLog.details_json).where(
+            ActivityLog.action.in_(["DRONE_ACQUISITION", "BATTERY_BATCH_IMPORT", "BATTERY_ADD"])
+        )
+        if start_time:
+            q = q.where(ActivityLog.created_at >= start_time)
+        res = await db.execute(q)
+        for row in res.scalars().all():
+            if isinstance(row, dict):
+                total += float(row.get("acquisition_cost") or 0.0)
+    except Exception:
+        pass
+
+    # 3: Supplies received from suppliers
+    try:
+        st_q = (
+            select(func.coalesce(func.sum(SupplyTransaction.quantity_delta * PartCategory.unit_cost), 0.0))
+            .join(PartCategory, SupplyTransaction.part_category_id == PartCategory.id)
+            .where(SupplyTransaction.reason == SupplyTxnReason.RECEIVE)
+        )
+        if start_time:
+            st_q = st_q.where(SupplyTransaction.created_at >= start_time)
+        st_val = (await db.execute(st_q)).scalar()
+        if st_val:
+            total += float(st_val)
+    except Exception:
+        pass
+
+    return round(total, 2)

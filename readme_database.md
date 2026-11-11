@@ -92,6 +92,7 @@ Catalog model pin chuẩn với giá nhập và danh sách dòng drone tương t
 | id | VARCHAR(50) | **PK**, Non-nullable (Chuẩn `DRN-XXXX`) |
 | name | VARCHAR(100) | Non-nullable |
 | model | VARCHAR(100) | Non-nullable |
+| serial_number | VARCHAR(100) | Unique, Non-nullable |
 | payload_capacity_kg | FLOAT | Non-nullable |
 | max_speed | FLOAT | Non-nullable |
 | operational_status | VARCHAR(20) | Non-nullable (`drone_status`) |
