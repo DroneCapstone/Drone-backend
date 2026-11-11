@@ -1494,9 +1494,13 @@ async def update_inspection(
             drone = await db.get(Drone, wo.drone_id)
             if drone:
                 try:
+                    old_drone_status = drone.status
                     drone.status = DroneStatus(body.resulting_drone_status)
-                except ValueError:
-                    pass  # Invalid status, skip
+                    print(f"[DEBUG] Drone {wo.drone_id}: {old_drone_status} → {drone.status}")
+                except ValueError as e:
+                    print(f"[ERROR] Invalid resulting_drone_status '{body.resulting_drone_status}': {e}")
+        else:
+            print(f"[DEBUG] Skipped drone update: wo.drone_id={wo.drone_id}, resulting_drone_status={body.resulting_drone_status}")
         
         # ── Tự động acknowledge maintenance alert liên quan ──
         # Tìm alert gắn với work order này (nếu có) và chuyển sang Acknowledged
