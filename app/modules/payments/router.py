@@ -191,6 +191,39 @@ async def create_checkout(
     )
 
 
+# ── Helper Notification ───────────────────────────────────────────────────────
+
+async def _notify_customer_payment_confirmed(db: AsyncSession, order: Order, paid_time: datetime) -> None:
+    """Gửi Notification xác nhận thanh toán kèm thời gian về cho Customer (chống gửi trùng)."""
+    if not order.customer_id:
+        return
+    try:
+        from app.modules.system.models import Notification, NotificationType
+        from app.core.timezone import get_vn_datetime
+        ref_id = f"ORDER_PAID_{order.id}"
+        existing = (await db.execute(
+            select(Notification.id).where(Notification.reference_id == ref_id).limit(1)
+        )).scalar_one_or_none()
+        if existing:
+            return
+        vn_now = get_vn_datetime()
+        time_str = paid_time.strftime("%H:%M:%S %d/%m/%Y") if paid_time else vn_now.strftime("%H:%M:%S %d/%m/%Y")
+        fee_str = f"{int(round(order.delivery_fee or 0)):,} VNĐ"
+        db.add(Notification(
+            user_id=str(order.customer_id),
+            title=f"💳 Thanh toán đơn hàng #{order.id} thành công",
+            message=(
+                f"Hệ thống đã ghi nhận thanh toán {fee_str} cho đơn hàng #{order.id} lúc {time_str}. "
+                f"Vui lòng mang kiện hàng đến Hub gửi để nhân viên tiếp nhận và sắp xếp Drone vận chuyển."
+            ),
+            notifications_type=NotificationType.PAYMENT,
+            reference_id=ref_id,
+            created_at=vn_now,
+        ))
+    except Exception as e:
+        print(f"[NOTIFY PAYMENT ERROR] {e}")
+
+
 # ── Kiểm tra trạng thái ───────────────────────────────────────────────────────
 
 @router.get(
@@ -227,6 +260,7 @@ async def get_payment_status(
                 transaction_list = info_data.get("transactions", [])
                 if transaction_list:
                     order.payment_transaction_id = str(transaction_list[0].get("reference", ""))
+                await _notify_customer_payment_confirmed(db, order, now)
                 await db.commit()
                 await db.refresh(order)
             elif remote_status in ("CANCELLED", "EXPIRED"):
@@ -320,6 +354,7 @@ async def payos_webhook(
         # Chuyển order sang AWAITING_DROP_OFF — KH cần mang hàng đến hub
         if order.status == OrderStatus.PENDING:
             order.status = OrderStatus.AWAITING_DROP_OFF
+        await _notify_customer_payment_confirmed(db, order, now)
     else:
         order.payment_status = PaymentStatus.FAILED
         order.updated_at     = now

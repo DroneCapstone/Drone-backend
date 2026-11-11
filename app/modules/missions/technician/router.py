@@ -338,6 +338,54 @@ async def receive_outbound_delivery(
     order.origin_received_by = str(user.id)
     order.updated_at = now
 
+    # ── Gửi Notification báo Customer & Operators: Trạm đã nhận kiện hàng ─────
+    try:
+        from app.modules.system.models import Notification as _Notif, NotificationType as _NT
+        from app.modules.auth.models import ROLE_NAME_TO_ID as _ROLE_MAP
+        from app.shared.roles import UserRole as _Role
+        from app.core.timezone import get_vn_datetime as _get_vn_dt
+
+        origin_hub = await db.get(Hub, order.origin_hub_id) if order.origin_hub_id else None
+        hub_label = origin_hub.name if origin_hub else f"Hub #{order.origin_hub_id}"
+        vn_now = _get_vn_dt()
+        time_str = now.strftime("%H:%M:%S %d/%m/%Y")
+
+        if order.customer_id:
+            ref_cust = f"PACKAGE_RECEIVED_{order.id}"
+            ex_cust = (await db.execute(
+                select(_Notif.id).where(_Notif.reference_id == ref_cust).limit(1)
+            )).scalar_one_or_none()
+            if not ex_cust:
+                db.add(_Notif(
+                    user_id=str(order.customer_id),
+                    title=f"📦 Đã tiếp nhận kiện hàng #{order.id} tại {hub_label}",
+                    message=(
+                        f"Kỹ thuật viên tại {hub_label} đã tiếp nhận kiện hàng của đơn #{order.id} lúc {time_str}. "
+                        f"Đơn hàng đang chờ điều phối viên (Operator) lên lịch bay cho Drone."
+                    ),
+                    notifications_type=_NT.MISSION_STATUS,
+                    reference_id=ref_cust,
+                    created_at=vn_now,
+                ))
+
+        _op_role_id = _ROLE_MAP.get(_Role.OPERATOR)
+        if _op_role_id:
+            _ops = (await db.execute(select(User.id).where(User.role_id == _op_role_id))).scalars().all()
+            for _op_id in _ops:
+                db.add(_Notif(
+                    user_id=_op_id,
+                    title=f"📦 Hàng đã sẵn sàng tại Hub — Đơn #{order.id}",
+                    message=(
+                        f"Đơn #{order.id} đã được Technician tiếp nhận tại {hub_label} lúc {time_str}. "
+                        f"Sẵn sàng lập kế hoạch bay (Mission Planning)."
+                    ),
+                    notifications_type=_NT.MISSION_STATUS,
+                    reference_id=f"OP_PACKAGE_RECEIVED_{order.id}",
+                    created_at=vn_now,
+                ))
+    except Exception as _e:
+        print(f"[NOTIFY RECEIVE ERROR] {_e}")
+
     await db.commit()
     return {
         "message": "Package received at Hub",
