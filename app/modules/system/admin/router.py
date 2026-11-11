@@ -20,12 +20,16 @@ from app.modules.system.schemas import (
     HubAssignedDroneItem,
     HubAssignedBatteryItem,
     HubAssignedTechnician,
+    HubTechnicianAssignRequest,
+    HubTechnicianTransferRequest,
+    HubTechnicianAssignmentResponse,
+    UnassignedTechnicianItem,
     KPIDashboardResponse,
     KPIChartData,
     SimulatorConfigResponse,
     SimulatorConfigUpdate,
 )
-from app.modules.system.models import Hub
+from app.modules.system.models import Hub, Notification, NotificationType
 from app.modules.fleet.models import Drone, Battery
 from app.modules.auth.models import User
 from app.modules.missions.models import Mission, MissionStatus
@@ -191,7 +195,7 @@ async def get_admin_hubs(
                 name=d.name,
                 model=d.model,
                 status=d.status.value if hasattr(d.status, "value") else str(d.status),
-                serial_number=None,
+                serial_number=d.serial_number,
                 battery_level_pct=d.battery_level_pct,
                 payload_capacity_kg=d.payload_capacity_kg,
             )
@@ -281,7 +285,7 @@ async def get_admin_hub_detail(hub_id: int, db: AsyncSession = Depends(get_async
             name=d.name,
             model=d.model,
             status=d.status.value if hasattr(d.status, "value") else str(d.status),
-            serial_number=None,
+            serial_number=d.serial_number,
             battery_level_pct=d.battery_level_pct,
             payload_capacity_kg=d.payload_capacity_kg,
         )
@@ -382,6 +386,243 @@ async def delete_hub(hub_id: int, db: AsyncSession = Depends(get_async_db)):
         raise HTTPException(status_code=404, detail="Hub not found")
     await db.delete(hub)
     await db.commit()
+
+
+# ── Hub Technician Assignment APIs ────────────────────────────────────────────
+
+@router.get(
+    "/admin/fleet/technicians/unassigned",
+    response_model=list[UnassignedTechnicianItem],
+    summary="Lấy danh sách Technician chưa được phân công vào Hub nào",
+)
+@router.get(
+    "/admin/system/technicians/unassigned",
+    response_model=list[UnassignedTechnicianItem],
+    include_in_schema=False,
+)
+async def get_unassigned_technicians(
+    user: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    stmt = (
+        select(User)
+        .where(
+            User.role_id == "TECHNICIAN",
+            User.is_active == True,
+            User.hub_id.is_(None),
+        )
+        .order_by(User.created_at.asc())
+    )
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+
+@router.post(
+    "/admin/fleet/hubs/{hub_id}/technicians",
+    response_model=HubTechnicianAssignmentResponse,
+    summary="Gán Technician vào Hub",
+)
+@router.post(
+    "/admin/system/hubs/{hub_id}/technicians",
+    response_model=HubTechnicianAssignmentResponse,
+    include_in_schema=False,
+)
+async def assign_technician_to_hub(
+    hub_id: int,
+    body: HubTechnicianAssignRequest,
+    user: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    hub = await db.get(Hub, hub_id)
+    if not hub:
+        raise HTTPException(status_code=404, detail=f"Hub #{hub_id} không tồn tại.")
+
+    tech = await db.get(User, body.technician_id)
+    if not tech:
+        raise HTTPException(status_code=404, detail=f"Tài khoản '{body.technician_id}' không tồn tại.")
+    if tech.role_id != "TECHNICIAN":
+        raise HTTPException(status_code=400, detail=f"Tài khoản '{tech.email}' không có vai trò TECHNICIAN.")
+    if not tech.is_active:
+        raise HTTPException(status_code=400, detail=f"Technician '{tech.full_name}' hiện đang bị vô hiệu hóa.")
+
+    if tech.hub_id == hub_id:
+        raise HTTPException(status_code=400, detail=f"Technician '{tech.full_name}' đã được phân công tại Hub #{hub_id} từ trước.")
+    if tech.hub_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Technician '{tech.full_name}' đang thuộc Hub #{tech.hub_id}. Vui lòng dùng chức năng điều chuyển (Transfer)."
+        )
+
+    tech.hub_id = hub_id
+    now_utc = datetime.now(timezone.utc)
+    db.add(Notification(
+        user_id=tech.id,
+        title=f"Phân công công tác tại {hub.name}",
+        message=f"Admin đã phân công bạn phụ trách kỹ thuật tại trạm {hub.name} (Hub #{hub.id}).",
+        notifications_type=NotificationType.SYSTEM_ALERT,
+        reference_id=f"HUB_TECH_ASSIGN_{hub.id}",
+        created_at=now_utc,
+    ))
+    await db.commit()
+
+    await service.log_activity(
+        db,
+        action="HUB_TECH_ASSIGN",
+        user_id=user.id,
+        role=user.role.value,
+        resource_type="accounts",
+        resource_id=tech.id,
+        description=f"Gán Technician {tech.full_name} ({tech.email}) vào Hub #{hub.id} ({hub.name}).",
+        details={"hub_id": hub.id, "hub_name": hub.name, "technician_id": tech.id},
+    )
+
+    return HubTechnicianAssignmentResponse(
+        message=f"Đã gán Technician '{tech.full_name}' vào Hub #{hub.id} ({hub.name}).",
+        technician_id=tech.id,
+        full_name=tech.full_name,
+        email=tech.email,
+        hub_id=hub.id,
+        hub_name=hub.name,
+        previous_hub_id=None,
+    )
+
+
+@router.delete(
+    "/admin/fleet/hubs/{hub_id}/technicians/{technician_id}",
+    response_model=HubTechnicianAssignmentResponse,
+    summary="Gỡ Technician khỏi Hub",
+)
+@router.delete(
+    "/admin/system/hubs/{hub_id}/technicians/{technician_id}",
+    response_model=HubTechnicianAssignmentResponse,
+    include_in_schema=False,
+)
+async def unassign_technician_from_hub(
+    hub_id: int,
+    technician_id: str,
+    user: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    hub = await db.get(Hub, hub_id)
+    if not hub:
+        raise HTTPException(status_code=404, detail=f"Hub #{hub_id} không tồn tại.")
+
+    tech = await db.get(User, technician_id)
+    if not tech:
+        raise HTTPException(status_code=404, detail=f"Technician '{technician_id}' không tồn tại.")
+    if tech.role_id != "TECHNICIAN":
+        raise HTTPException(status_code=400, detail=f"Tài khoản '{tech.email}' không có vai trò TECHNICIAN.")
+    if tech.hub_id != hub_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Technician '{tech.full_name}' hiện không trực thuộc Hub #{hub_id} (hiện thuộc Hub: {tech.hub_id})."
+        )
+
+    prev_hub_id = tech.hub_id
+    tech.hub_id = None
+    now_utc = datetime.now(timezone.utc)
+    db.add(Notification(
+        user_id=tech.id,
+        title=f"Kết thúc phân công tại {hub.name}",
+        message=f"Admin đã gỡ phân công của bạn khỏi trạm {hub.name} (Hub #{hub.id}).",
+        notifications_type=NotificationType.SYSTEM_ALERT,
+        reference_id=f"HUB_TECH_UNASSIGN_{hub.id}",
+        created_at=now_utc,
+    ))
+    await db.commit()
+
+    await service.log_activity(
+        db,
+        action="HUB_TECH_UNASSIGN",
+        user_id=user.id,
+        role=user.role.value,
+        resource_type="accounts",
+        resource_id=tech.id,
+        description=f"Gỡ Technician {tech.full_name} khỏi Hub #{hub.id} ({hub.name}).",
+        details={"previous_hub_id": prev_hub_id, "technician_id": tech.id},
+    )
+
+    return HubTechnicianAssignmentResponse(
+        message=f"Đã gỡ Technician '{tech.full_name}' khỏi Hub #{hub.id} ({hub.name}).",
+        technician_id=tech.id,
+        full_name=tech.full_name,
+        email=tech.email,
+        hub_id=None,
+        hub_name=None,
+        previous_hub_id=prev_hub_id,
+    )
+
+
+@router.put(
+    "/admin/fleet/hubs/{hub_id}/technicians/{technician_id}/transfer",
+    response_model=HubTechnicianAssignmentResponse,
+    summary="Điều chuyển Technician sang Hub khác",
+)
+@router.put(
+    "/admin/system/hubs/{hub_id}/technicians/{technician_id}/transfer",
+    response_model=HubTechnicianAssignmentResponse,
+    include_in_schema=False,
+)
+async def transfer_technician_hub(
+    hub_id: int,
+    technician_id: str,
+    body: HubTechnicianTransferRequest,
+    user: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    if body.new_hub_id == hub_id:
+        raise HTTPException(status_code=400, detail="Hub mới không được trùng với Hub hiện tại.")
+
+    old_hub = await db.get(Hub, hub_id)
+    new_hub = await db.get(Hub, body.new_hub_id)
+    if not old_hub:
+        raise HTTPException(status_code=404, detail=f"Hub nguồn #{hub_id} không tồn tại.")
+    if not new_hub:
+        raise HTTPException(status_code=404, detail=f"Hub đích #{body.new_hub_id} không tồn tại.")
+
+    tech = await db.get(User, technician_id)
+    if not tech:
+        raise HTTPException(status_code=404, detail=f"Technician '{technician_id}' không tồn tại.")
+    if tech.role_id != "TECHNICIAN":
+        raise HTTPException(status_code=400, detail=f"Tài khoản '{tech.email}' không có vai trò TECHNICIAN.")
+    if tech.hub_id != hub_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Technician '{tech.full_name}' hiện không thuộc Hub nguồn #{hub_id} (hiện thuộc Hub: {tech.hub_id})."
+        )
+
+    tech.hub_id = new_hub.id
+    now_utc = datetime.now(timezone.utc)
+    db.add(Notification(
+        user_id=tech.id,
+        title=f"Điều chuyển công tác sang {new_hub.name}",
+        message=f"Admin đã điều chuyển bạn từ {old_hub.name} sang phụ trách kỹ thuật tại {new_hub.name} (Hub #{new_hub.id}).",
+        notifications_type=NotificationType.SYSTEM_ALERT,
+        reference_id=f"HUB_TECH_TRANSFER_{new_hub.id}",
+        created_at=now_utc,
+    ))
+    await db.commit()
+
+    await service.log_activity(
+        db,
+        action="HUB_TECH_TRANSFER",
+        user_id=user.id,
+        role=user.role.value,
+        resource_type="accounts",
+        resource_id=tech.id,
+        description=f"Điều chuyển Technician {tech.full_name} từ Hub #{old_hub.id} ({old_hub.name}) sang Hub #{new_hub.id} ({new_hub.name}).",
+        details={"previous_hub_id": old_hub.id, "new_hub_id": new_hub.id, "technician_id": tech.id},
+    )
+
+    return HubTechnicianAssignmentResponse(
+        message=f"Đã điều chuyển Technician '{tech.full_name}' sang Hub #{new_hub.id} ({new_hub.name}).",
+        technician_id=tech.id,
+        full_name=tech.full_name,
+        email=tech.email,
+        hub_id=new_hub.id,
+        hub_name=new_hub.name,
+        previous_hub_id=old_hub.id,
+    )
 
 
 @router.get("/admin/dashboard/kpi", response_model=KPIDashboardResponse, dependencies=[Depends(require_admin)])
