@@ -31,6 +31,7 @@ from app.modules.orders.schemas import (
     TrackingLegSchema,
     TrackingCurrentLegSchema,
     TrailPointSchema,
+    TrackingTimelineStepSchema,
     MissionReportResponse,
     ReportHubSchema,
     ReportRouteSchema,
@@ -316,30 +317,50 @@ async def create_order(
     await db.commit()
     await db.refresh(new_order)
 
-    # ── Notify tất cả Operators về đơn hàng mới ─────────────────────────────
+    # ── Notify Customer & tất cả Operators về đơn hàng mới ──────────────────
     try:
         from app.modules.auth.models import User as _User, ROLE_NAME_TO_ID as _ROLE_MAP
         from app.modules.system.models import Notification as _Notif, NotificationType as _NT
         from app.shared.roles import UserRole as _Role
+        from app.core.timezone import get_vn_datetime as _get_vn_dt
+
+        _mode_str = body.delivery_mode.value if hasattr(body.delivery_mode, "value") else str(body.delivery_mode)
+        _vn_now = _get_vn_dt()
+        _time_str = _vn_now.strftime("%H:%M:%S %d/%m/%Y")
+
+        # 1. Thông báo cho Customer xác nhận tạo đơn thành công kèm thời gian
+        db.add(_Notif(
+            user_id=str(current_user.id),
+            title=f"✅ Tạo đơn hàng #{new_order.id} thành công",
+            message=(
+                f"Đơn hàng #{new_order.id} ({body.package_label or 'Kiện hàng'}, {body.payload_kg} kg) "
+                f"được tạo lúc {_time_str}. Tuyến: {origin_hub.name} -> {dest_hub.name}. "
+                f"Vui lòng tiến hành thanh toán để tiếp tục."
+            ),
+            notifications_type=_NT.MISSION_STATUS,
+            reference_id=f"ORDER_CREATED_{new_order.id}",
+            created_at=_vn_now,
+        ))
+
+        # 2. Thông báo cho Operators
         _op_role_id = _ROLE_MAP.get(_Role.OPERATOR)
         if _op_role_id:
             _ops = (await db.execute(select(_User.id).where(_User.role_id == _op_role_id))).scalars().all()
-            _mode_str = body.delivery_mode.value if hasattr(body.delivery_mode, "value") else str(body.delivery_mode)
             for _op_id in _ops:
                 db.add(_Notif(
                     user_id=_op_id,
                     title=f"📦 Đơn hàng mới #{new_order.id}",
                     message=(
-                        f"Khách hàng vừa đặt đơn #{new_order.id} "
+                        f"Khách hàng vừa đặt đơn #{new_order.id} lúc {_time_str} "
                         f"({_mode_str}, {body.payload_kg} kg). "
                         f"ETA: {window_end.strftime('%H:%M %d/%m') if window_end else 'N/A'}. "
-                        f"Đơn đang chờ khách mang hàng đến Hub."
+                        f"Đơn đang chờ khách thanh toán và mang hàng đến Hub."
                     ),
                     notifications_type=_NT.MISSION_STATUS,
                     reference_id=f"NEW_ORDER_{new_order.id}",
-                    created_at=now,
+                    created_at=_vn_now,
                 ))
-            await db.commit()
+        await db.commit()
     except Exception as _e:
         print(f"[NOTIFY] Lỗi gửi thông báo đơn mới: {_e}")
 
@@ -509,12 +530,95 @@ async def track_delivery(
         else:
             current_mission_status = mission.status.value if hasattr(mission.status, "value") else str(mission.status)
 
+    from app.core.timezone import get_vn_naive_datetime
+    now_vn = get_vn_naive_datetime()
+    dep_at = (mission.departed_at or mission.start_time) if mission else None
+    arr_at = (mission.arrived_at or mission.end_time) if mission else None
+    # Chuẩn hóa nếu arrived_at từng bị simulator lưu bằng UTC trong khi departed_at là giờ VN (+7)
+    if dep_at and arr_at:
+        _d0 = dep_at.replace(tzinfo=None) if dep_at.tzinfo else dep_at
+        _a0 = arr_at.replace(tzinfo=None) if arr_at.tzinfo else arr_at
+        if (_a0 - _d0).total_seconds() < -3600:
+            arr_at = arr_at + timedelta(hours=7)
+    conf_at = mission.arrival_confirmed_at if mission else None
+    deliv_at = order.destination_received_at or conf_at
+
+    elapsed_sec = None
+    if dep_at:
+        end_ref = arr_at or now_vn
+        d_start = dep_at.replace(tzinfo=None) if dep_at.tzinfo else dep_at
+        d_end = end_ref.replace(tzinfo=None) if end_ref.tzinfo else end_ref
+        elapsed_sec = max(0, int((d_end - d_start).total_seconds()))
+
+    remaining_sec = None
+    if order.estimated_window_end and not deliv_at and not arr_at:
+        eta_naive = order.estimated_window_end.replace(tzinfo=None) if order.estimated_window_end.tzinfo else order.estimated_window_end
+        remaining_sec = max(0, int((eta_naive - now_vn).total_seconds()))
+
+    timeline_steps = [
+        TrackingTimelineStepSchema(
+            step_key="ORDER_CREATED",
+            label="Tạo đơn hàng",
+            completed=order.created_at is not None,
+            timestamp=order.created_at,
+            description="Đơn hàng đã được khởi tạo trên hệ thống",
+        ),
+        TrackingTimelineStepSchema(
+            step_key="PAYMENT_CONFIRMED",
+            label="Thanh toán thành công",
+            completed=(order.payment_status == PaymentStatus.PAID or order.paid_at is not None),
+            timestamp=order.paid_at,
+            description="Đã xác nhận thanh toán cước vận chuyển",
+        ),
+        TrackingTimelineStepSchema(
+            step_key="PACKAGE_RECEIVED",
+            label="Tiếp nhận kiện hàng tại Hub gửi",
+            completed=(
+                order.origin_received_at is not None
+                or order.status in (OrderStatus.AT_HUB, OrderStatus.IN_DELIVERY, OrderStatus.DELIVERED_TO_HUB)
+            ),
+            timestamp=order.origin_received_at,
+            description="Kỹ thuật viên tại Hub gửi đã kiểm tra và nhận kiện hàng",
+        ),
+        TrackingTimelineStepSchema(
+            step_key="IN_FLIGHT",
+            label="Drone cất cánh vận chuyển",
+            completed=(dep_at is not None),
+            timestamp=dep_at,
+            description="Drone đang trên hành trình vận chuyển kiện hàng",
+        ),
+        TrackingTimelineStepSchema(
+            step_key="ARRIVED_AT_HUB",
+            label="Drone hạ cánh tại Hub đích",
+            completed=(arr_at is not None),
+            timestamp=arr_at,
+            description="Drone đã hạ cánh xuống trạm đích",
+        ),
+        TrackingTimelineStepSchema(
+            step_key="DELIVERED",
+            label="Hoàn tất giao hàng tại Hub",
+            completed=(deliv_at is not None or conf_at is not None or order.status == OrderStatus.DELIVERED_TO_HUB),
+            timestamp=deliv_at,
+            description="Hàng đã sẵn sàng để người nhận đến lấy tại Hub đích",
+        ),
+    ]
+
     resp = TrackingResponse(
         order_id=order.id,
         delivery_status=code,
         delivery_status_label=label,
         eta=order.estimated_window_end,
         estimated_window_start=order.estimated_window_start,
+        order_created_at=order.created_at,
+        paid_at=order.paid_at,
+        package_received_at=order.origin_received_at,
+        departed_at=dep_at,
+        arrived_at=arr_at,
+        arrival_confirmed_at=conf_at,
+        delivered_at=deliv_at,
+        elapsed_seconds=elapsed_sec,
+        remaining_seconds=remaining_sec,
+        timeline=timeline_steps,
         mission_id=mission.id if mission else None,
         mission_status=current_mission_status,
         drone_id=mission.drone_id if mission else None,
@@ -596,6 +700,13 @@ async def track_delivery(
             f_hub = hubs.get(leg.from_hub_id)
             t_hub = hubs.get(leg.to_hub_id)
             leg_status_val = leg.status.value if hasattr(leg.status, "value") else str(leg.status or "")
+            leg_started = leg.started_at
+            leg_completed = leg.completed_at
+            if leg_started and leg_completed:
+                _ls = leg_started.replace(tzinfo=None) if leg_started.tzinfo else leg_started
+                _lc = leg_completed.replace(tzinfo=None) if leg_completed.tzinfo else leg_completed
+                if (_lc - _ls).total_seconds() < -3600:
+                    leg_completed = leg_completed + timedelta(hours=7)
             leg_schema = TrackingLegSchema(
                 id=leg.id,
                 sequence_no=leg.sequence_no or 1,
@@ -609,6 +720,8 @@ async def track_delivery(
                     latitude=t_hub.latitude, longitude=t_hub.longitude
                 ) if t_hub else None,
                 battery_id=leg.battery_id,
+                started_at=leg_started,
+                completed_at=leg_completed,
             )
             legs_list.append(leg_schema)
             if leg.status == MissionLegStatus.IN_PROGRESS:
@@ -629,6 +742,8 @@ async def track_delivery(
                 from_hub=current_leg_item.from_hub,
                 to_hub=current_leg_item.to_hub,
                 assigned_battery_id=current_leg_item.battery_id,
+                started_at=current_leg_item.started_at,
+                completed_at=current_leg_item.completed_at,
             )
         resp.legs = legs_list
 
