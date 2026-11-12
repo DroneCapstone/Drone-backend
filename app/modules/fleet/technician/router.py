@@ -179,7 +179,7 @@ async def get_incoming_drones(
             else:
                 mission_state = None
 
-            # Lấy thông tin legs để show current_leg và next_leg cho FE (để biết pin swap)
+            # Lấy thông tin legs để show current_leg và next_leg
             legs_res = await db.execute(
                 select(MissionLeg)
                 .where(MissionLeg.mission_id == m_id)
@@ -189,7 +189,6 @@ async def get_incoming_drones(
             
             current_leg_info = None
             next_leg_info = None
-            designated_battery_id = None
             
             if legs:
                 # Tìm leg đang active (IN_PROGRESS hoặc COMPLETED) ở hub hiện tại
@@ -203,7 +202,7 @@ async def get_incoming_drones(
                             "battery_id": leg.battery_id,
                             "status": leg.status.value if hasattr(leg.status, "value") else leg.status,
                         }
-                        # Next leg (cần pin gì để swap)
+                        # Next leg info
                         if i + 1 < len(legs):
                             next_leg = legs[i + 1]
                             next_leg_info = {
@@ -214,7 +213,6 @@ async def get_incoming_drones(
                                 "battery_id": next_leg.battery_id,
                                 "status": next_leg.status.value if hasattr(next_leg.status, "value") else next_leg.status,
                             }
-                            designated_battery_id = next_leg.battery_id
                         break
 
             response.append({
@@ -236,7 +234,6 @@ async def get_incoming_drones(
                 "arrival_confirmed_at": arrival_confirmed_at.isoformat() if arrival_confirmed_at else None,
                 "current_leg": current_leg_info,
                 "next_leg": next_leg_info,
-                "designated_battery_id": designated_battery_id,
             })
             
         return response
