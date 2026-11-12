@@ -259,23 +259,9 @@ async def get_transit_history(
             )
             query = query.where(
                 or_(
-                    # Normal delivery: show at destination hub
-                    and_(
-                        Mission.status.in_([
-                            MissionStatus.ARRIVAL_COMPLETED,
-                            MissionStatus.MISSION_COMPLETED,
-                        ]),
-                        Mission.destination_hub_id == tech_hub_id,
-                    ),
-                    # Incident return or crash recovery: show at the hub where drone landed/recovered
-                    and_(
-                        Mission.status.in_([MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED]),
-                        or_(
-                            Drone.current_hub_id == tech_hub_id,
-                            Mission.destination_hub_id == tech_hub_id,
-                        ),
-                    ),
-                    # Multi-leg missions: show at any hub involved
+                    # Show mission if technician at this hub confirmed arrival
+                    Mission.arrival_confirmed_by == str(user.id),
+                    # OR Multi-leg missions: show at any hub involved
                     Mission.id.in_(leg_mission_ids_subq),
                 )
             )
