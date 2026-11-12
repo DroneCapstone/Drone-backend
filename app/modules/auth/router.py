@@ -51,14 +51,14 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_async_d
         await log_activity(
             db, action="ARCHIVE_OLD_ACCOUNT", user_id=old_id,
             resource_type="users", resource_id=old_id,
-            description=f"Archive tài khoản cũ {old_email} để đăng ký lại",
+            description=f"Archived old account {old_email} for re-registration",
             details={"old_email": old_email, "archived_email": archived_email}
         )
 
     user = await service.register_user(db, body.email, body.full_name, body.password)
     await log_activity(db, action="REGISTER", user_id=user.id, user_email=user.email,
                        resource_type="users", resource_id=user.id,
-                       description=f"Đăng ký tài khoản mới: {user.email}")
+                       description=f"Registered new account: {user.email}")
     return user
 
 
@@ -76,11 +76,11 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_async_db)):
     if not user.is_active:
         raise HTTPException(
             status_code=403, 
-            detail="Tài khoản này đã bị xóa hoặc tạm khóa. Vui lòng liên hệ quản trị viên để được hỗ trợ."
+            detail="This account has been deleted or suspended. Please contact an administrator for assistance."
         )
     await log_activity(db, action="LOGIN", user_id=user.id, user_email=user.email,
                        role=user.role.value, resource_type="users", resource_id=user.id,
-                       description=f"Đăng nhập thành công: {user.email}")
+                       description=f"Logged in successfully: {user.email}")
     return TokenResponse(
         access_token=service.create_access_token(user.id, user.role.value),
         refresh_token=service.create_refresh_token(user.id),
@@ -114,7 +114,7 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
     success = await service.reset_password(db, body.token, body.new_password)
     if not success:
         raise HTTPException(status_code=400, detail="Invalid or expired token")
-    await log_activity(db, action="PASSWORD_RESET", description="Đặt lại mật khẩu thành công")
+    await log_activity(db, action="PASSWORD_RESET", description="Password reset successfully")
     return {"message": "Password reset successfully"}
 
 
@@ -144,7 +144,7 @@ async def refresh_token(refresh_token: str, db: AsyncSession = Depends(get_async
         raise HTTPException(status_code=401, detail="Invalid refresh token")
     user = await service.get_user_by_id(db, payload["sub"])
     if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="Tài khoản đã bị xóa hoặc vô hiệu hóa")
+        raise HTTPException(status_code=401, detail="Account has been deleted or deactivated")
     return TokenResponse(
         access_token=service.create_access_token(user.id, user.role.value),
         refresh_token=service.create_refresh_token(user.id),

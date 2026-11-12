@@ -186,6 +186,35 @@ class HubDetailResponse(BaseModel):
         from_attributes = True
 
 
+class HubTechnicianAssignRequest(BaseModel):
+    technician_id: str
+
+
+class HubTechnicianTransferRequest(BaseModel):
+    new_hub_id: int
+
+
+class HubTechnicianAssignmentResponse(BaseModel):
+    message: str
+    technician_id: str
+    full_name: str
+    email: str
+    hub_id: Optional[int] = None
+    hub_name: Optional[str] = None
+    previous_hub_id: Optional[int] = None
+
+
+class UnassignedTechnicianItem(BaseModel):
+    id: str
+    full_name: str
+    email: str
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 class KPIChartData(BaseModel):
     date: str
     revenue: float
@@ -207,6 +236,11 @@ class SimulatorConfigResponse(BaseModel):
     incident_severity: str
     interval_sec: int
     steps_per_leg: int
+    next_flight_incident: bool = False
+    next_flight_incident_step: Optional[int] = None
+    next_flight_incident_severity: Optional[str] = None
+    next_flight_incident_type: str = "FAILSAFE_RTH"
+    next_flight_incident_armed_at: Optional[str] = None
 
 
 class SimulatorConfigUpdate(BaseModel):
@@ -216,4 +250,18 @@ class SimulatorConfigUpdate(BaseModel):
     incident_severity: Optional[str] = None
     interval_sec: Optional[int] = None
     steps_per_leg: Optional[int] = None
+    next_flight_incident: Optional[bool] = None
+
+
+class SimulatorTriggerIncidentRequest(BaseModel):
+    """Arm a one-time incident scenario for the next flight only (auto-resets to SUCCESS afterward)."""
+    enabled: bool = True
+    severity: Optional[str] = None         # Low / Medium / High
+    trigger_step: Optional[int] = None     # Trigger step (1-based). Defaults to ~60% of the flight route
+    incident_type: Optional[str] = "FAILSAFE_RTH"  # FAILSAFE_RTH (chuyển hướng/quay về), SIGNAL_LOSS (mất tín hiệu), hoặc DISCONNECT_CRASH (rớt Drone)
+
+
+class SimulatorTriggerIncidentResponse(BaseModel):
+    message: str
+    config: SimulatorConfigResponse
 

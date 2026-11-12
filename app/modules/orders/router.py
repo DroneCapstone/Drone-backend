@@ -14,6 +14,7 @@ from app.modules.missions.models import Order, OrderStatus, Mission, MissionStat
 from app.modules.system.models import Hub
 from app.modules.fleet.models import Drone, DroneStatus, Battery, batteries_status, compute_battery_available_status
 from app.modules.missions.technician.router import get_compatible_battery_models
+from app.modules.missions.bundle_service import resolve_effective_origin_hub_id
 from app.modules.orders.schemas import (
     HubSchema,
     OrderResponse,
@@ -58,11 +59,11 @@ FAILED_MISSION_STATUS_STRINGS = {
 
 
 PLANNING_STATE_LABELS = {
-    "WAITING_PACKAGE": "Chờ nhận hàng tại Hub",
-    "READY_FOR_PLANNING": "Sẵn sàng lập lịch",
-    "PLANNED": "Đã lập lịch bay",
-    "FUTURE": "Chưa đến giờ lập lịch",
-    "NEEDS_REPLANNING": "Cần lập lịch lại",
+    "WAITING_PACKAGE": "Awaiting Hub Drop-off",
+    "READY_FOR_PLANNING": "Ready for Planning",
+    "PLANNED": "Flight Scheduled",
+    "FUTURE": "Not Yet Due for Planning",
+    "NEEDS_REPLANNING": "Needs Replanning",
 }
 
 def compute_order_estimated_window(
@@ -154,15 +155,13 @@ def calculate_planning_state(order: Order, mission: Mission = None) -> str | Non
         ms_str = (mission.status.value if hasattr(mission.status, "value") else str(mission.status or "")).upper()
         if ms_str in ACTIVE_MISSION_STATUS_STRINGS:
             return "PLANNED"
-        if ms_str in ("INCIDENT_RETURN", "INCIDENT RETURN"):
-            # Nếu sự cố chưa được Technician confirm thu hồi kiện hàng tại Hub (chưa có arrival_confirmed_at hoặc còn handling_status)
+        if ms_str in ("INCIDENT_RETURN", "INCIDENT RETURN") or ms_str in FAILED_MISSION_STATUS_STRINGS:
+            # Nếu sự cố/rớt Drone chưa được Technician xác nhận thu hồi tại Hub (chưa có arrival_confirmed_at hoặc còn handling_status)
             if mission.arrival_confirmed_at is None or mission.handling_status is not None:
-                return None  # Đang xử lý sự cố / đang bay về / chờ xác nhận thu hồi tại Hub, CHƯA ĐƯỢC lập lịch lại!
+                return None  # Đang chờ Technician thu hồi xác nhận qua confirm-arrival, CHƯA ĐƯỢC lập lịch lại!
             if order.status == OrderStatus.AT_HUB:
                 return "NEEDS_REPLANNING"
             return None
-        if ms_str in FAILED_MISSION_STATUS_STRINGS:
-            return "NEEDS_REPLANNING"
         if ms_str in COMPLETED_MISSION_STATUS_STRINGS or mission.arrived_at is not None:
             return None
 
@@ -191,8 +190,8 @@ def calculate_planning_state(order: Order, mission: Mission = None) -> str | Non
 
 
 # Cập nhật PLANNING_STATE_LABELS
-PLANNING_STATE_LABELS["OVERDUE"] = "Quá hạn giao — cần lập lịch ngay"
-PLANNING_STATE_LABELS["URGENT"] = "Sắp đến hạn — ưu tiên cao"
+PLANNING_STATE_LABELS["OVERDUE"] = "Overdue — Schedule Immediately"
+PLANNING_STATE_LABELS["URGENT"] = "Due Soon — High Priority"
 
 
 def compute_urgency_fields(
@@ -484,7 +483,7 @@ async def _get_reserved_battery_info_map(
                 "mission_id": m.id,
                 "mission_code": m.id,
                 "mission_status": m_status,
-                "reason": f"Đang được sử dụng bởi Nhiệm vụ #{m.id} ({m_status})",
+                "reason": f"In use by Mission #{m.id} ({m_status})",
             }
 
     # 2. Giữ chỗ cấp MissionLeg (các chặng Relay)
@@ -503,12 +502,12 @@ async def _get_reserved_battery_info_map(
     for leg, m in leg_res.all():
         if leg.battery_id:
             m_status = m.status.value if hasattr(m.status, "value") else str(m.status)
-            seq_info = f"Chặng {leg.sequence_no}" if leg.sequence_no else "Chặng trung gian"
+            seq_info = f"Leg {leg.sequence_no}" if leg.sequence_no else "Intermediate Leg"
             info_map[leg.battery_id] = {
                 "mission_id": m.id,
                 "mission_code": m.id,
                 "mission_status": m_status,
-                "reason": f"Đang được sử dụng bởi Nhiệm vụ #{m.id} ({seq_info} - {m_status})",
+                "reason": f"In use by Mission #{m.id} ({seq_info} - {m_status})",
             }
 
     return info_map
@@ -549,11 +548,11 @@ def _build_battery_eligible_schema(
     elif b.drone_id is not None and drone_id is not None and b.drone_id != drone_id:
         is_selectable = False
         status_str = "INSTALLED_ON_OTHER_DRONE"
-        unavailable_reason = f"Đang được gắn trên Drone #{b.drone_id}"
+        unavailable_reason = f"Installed on Drone #{b.drone_id}"
     elif b.drone_id is not None and drone_id is None:
         is_selectable = False
         status_str = "In Use"
-        unavailable_reason = f"Đang được gắn trên Drone #{b.drone_id}"
+        unavailable_reason = f"Installed on Drone #{b.drone_id}"
     elif charge_pct >= 100:
         is_selectable = True
         status_str = "Ready"
@@ -569,12 +568,12 @@ def _build_battery_eligible_schema(
         if required_energy_wh is not None:
             safe_e = round(avail_energy_wh * 0.8, 1)
             unavailable_reason = (
-                f"Pin chưa sạc đầy ({charge_pct}% - {avail_energy_wh:.1f} Wh). "
-                f"Năng lượng an toàn 80% ({safe_e} Wh) không đủ bay thẳng tới đích "
-                f"(cần tối thiểu {required_energy_wh:.1f} Wh)"
+                f"Battery not fully charged ({charge_pct}% - {avail_energy_wh:.1f} Wh). "
+                f"80% safe energy ({safe_e} Wh) is insufficient for direct flight to destination "
+                f"(requires at least {required_energy_wh:.1f} Wh)"
             )
         else:
-            unavailable_reason = f"Pin chưa sạc đầy ({charge_pct}% < 100%), không thể chọn để cất cánh"
+            unavailable_reason = f"Battery not fully charged ({charge_pct}% < 100%), cannot be selected for takeoff"
 
     if b.drone_id is not None and drone_id is not None and b.drone_id == drone_id and is_selectable:
         # Pin đang gắn sẵn trên chính Drone này và đủ điều kiện -> Sẵn sàng cất cánh ngay
@@ -637,10 +636,11 @@ async def get_eligible_drones(
     order = await db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    if not order.origin_hub_id:
+    eff_origin_id, _ = await resolve_effective_origin_hub_id(db, order)
+    if not eff_origin_id:
         raise HTTPException(status_code=400, detail="Order does not have an origin hub")
         
-    hub = await db.get(Hub, order.origin_hub_id)
+    hub = await db.get(Hub, eff_origin_id)
     if not hub:
         raise HTTPException(status_code=404, detail="Origin Hub not found")
 
@@ -799,11 +799,11 @@ async def get_eligible_drones(
             d_selectable = False
             if required_direct_energy_wh is not None:
                 d_unavail_reason = (
-                    f"Hub hiện không còn viên pin tương thích nào đủ năng lượng an toàn bay tới đích "
-                    f"({required_direct_energy_wh:.1f} Wh với 20% dự phòng) hoặc đạt 100%."
+                    f"Hub currently has no compatible battery with enough safe energy for direct flight to destination "
+                    f"({required_direct_energy_wh:.1f} Wh with 20% reserve) or at 100% charge."
                 )
             else:
-                d_unavail_reason = "Hub hiện không còn viên pin tương thích nào đạt 100% để cất cánh (toàn bộ pin < 100% đang sạc hoặc đã được gán cho nhiệm vụ khác)"
+                d_unavail_reason = "Hub currently has no compatible battery at 100% charge for takeoff (all < 100% batteries are charging or assigned to other missions)"
 
         drones_schema_list.append(
             DroneEligibleSchema(
@@ -945,10 +945,11 @@ async def get_eligible_batteries_for_order(
     order = await db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    if not order.origin_hub_id:
+    eff_origin_id, _ = await resolve_effective_origin_hub_id(db, order)
+    if not eff_origin_id:
         raise HTTPException(status_code=400, detail="Order does not have an origin hub")
 
-    hub = await db.get(Hub, order.origin_hub_id)
+    hub = await db.get(Hub, eff_origin_id)
     if not hub:
         raise HTTPException(status_code=404, detail="Origin Hub not found")
 
@@ -1059,7 +1060,7 @@ async def cancel_order(
     if order.status not in (OrderStatus.PENDING, OrderStatus.AWAITING_DROP_OFF, OrderStatus.AT_HUB):
         raise HTTPException(
             status_code=400,
-            detail=f"Chỉ có thể huỷ đơn hàng khi chưa cất cánh (PENDING, AWAITING_DROP_OFF, AT_HUB), hiện tại: {order_status_val}"
+            detail=f"Orders can only be cancelled before takeoff (PENDING, AWAITING_DROP_OFF, AT_HUB); current status: {order_status_val}"
         )
 
     # Chặn nếu đơn hàng đang trên chuyến bay active
@@ -1078,7 +1079,7 @@ async def cancel_order(
     if active_m_res.scalars().first():
         raise HTTPException(
             status_code=400,
-            detail="Đơn hàng đã hoặc đang trong chuyến bay, không thể hủy."
+            detail="Order is already in or completed a flight and cannot be cancelled."
         )
 
     # Nếu có mission đã lên lịch nhưng chưa bay (SCHEDULED, PENDING_APPROVAL, APPROVED) thì huỷ luôn
@@ -1117,7 +1118,7 @@ async def cancel_order(
     except Exception as e:
         print(f"[EMAIL] Lỗi gửi email huỷ order: {e}")
 
-    return {"message": "Đã huỷ đơn hàng", "order_id": order_id, "status": "CANCELLED"}
+    return {"message": "Order cancelled", "order_id": order_id, "status": "CANCELLED"}
 
 
 @router.patch("/{order_id}", response_model=OrderResponse)

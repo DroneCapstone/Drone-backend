@@ -1,5 +1,6 @@
 import math
 import random
+from typing import Optional
 import pandas as pd
 import joblib
 from pathlib import Path
@@ -58,11 +59,13 @@ def predict_flight_energy(
     distance_km: float,
     payload_weight: float,
     speed: float = 10.0,
-    altitude: float = 50.0
+    altitude: float = 50.0,
+    weather_override: Optional[dict] = None,
 ) -> dict:
     """
     [Core AI Service] Dự đoán tiêu thụ năng lượng của Drone (Deterministic & Physics-informed XAI SHAP).
-    Đảm bảo cùng một bộ tham số (distance_km, payload_weight, speed, altitude) luôn trả về
+    Hỗ trợ nhận `weather_override` từ dữ liệu thời tiết real-time Open-Meteo thay cho mẫu CSV tĩnh.
+    Đảm bảo cùng một bộ tham số (distance_km, payload_weight, speed, altitude, weather) luôn trả về
     chính xác cùng một giá trị energy_wh giữa Operator Analyze, Create Mission và Flight Simulator.
     """
     dist_km = max(0.05, float(distance_km or 0.0))
@@ -70,19 +73,34 @@ def predict_flight_energy(
     safe_speed = max(1.0, float(speed or 10.0))
     safe_alt = max(10.0, float(altitude or 50.0))
 
-    # Sử dụng mẫu thời tiết chuẩn xác định (deterministic) từ tập test để tránh lệch số liệu giữa các lần gọi
-    if df_weather is not None and not df_weather.empty:
+    precip = 0.0
+    if weather_override and isinstance(weather_override, dict):
+        temp = _safe_float(weather_override.get('temperature_c') if weather_override.get('temperature_c') is not None else weather_override.get('temperature'), 26.0)
+        hum = _safe_float(weather_override.get('humidity_pct') if weather_override.get('humidity_pct') is not None else weather_override.get('humidity'), 70.0)
+        base_wind = _safe_float(weather_override.get('avg_wind_speed') if weather_override.get('avg_wind_speed') is not None else weather_override.get('wind_speed'), 4.5)
+        base_gust = _safe_float(weather_override.get('wind_gust_ms') if weather_override.get('wind_gust_ms') is not None else weather_override.get('wind_gust'), base_wind + 1.5)
+        wind_dir = _safe_float(weather_override.get('wind_dir_deg') if weather_override.get('wind_dir_deg') is not None else weather_override.get('wind_direction'), 180.0)
+        press = _safe_float(weather_override.get('pressure_hpa') if weather_override.get('pressure_hpa') is not None else weather_override.get('pressure'), 1012.0)
+        cloud = _safe_float(weather_override.get('cloud_cover_pct') if weather_override.get('cloud_cover_pct') is not None else weather_override.get('cloud_cover'), 20.0)
+        precip = _safe_float(weather_override.get('precipitation_mm') if weather_override.get('precipitation_mm') is not None else weather_override.get('precipitation'), 0.0)
+    elif df_weather is not None and not df_weather.empty:
+        # Sử dụng mẫu thời tiết chuẩn xác định (deterministic) từ tập test nếu không có weather_override
         row_idx = int(round(dist_km * 10 + payload_kg * 3)) % len(df_weather)
         weather_sample = df_weather.iloc[row_idx]
         temp = _safe_float(weather_sample.get('temperature_c'), 26.0)
         hum = _safe_float(weather_sample.get('humidity_pct'), 70.0)
-        wind_spd = _safe_float(weather_sample.get('avg_wind_speed'), 4.5)
-        wind_gust = _safe_float(weather_sample.get('wind_gust_ms'), 6.0)
+        base_wind = _safe_float(weather_sample.get('avg_wind_speed'), 4.5)
+        base_gust = _safe_float(weather_sample.get('wind_gust_ms'), 6.0)
         wind_dir = _safe_float(weather_sample.get('wind_dir_deg'), 180.0)
         press = _safe_float(weather_sample.get('pressure_hpa'), 1012.0)
         cloud = _safe_float(weather_sample.get('cloud_cover_pct'), 20.0)
     else:
-        temp, hum, wind_spd, wind_gust, wind_dir, press, cloud = 26.0, 70.0, 4.5, 6.0, 180.0, 1012.0, 20.0
+        temp, hum, base_wind, base_gust, wind_dir, press, cloud = 26.0, 70.0, 4.5, 6.0, 180.0, 1012.0, 20.0
+
+    # Hiệu ứng đứt gió tầng cao (Wind Shear): ở độ cao >= 60m tốc độ gió tăng ~15%
+    wind_mult = 1.15 if safe_alt >= 60.0 else 1.0
+    wind_spd = round(base_wind * wind_mult, 2)
+    wind_gust = round(base_gust * wind_mult, 2)
 
     # Góc đón gió xác định (deterministic) dựa trên cự ly & tải trọng
     hub_bearing = float(int(round(dist_km * 45 + payload_kg * 15)) % 360)
@@ -135,7 +153,8 @@ def predict_flight_energy(
     shap_dist = round(dist_km * 15.0, 2)
     shap_payload = round(dist_km * payload_kg * 2.2, 2)
     headwind_comp = math.cos(math.radians(rel_angle)) * wind_spd
-    shap_wind = round(headwind_comp * 0.12 * dist_km, 2)
+    rain_drag = (precip * 0.25 * dist_km) if precip > 0.2 else 0.0
+    shap_wind = round(headwind_comp * 0.12 * dist_km + rain_drag, 2)
 
     raw_model_energy = None
     if model_pipeline is not None:
@@ -162,11 +181,11 @@ def predict_flight_energy(
 
     # Đóng gói AI Explanation
     speed_impact_desc = (
-        f"Lực cản khí động học ở tốc độ cao ({safe_speed:.1f} m/s) làm tăng tiêu thụ năng lượng thêm +{shap_speed:.1f} Wh"
+        f"Aerodynamic drag at high speed ({safe_speed:.1f} m/s) increases energy consumption by +{shap_speed:.1f} Wh"
         if shap_speed > 0
-        else "Vận tốc bay kinh tế (10.0 m/s) giúp tối ưu hóa hiệu suất năng lượng, không phát sinh hao phí lực cản"
+        else "Eco cruise speed (10.0 m/s) optimizes energy efficiency with no excess drag penalty"
     )
-    wind_impact_desc = "Gió xuôi hỗ trợ tiết kiệm pin" if shap_wind <= 0 else "Gió ngược làm tăng lực cản di chuyển"
+    wind_impact_desc = "Tailwind assists flight and saves battery" if shap_wind <= 0 else "Headwind increases aerodynamic drag"
 
     ai_explanation = {
         "flight_speed_mps": safe_speed,
@@ -176,36 +195,36 @@ def predict_flight_energy(
         "feature_contributions": [
             {
                 "feature": "speed",
-                "label": "Vận tốc bay (Flight Speed)",
+                "label": "Flight Speed",
                 "value": f"{safe_speed:.1f} m/s ({safe_speed * 3.6:.1f} km/h)",
                 "shap_contribution_wh": shap_speed,
                 "impact": speed_impact_desc
             },
             {
                 "feature": "altitude",
-                "label": "Độ cao bay (Altitude)",
+                "label": "Flight Altitude",
                 "value": f"{safe_alt:.0f} m",
                 "shap_contribution_wh": shap_alt,
-                "impact": f"Tầng bay {safe_alt:.0f}m {'tăng tiêu thụ leo cao +' + str(shap_alt) + ' Wh' if shap_alt > 0 else 'tối ưu tầng bay thấp'}"
+                "impact": f"Cruise altitude {safe_alt:.0f}m {'increases climb energy by +' + str(shap_alt) + ' Wh' if shap_alt > 0 else 'optimizes low-altitude flight'}"
             },
             {
                 "feature": "distance",
-                "label": "Cự ly hành trình (Distance)",
+                "label": "Route Distance",
                 "value": f"{dist_km:.2f} km",
                 "shap_contribution_wh": shap_dist,
-                "impact": f"Khoảng cách bay đóng góp {shap_dist:.1f} Wh vào năng lượng tiêu thụ cơ bản"
+                "impact": f"Flight distance contributes {shap_dist:.1f} Wh to baseline energy consumption"
             },
             {
                 "feature": "payload",
-                "label": "Tải trọng hàng hóa (Payload)",
+                "label": "Cargo Payload",
                 "value": f"{payload_kg:.2f} kg",
                 "shap_contribution_wh": shap_payload,
-                "impact": f"Tải trọng hàng hóa làm tăng công suất nâng động cơ thêm +{shap_payload:.1f} Wh"
+                "impact": f"Cargo payload increases motor lift power demand by +{shap_payload:.1f} Wh"
             },
             {
                 "feature": "wind",
-                "label": "Điều kiện đón gió (Wind Effect)",
-                "value": f"{wind_spd:.1f} m/s (góc {rel_angle:.0f}°)",
+                "label": "Wind Effect",
+                "value": f"{wind_spd:.1f} m/s (angle {rel_angle:.0f}°)",
                 "shap_contribution_wh": shap_wind,
                 "impact": wind_impact_desc
             }
@@ -219,13 +238,13 @@ def predict_flight_energy(
                 "energy_wh": energy_wh,
                 "speed_mps": safe_speed,
                 "speed_kmh": round(safe_speed * 3.6, 1),
-                "action": f"Bay hành trình {dist_km:.2f} km ở vận tốc {safe_speed:.1f} m/s (độ cao {safe_alt:.0f}m)",
+                "action": f"Cruise flight {dist_km:.2f} km at {safe_speed:.1f} m/s (altitude {safe_alt:.0f}m)",
             }
         ],
         "summary": (
-            f"Vận tốc bay {safe_speed:.1f} m/s ở độ cao {safe_alt:.0f}m "
-            f"{'làm tăng tiêu thụ +' + str(round(shap_speed + shap_alt, 1)) + ' Wh do lực cản không khí' if (shap_speed + shap_alt) > 0 else 'đạt điểm tối ưu năng lượng'} "
-            f"với cự ly {dist_km:.2f} km và tải trọng {payload_kg:.2f} kg."
+            f"Cruise speed {safe_speed:.1f} m/s at {safe_alt:.0f}m altitude "
+            f"{'increases energy consumption by +' + str(round(shap_speed + shap_alt, 1)) + ' Wh due to aerodynamic drag' if (shap_speed + shap_alt) > 0 else 'achieves optimal energy efficiency'} "
+            f"over {dist_km:.2f} km with a {payload_kg:.2f} kg payload."
         )
     }
 

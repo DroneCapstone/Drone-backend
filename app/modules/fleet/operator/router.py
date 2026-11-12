@@ -52,7 +52,7 @@ class BatteryOverviewResponse(BaseModel):
 
 # ── Drone endpoints ───────────────────────────────────────────────────────────
 
-@router.get("/drones", response_model=list[DroneOverviewResponse], summary="Tất cả drone ở mọi hub")
+@router.get("/drones", response_model=list[DroneOverviewResponse], summary="List all drones across all hubs")
 async def list_all_drones(
     user: CurrentUser = Depends(allow_operator),
     db: AsyncSession = Depends(get_async_db),
@@ -82,7 +82,7 @@ async def list_all_drones(
     return response
 
 
-@router.get("/drones/{drone_id}", response_model=DroneOverviewResponse, summary="Chi tiết một drone")
+@router.get("/drones/{drone_id}", response_model=DroneOverviewResponse, summary="Get drone details")
 async def get_drone(
     drone_id: str,
     user: CurrentUser = Depends(allow_operator),
@@ -114,12 +114,12 @@ async def get_drone(
 
 # ── Battery endpoints ─────────────────────────────────────────────────────────
 
-@router.get("/batteries", response_model=list[BatteryOverviewResponse], summary="Tất cả pin ở mọi hub")
+@router.get("/batteries", response_model=list[BatteryOverviewResponse], summary="List all batteries across all hubs")
 async def list_all_batteries(
-    hub_id: Optional[int] = Query(None, description="Lọc pin theo Hub ID"),
+    hub_id: Optional[int] = Query(None, description="Filter batteries by Hub ID"),
     available_status: Optional[BatteryAvailableStatus] = Query(
         None,
-        description="Lọc theo trạng thái khả dụng: Charging | Ready | In Use | Replaced"
+        description="Filter by availability status: Charging | Ready | In Use | Replaced"
     ),
     user: CurrentUser = Depends(allow_operator),
     db: AsyncSession = Depends(get_async_db),

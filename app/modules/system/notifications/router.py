@@ -51,12 +51,12 @@ class NotificationListResponse(BaseModel):
 # ── GET list (với pagination + filter) ────────────────────────────
 
 @router.get("", response_model=NotificationListResponse,
-            summary="Danh sách thông báo (chuông 🔔) của người dùng")
+            summary="List user notifications (bell 🔔)")
 async def get_notifications(
-    page: int = Query(1, ge=1, description="Trang hiện tại"),
-    page_size: int = Query(20, ge=1, le=100, description="Số thông báo mỗi trang"),
-    is_read: Optional[bool] = Query(None, description="true = đã đọc, false = chưa đọc"),
-    notification_type: Optional[NotificationType] = Query(None, description="Lọc theo loại"),
+    page: int = Query(1, ge=1, description="Current page number"),
+    page_size: int = Query(20, ge=1, le=100, description="Number of notifications per page"),
+    is_read: Optional[bool] = Query(None, description="true = read, false = unread"),
+    notification_type: Optional[NotificationType] = Query(None, description="Filter by notification type"),
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -99,7 +99,7 @@ async def get_notifications(
 
 # ── GET unread count ────────────────────────────────────────────────
 
-@router.get("/unread-count", summary="Số thông báo chưa đọc")
+@router.get("/unread-count", summary="Unread notification count")
 async def get_unread_count(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
@@ -117,7 +117,7 @@ async def get_unread_count(
 # ── PATCH mark one read ─────────────────────────────────────────────
 
 @router.patch("/{notification_id}/read", response_model=NotificationResponse,
-              summary="Đánh dấu đã đọc một thông báo")
+              summary="Mark a notification as read")
 async def mark_as_read(
     notification_id: int,
     user: CurrentUser = Depends(get_current_user),
@@ -136,7 +136,7 @@ async def mark_as_read(
 
 # ── PATCH mark all read ─────────────────────────────────────────────
 
-@router.patch("/read-all", summary="Đánh dấu tất cả thông báo là đã đọc")
+@router.patch("/read-all", summary="Mark all notifications as read")
 async def mark_all_as_read(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
@@ -147,13 +147,13 @@ async def mark_all_as_read(
         .values(is_read=True)
     )
     await db.commit()
-    return {"message": "Tất cả thông báo đã được đánh dấu là đã đọc."}
+    return {"message": "All notifications marked as read."}
 
 
 # ── DELETE one ──────────────────────────────────────────────────────
 
 @router.delete("/{notification_id}", status_code=204,
-               summary="Xóa một thông báo")
+               summary="Delete a notification")
 async def delete_notification(
     notification_id: int,
     user: CurrentUser = Depends(get_current_user),
@@ -170,7 +170,7 @@ async def delete_notification(
 
 # ── DELETE all read ─────────────────────────────────────────────────
 
-@router.delete("/clear-read", summary="Xóa tất cả thông báo đã đọc")
+@router.delete("/clear-read", summary="Delete all read notifications")
 async def clear_read_notifications(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
@@ -180,4 +180,4 @@ async def clear_read_notifications(
         .where(Notification.user_id == user.id, Notification.is_read == True)
     )
     await db.commit()
-    return {"message": f"Đã xóa {result.rowcount} thông báo đã đọc."}
+    return {"message": f"Deleted {result.rowcount} read notifications."}
