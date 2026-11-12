@@ -70,7 +70,13 @@ async def resolve_effective_origin_hub_id(
                 .limit(1)
             )
             if not newer_completed_res.scalars().first():
-                return last_inc_mission.destination_hub_id, True
+                # Bảo vệ: Nếu destination_hub_id của mission sự cố trùng với order.destination_hub_id
+                # (ví dụ dữ liệu RTH cũ chưa cập nhật destination_hub_id về hub quay đầu),
+                # KHÔNG bao giờ lấy Hub đích làm Hub xuất phát cho chuyến bay mới.
+                if last_inc_mission.destination_hub_id == order.destination_hub_id:
+                    return order.origin_hub_id, False
+                is_diverted = (last_inc_mission.destination_hub_id != order.origin_hub_id)
+                return last_inc_mission.destination_hub_id, is_diverted
 
     return order.origin_hub_id, False
 

@@ -3254,13 +3254,14 @@ async def get_eligible_batteries_for_mission_planning(
         raise HTTPException(status_code=404, detail=f"Drone #{drone_id} not found")
 
     target_hub_id = hub_id
-    if not target_hub_id and order_id:
-        order = await db.get(Order, order_id.strip())
-        if not order:
-            raise HTTPException(status_code=404, detail=f"Order '{order_id}' not found")
-        target_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
     if not target_hub_id:
-        target_hub_id = drone.current_hub_id
+        eff_hub_id = None
+        if order_id:
+            order = await db.get(Order, order_id.strip())
+            if not order:
+                raise HTTPException(status_code=404, detail=f"Order '{order_id}' not found")
+            eff_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
+        target_hub_id = drone.current_hub_id or eff_hub_id
 
     reserved_info_map = await _get_reserved_battery_info_map(
         db, exclude_order_id=order_id.strip() if order_id else None
