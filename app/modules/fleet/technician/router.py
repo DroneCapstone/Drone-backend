@@ -202,7 +202,7 @@ async def get_incoming_drones(
                             "battery_id": leg.battery_id,
                             "status": leg.status.value if hasattr(leg.status, "value") else leg.status,
                         }
-                        # Next leg info
+                        # Next leg info (battery_id = null - technician chọn qua swap-battery)
                         if i + 1 < len(legs):
                             next_leg = legs[i + 1]
                             next_leg_info = {
@@ -210,7 +210,7 @@ async def get_incoming_drones(
                                 "sequence_no": next_leg.sequence_no,
                                 "from_hub_id": next_leg.from_hub_id,
                                 "to_hub_id": next_leg.to_hub_id,
-                                "battery_id": next_leg.battery_id,
+                                "battery_id": None,
                                 "status": next_leg.status.value if hasattr(next_leg.status, "value") else next_leg.status,
                             }
                         break
