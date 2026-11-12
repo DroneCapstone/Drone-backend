@@ -47,6 +47,7 @@ class ConfirmArrivalRequest(BaseModel):
     issue_description: Optional[str] = None
     drone_status: Optional[str] = None
     battery_faulty: Optional[bool] = False
+    package_lost: Optional[bool] = False  # Tùy chọn: True nếu thu hồi xác nhận kiện hàng bị hỏng/mất sau sự cố rớt Drone
 
 
 async def _resolve_mission(db: AsyncSession, mission_or_order_id: str) -> Mission:
@@ -109,6 +110,7 @@ async def get_incoming_drones(
                     MissionStatus.IN_PROGRESS,
                     MissionStatus.ACTIVE_MISSION,
                     MissionStatus.INCIDENT_RETURN,
+                    MissionStatus.FAILED,
                     MissionStatus.ARRIVAL_COMPLETED,
                     MissionStatus.MISSION_COMPLETED,
                 ]),
@@ -240,7 +242,7 @@ async def get_transit_history(
                         MissionStatus.MISSION_COMPLETED,
                     ]),
                     and_(
-                        Mission.status == MissionStatus.INCIDENT_RETURN,
+                        Mission.status.in_([MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED]),
                         Mission.handling_status.is_(None),
                     )
                 )
@@ -348,7 +350,7 @@ async def confirm_arrival(
 
     # Nếu mission đã xử lý hoàn tất trước đó (handling_status đã được xóa và drone đã được tiếp nhận)
     if (
-        mission.status in [MissionStatus.ARRIVAL_COMPLETED, MissionStatus.MISSION_COMPLETED, MissionStatus.INCIDENT_RETURN]
+        mission.status in [MissionStatus.ARRIVAL_COMPLETED, MissionStatus.MISSION_COMPLETED, MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED]
         and mission.handling_status is None
         and mission.arrival_confirmed_at is not None
     ):
@@ -384,8 +386,9 @@ async def confirm_arrival(
         if body.drone_status and str(body.drone_status).strip().lower() == "maintenance":
             has_issue_flag = True
 
+    is_crash_flight = (mission.status == MissionStatus.FAILED)
     is_incident_flight = (
-        mission.status == MissionStatus.INCIDENT_RETURN
+        mission.status in (MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED)
         or mission.handling_status == HandlingStatus.CANNOT_CONTINUE
         or has_open_incident
         or has_issue_flag
@@ -394,10 +397,17 @@ async def confirm_arrival(
     drone = await db.get(Drone, mission.drone_id) if mission.drone_id else None
 
     # ── Xác định Hub tiếp nhận thực tế (receiving_hub_id) ───────────────────
-    # 1. Với chuyến bay sự cố: ưu tiên lấy vị trí thực tế drone hạ cánh (drone.current_hub_id),
-    #    sau đó đến Hub đích chuyển hướng (mission.destination_hub_id) -> tech_hub_id -> origin_hub.
-    # 2. Với chuyến bay bình thường: ưu tiên tech_hub_id của Technician tiếp nhận, sau đó mission.destination_hub_id.
-    if is_incident_flight:
+    # 1. Với chuyến bay rớt/mất kết nối (DISCONNECT_CRASH -> FAILED): ưu tiên Hub của Technician vừa mang hàng/drone về xác nhận (tech_hub_id).
+    # 2. Với chuyến bay sự cố quay đầu/chuyển hướng (INCIDENT_RETURN): ưu tiên vị trí thực tế drone hạ cánh (drone.current_hub_id) -> destination_hub_id -> tech_hub_id.
+    # 3. Với chuyến bay bình thường: ưu tiên tech_hub_id -> destination_hub_id.
+    if is_crash_flight:
+        receiving_hub_id = (
+            tech_hub_id
+            or mission.destination_hub_id
+            or (drone.current_hub_id if drone and drone.current_hub_id else None)
+            or mission.origin_hub_id
+        )
+    elif is_incident_flight:
         receiving_hub_id = (
             (drone.current_hub_id if drone and drone.current_hub_id else None)
             or mission.destination_hub_id
@@ -411,8 +421,10 @@ async def confirm_arrival(
 
     # ── 1. Cập nhật Mission (rời danh sách Transit đang hoạt động sang History) ──
     if not mission.arrived_at:
-        mission.arrived_at = now       # ghi nhận thời điểm drone đáp hub
-    if is_incident_flight:
+        mission.arrived_at = now       # ghi nhận thời điểm drone về hub
+    if is_crash_flight:
+        mission.status = MissionStatus.FAILED
+    elif is_incident_flight:
         mission.status = MissionStatus.INCIDENT_RETURN
     elif mission.status != MissionStatus.MISSION_COMPLETED:
         mission.status = MissionStatus.ARRIVAL_COMPLETED
@@ -518,24 +530,78 @@ async def confirm_arrival(
                     and order_obj.destination_hub_id
                     and int(receiving_hub_id) == int(order_obj.destination_hub_id)
                 )
+                is_package_lost = bool(body and getattr(body, "package_lost", False))
 
-                if is_incident_flight and not landed_at_destination:
-                    # Kiện hàng hạ cánh khẩn cấp tại Hub khác (không phải Hub Đích) -> Bảo toàn order.origin_hub_id!
+                if is_incident_flight and is_package_lost:
+                    # Xác nhận thu hồi drone sau sự cố nhưng kiện hàng đã hư hỏng/thất lạc -> Hủy đơn + báo Admin hoàn tiền
+                    order_obj.status = OrderStatus.CANCELLED
+                    order_obj.cancelled_at = now
+                    order_obj.replan_required_at = None
+                    order_obj.updated_at = now
+                    if open_incident:
+                        open_incident.status = IncidentStatus.CLOSED
+                    confirm_msg = (
+                        "Crash recovery confirmed: package marked as lost/damaged. Order cancelled and "
+                        "Operators/Admins notified for refund processing; drone placed into Maintenance."
+                    )
+
+                    from app.modules.system.models import Notification as _Notif, NotificationType as _NT
+                    from app.core.timezone import get_vn_datetime as _vn_tz
+                    from app.shared.workers import get_operator_and_admin_ids
+                    now_tz = _vn_tz()
+
+                    if order_obj.customer_id:
+                        db.add(_Notif(
+                            user_id=order_obj.customer_id,
+                            title="⚠️ Order Cancelled After Flight Crash — Refund Initiated",
+                            message=(
+                                f"Unfortunately, your package for order #{order_obj.id} was lost/damaged during an "
+                                f"in-flight crash on Mission #{mission.id}. Our support team has cancelled the order and initiated refund handling."
+                            ),
+                            notifications_type=_NT.SYSTEM_ALERT,
+                            reference_id=f"CRASH_LOST_{mission.id}",
+                            mission_id=str(mission.id),
+                            created_at=now_tz,
+                        ))
+
+                    for op_adm_id in await get_operator_and_admin_ids(db):
+                        db.add(_Notif(
+                            user_id=op_adm_id,
+                            title=f"🚨 Crash Recovery: Package Lost for Order #{order_obj.id}",
+                            message=(
+                                f"Technician confirmed drone #{mission.drone_id} recovery at {hub_name or f'Hub #{receiving_hub_id}'}, "
+                                f"but package #{order_obj.id} was lost/damaged. Order marked CANCELLED — please process PayOS refund if PAID."
+                            ),
+                            notifications_type=_NT.SYSTEM_ALERT,
+                            reference_id=f"CRASH_LOST_{mission.id}",
+                            mission_id=str(mission.id),
+                            drone_id=str(mission.drone_id) if mission.drone_id else None,
+                            created_at=now_tz,
+                        ))
+
+                elif is_incident_flight and not landed_at_destination:
+                    # Kiện hàng hạ cánh khẩn cấp / thu hồi tại Hub khác (không phải Hub Đích) -> Bảo toàn order.origin_hub_id!
                     order_obj.status = OrderStatus.AT_HUB
                     order_obj.replan_required_at = now
                     order_obj.origin_received_at = order_obj.origin_received_at or now
                     order_obj.origin_received_by = order_obj.origin_received_by or str(user.id)
                     order_obj.updated_at = now
-                    confirm_msg = "Emergency arrival confirmed. Package secured at intermediate hub for replanning; drone placed into Maintenance."
+                    if is_crash_flight and open_incident and open_incident.status == IncidentStatus.OPEN:
+                        open_incident.status = IncidentStatus.INVESTIGATING
+                    confirm_msg = (
+                        "Crash recovery confirmed at Hub. Package secured and ready for replanning; drone placed into Maintenance."
+                        if is_crash_flight
+                        else "Emergency arrival confirmed. Package secured at intermediate hub for replanning; drone placed into Maintenance."
+                    )
 
+                    from app.modules.system.models import Notification as _Notif, NotificationType as _NT
                     # Thông báo cho Customer: đơn hàng tạm hoãn do sự cố kỹ thuật và đang được sắp xếp lại
                     if order_obj.customer_id:
-                        from app.modules.system.models import Notification as _Notif, NotificationType as _NT
                         db.add(_Notif(
                             user_id=order_obj.customer_id,
                             title="Order delayed due to technical incident",
                             message=(
-                                f"Order #{order_obj.id} encountered an incident in flight and landed safely at "
+                                f"Order #{order_obj.id} encountered an incident in flight and is safely secured at "
                                 f"{hub_name or 'a safe hub'}. A replacement flight is being arranged."
                             ),
                             notifications_type=_NT.MISSION_STATUS,
@@ -543,8 +609,24 @@ async def confirm_arrival(
                             mission_id=str(mission.id),
                             created_at=now,
                         ))
+
+                    if is_crash_flight:
+                        from app.shared.workers import get_operator_ids
+                        for op_id in await get_operator_ids(db):
+                            db.add(_Notif(
+                                user_id=op_id,
+                                title=f"📦 Package Recovered at {hub_name or f'Hub #{receiving_hub_id}'} — Ready to Replan",
+                                message=(
+                                    f"Technician recovered Drone #{mission.drone_id} and Order #{order_obj.id} back to "
+                                    f"{hub_name or f'Hub #{receiving_hub_id}'}. Order is now ready for replacement mission planning."
+                                ),
+                                notifications_type=_NT.MISSION_STATUS,
+                                reference_id=f"RECOVERED_REPLAN_{mission.id}",
+                                mission_id=str(mission.id),
+                                created_at=now,
+                            ))
                 else:
-                    # Đáp đúng Hub đích (bình thường HOẶC sự cố khẩn cấp gần Hub đích) -> Hoàn tất giao đơn!
+                    # Đáp/thu hồi đúng Hub đích (bình thường HOẶC sự cố khẩn cấp tại Hub đích) -> Hoàn tất giao đơn!
                     if is_incident_flight and landed_at_destination:
                         mission.status = MissionStatus.ARRIVAL_COMPLETED
                         confirm_msg = "Arrival confirmed at destination hub. Order delivered cleanly; drone placed into Maintenance for technical inspection."
