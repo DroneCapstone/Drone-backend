@@ -25,8 +25,13 @@ from app.modules.missions.schemas import (
     FailsafeExecuteRequest, FailsafeExecuteResponse, FailsafeHubInfo,
     PreAnalyzeBundleCandidatesRequest, ValidateBundleRequest, PostAnalyzeBundleCandidatesRequest,
     AutoDispatchRequest, AutoDispatchResponse,
+    RecommendResourcesRequest, RecommendResourcesResponse,
 )
-from app.modules.missions.auto_dispatch_service import run_auto_dispatch_selection
+from app.modules.missions.auto_dispatch_service import (
+    run_auto_dispatch_selection,
+    recommend_resources_for_order,
+    build_route_nl_explanation,
+)
 from app.modules.missions.bundle_service import (
     get_pre_analyze_bundle_candidates,
     validate_bundle_orders,
@@ -3437,6 +3442,25 @@ async def analyze_mission_planning(
         eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
         first_route = routes_schemas[0] if routes_schemas else None
         is_cross = first_route.is_cross_hub if first_route else False
+        route_expl = None
+        if routes_schemas:
+            chosen_route = next((r for r in routes_schemas if r.recommended), routes_schemas[0])
+            req_mode = (getattr(request, "recommend_mode", None) or "AUTO").strip().upper()
+            order_mode_raw = (
+                order.delivery_mode.value
+                if hasattr(order.delivery_mode, "value")
+                else str(order.delivery_mode or "NORMAL")
+            ).strip().upper()
+            opt_obj = (
+                req_mode if req_mode in ("ECO", "FAST")
+                else ("FAST" if order_mode_raw == DeliveryMode.EXPRESS.value else "ECO")
+            )
+            route_expl = build_route_nl_explanation(
+                routes_schemas=routes_schemas,
+                selected_route=chosen_route,
+                optimization_objective=opt_obj,
+            )
+
         return MissionPlanningAnalyzeResponse(
             orderId=order.id,
             bundledOrderIds=request.bundledOrderIds if request.bundledOrderIds else None,
@@ -3456,6 +3480,7 @@ async def analyze_mission_planning(
             pickupHubName=first_route.pickup_hub_name if (first_route and is_cross) else None,
             pickupHubCode=first_route.pickup_hub_code if (first_route and is_cross) else None,
             routes=routes_schemas,
+            route_explanation=route_expl,
         )
     except HTTPException:
         raise
@@ -3859,6 +3884,32 @@ async def create_mission(
     - **Mục đích**: Chính thức xác nhận tạo chuyến bay để giao một Order cụ thể kèm lựa chọn Drone và Pin.
     """
     return await _create_mission_internal(db=db, user=user, request=request)
+
+
+@router.post(
+    "/auto-dispatch/recommend-resources",
+    response_model=RecommendResourcesResponse,
+    summary="Bước 1: AI tự động chọn Drone & Pin kèm giải thích bằng chữ (SHAP) và cho phép Operator đổi",
+)
+async def recommend_dispatch_resources(
+    request: RecommendResourcesRequest,
+    user: CurrentUser = Depends(allow_operator),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Operator API - Bước 1] Gợi ý tự động Drone & Pin kèm giải thích bằng chữ**
+
+    - Tự động chọn Drone & Pin tối ưu nhất dựa trên vị trí Hub, tải trọng, năng lượng dự phòng 20%, độ chai pin và cân bằng hao mòn.
+    - Trả về `drone_explanation` và `battery_explanation` hoàn toàn bằng tiếng Anh tự nhiên (từ phân tích SHAP), giải thích rõ **vì sao chọn** và **vì sao không chọn các phương án khác**.
+    - Kèm danh sách `available_drones` (chứa sẵn `eligible_batteries` của từng Drone) để Operator tự do thay đổi trước khi sang Bước 2 (`/mission-planning/analyze`).
+    """
+    return await recommend_resources_for_order(
+        db=db,
+        order_id=request.orderId,
+        bundled_order_ids=request.bundledOrderIds,
+        compute_routes_fn=compute_mission_routes_internal,
+        get_reserved_batteries_fn=_get_reserved_batteries_and_virtual_holds,
+    )
 
 
 @router.post(

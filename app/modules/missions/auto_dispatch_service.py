@@ -37,8 +37,13 @@ from app.modules.missions.models import (
     PaymentStatus,
 )
 from app.modules.missions.schemas import (
+    AlternativeComparisonItem,
     AutoDispatchXAIReport,
+    CandidateBatteryOption,
+    CandidateDroneOption,
     DecisionShapExplanation,
+    NaturalLanguageShapExplanation,
+    RecommendResourcesResponse,
     RouteOptionSchema,
     ShapFeatureAttribution,
 )
@@ -212,12 +217,12 @@ def _compute_battery_wh_local(battery: Battery, fallback_cap_wh: float = 130.0) 
     return cap, pct, round(cap * (pct / 100.0), 2)
 
 
-def _score_battery_candidates_and_explain(
+def _evaluate_battery_candidates_list(
     compatible_bats: list[Battery],
     drone: Drone,
     req_leg1_wh: float,
-) -> tuple[Battery, DecisionShapExplanation]:
-    """Chấm điểm toàn bộ pin tương thích tại Hub xuất phát của Drone và sinh báo cáo SHAP."""
+) -> tuple[list[dict[str, Any]], int, DecisionShapExplanation]:
+    """Đánh giá toàn bộ pin tương thích tại Hub xuất phát của Drone và sinh báo cáo SHAP."""
     feature_specs = [
         ("energy_reserve_margin", "Energy Safety Margin (20% Buffer)", 40.0),
         ("state_of_charge", "Current State of Charge (%)", 25.0),
@@ -239,8 +244,8 @@ def _score_battery_candidates_and_explain(
             u_margin = min(1.0, 0.55 + 0.45 * headroom_ratio)
             margin_pct = round(headroom_ratio * 100.0, 1)
             margin_impact = (
-                f"Provides {avail_wh:.1f} Wh ({safe_usable_wh:.1f} Wh within 80% safe cap) vs "
-                f"{req_leg1_wh:.1f} Wh required ({margin_pct:.1f}% total reserve)"
+                f"Provides {avail_wh:.1f} Wh usable energy ({safe_usable_wh:.1f} Wh within 80% safe cap) vs "
+                f"{req_leg1_wh:.1f} Wh Leg 1 demand ({margin_pct:.1f}% total reserve)"
             )
         else:
             deficit_ratio = avail_wh / max(req_leg1_wh / 0.80, 1.0)
@@ -253,13 +258,13 @@ def _score_battery_candidates_and_explain(
         soc_impact = (
             "Fully charged (100% SoC) and immediately cleared for takeoff"
             if charge_pct >= 100
-            else f"Partially charged ({charge_pct}% SoC)"
+            else f"Charged at {charge_pct}% SoC"
         )
 
         u_mount = 1.0 if is_installed else 0.45
         mount_raw = f"Installed on {drone.id}" if is_installed else f"Rack spare at Hub #{bat.current_hub_id}"
         mount_impact = (
-            f"Already mounted on {drone.name} — eliminates manual battery swap before takeoff"
+            f"Already pre-mounted on {drone.name} — eliminates manual battery swap before takeoff"
             if is_installed
             else "Available in hub storage rack — requires technician mounting before takeoff"
         )
@@ -287,6 +292,10 @@ def _score_battery_candidates_and_explain(
             "id": bat.id,
             "label": f"{bat.id} ({bat.serial_number})",
             "meets_reserve": meets_reserve,
+            "is_expired": is_expired,
+            "is_installed": is_installed,
+            "days_left": days_left,
+            "cap_wh": cap_wh,
             "hard_priority": hard_priority,
             "weighted_score": round(weighted_score, 2),
             "utilities": {
@@ -342,7 +351,17 @@ def _score_battery_candidates_and_explain(
             ),
         },
     )
-    return chosen_bat, bat_shap
+    return bat_candidates, best_idx, bat_shap
+
+
+def _score_battery_candidates_and_explain(
+    compatible_bats: list[Battery],
+    drone: Drone,
+    req_leg1_wh: float,
+) -> tuple[Battery, DecisionShapExplanation]:
+    """Chấm điểm toàn bộ pin tương thích tại Hub xuất phát của Drone và sinh báo cáo SHAP."""
+    bat_candidates, best_idx, bat_shap = _evaluate_battery_candidates_list(compatible_bats, drone, req_leg1_wh)
+    return bat_candidates[best_idx]["battery"], bat_shap
 
 
 def _score_and_explain_routes(
@@ -474,18 +493,198 @@ def _score_and_explain_routes(
     )
 
 
-async def run_auto_dispatch_selection(
+def _extract_top_shap_reasons(shap_expl: DecisionShapExplanation) -> list[str]:
+    """Trích xuất lý do bằng tiếng Anh tự nhiên từ SHAP attributions theo thứ tự tác động mạnh nhất."""
+    sorted_contribs = sorted(
+        shap_expl.feature_contributions,
+        key=lambda fc: fc.shap_contribution,
+        reverse=True,
+    )
+    reasons = [
+        fc.impact
+        for fc in sorted_contribs
+        if fc.impact and not fc.impact.startswith("Disqualified")
+    ]
+    return reasons or [fc.impact for fc in sorted_contribs if fc.impact]
+
+
+def _compare_drone_vs_winner(
+    alt: dict[str, Any],
+    winner: dict[str, Any],
+    total_payload_kg: float,
+) -> str:
+    """Sinh câu giải thích bằng tiếng Anh lý do vì sao không chọn Drone thay thế này."""
+    if not alt["is_feasible"]:
+        return f"Disqualified: {alt.get('infeasible_reason') or 'No compatible battery or feasible route'}"
+
+    alt_d: Drone = alt["drone"]
+    win_d: Drone = winner["drone"]
+    if not alt["is_local"] and winner["is_local"]:
+        return (
+            f"Not selected: Stationed at {alt['raw_values']['hub_locality']}, "
+            f"requiring an empty positioning flight compared to {win_d.id} at the departure hub."
+        )
+    if winner["utilities"]["payload_fit"] > alt["utilities"]["payload_fit"] + 0.05:
+        return (
+            f"Not selected: {float(alt_d.payload_capacity_kg or 0):.1f} kg airframe is oversized "
+            f"for the {total_payload_kg:.2f} kg parcel compared to {win_d.id} ({float(win_d.payload_capacity_kg or 0):.1f} kg), "
+            f"causing higher aerodynamic drag and energy waste."
+        )
+    if winner["utilities"]["energy_readiness"] > alt["utilities"]["energy_readiness"] + 0.03:
+        alt_res = alt["rec_route"].remainingBatteryPct if alt.get("rec_route") else 0
+        win_res = winner["rec_route"].remainingBatteryPct if winner.get("rec_route") else 0
+        return (
+            f"Not selected: Leaves a lower post-flight battery safety reserve ({alt_res}%) "
+            f"compared to {win_d.id} ({win_res}%)."
+        )
+    alt_util = float(alt_d.utilization_pct or 0)
+    win_util = float(win_d.utilization_pct or 0)
+    if alt_util > win_util + 0.1:
+        return (
+            f"Not selected: Higher cumulative fleet utilization ({alt_util:.1f}% vs "
+            f"{win_util:.1f}% on {win_d.id}), kept idle to balance fleet wear."
+        )
+    return (
+        f"Not selected: Equivalent capabilities to {win_d.id} ({float(alt_d.payload_capacity_kg or 0):.1f} kg capacity, "
+        f"{alt['raw_values']['hub_locality']}); kept available as an alternative option."
+    )
+
+
+def _compare_battery_vs_winner(
+    alt: dict[str, Any],
+    winner: dict[str, Any],
+    drone: Drone,
+    req_leg1_wh: float,
+) -> str:
+    """Sinh câu giải thích bằng tiếng Anh lý do vì sao không chọn viên Pin thay thế này."""
+    if not alt["meets_reserve"]:
+        safe_wh = alt["avail_wh"] * 0.80
+        return (
+            f"Disqualified: Usable safe energy ({safe_wh:.1f} Wh within 80% cap) cannot cover "
+            f"Leg 1 demand ({req_leg1_wh:.1f} Wh) with the mandatory 20% safety reserve."
+        )
+    if alt.get("is_expired"):
+        return "Disqualified: Battery has exceeded its safe operational lifecycle warranty."
+
+    win_bat: Battery = winner["battery"]
+    if alt["charge_pct"] < winner["charge_pct"]:
+        return (
+            f"Not selected: Lower state of charge ({alt['charge_pct']}% vs {winner['charge_pct']}% on {win_bat.id}), "
+            f"providing a smaller emergency energy buffer."
+        )
+    if not alt.get("is_installed") and winner.get("is_installed"):
+        return (
+            f"Not selected: Stored in the hub rack (requires manual Technician swap), "
+            f"whereas {win_bat.id} is already pre-mounted on Drone {drone.id}."
+        )
+    if alt["avail_wh"] < winner["avail_wh"]:
+        return (
+            f"Not selected: Lower total available energy ({alt['avail_wh']:.1f} Wh vs "
+            f"{winner['avail_wh']:.1f} Wh on {win_bat.id})."
+        )
+    if alt.get("days_left", 0) < winner.get("days_left", 0):
+        return (
+            f"Not selected: Older lifecycle standing ({alt['raw_values']['battery_lifecycle_health']}) "
+            f"compared to {win_bat.id} ({winner['raw_values']['battery_lifecycle_health']})."
+        )
+    return (
+        f"Not selected: Equivalent charge and health specifications to {win_bat.id} "
+        f"({alt['charge_pct']}% SoC, {alt['avail_wh']:.1f} Wh); kept in reserve as an equally valid option."
+    )
+
+
+def build_route_nl_explanation(
+    routes_schemas: list[RouteOptionSchema],
+    selected_route: RouteOptionSchema,
+    optimization_objective: str,
+) -> NaturalLanguageShapExplanation:
+    """Tạo giải thích XAI SHAP hoàn toàn bằng tiếng Anh cho quyết định chọn Tuyến đường (Bước 2)."""
+    route_shap = _score_and_explain_routes(
+        routes_schemas=routes_schemas,
+        selected_route=selected_route,
+        optimization_objective=optimization_objective,
+    )
+    reasons_selected = _extract_top_shap_reasons(route_shap)
+
+    summary = (
+        selected_route.reason
+        if selected_route.reason and not selected_route.reason.startswith("Infeasible")
+        else (
+            f"Selected route {selected_route.routeId} ({selected_route.route_string}) under {optimization_objective} priority: "
+            f"{selected_route.predictedDurationMin} min flight time, {selected_route.predictedEnergyWh:.1f} Wh estimated energy, "
+            f"and {selected_route.remainingBatteryPct}% landing battery reserve."
+        )
+    )
+
+    why_not_others: list[AlternativeComparisonItem] = []
+    for r in routes_schemas:
+        if r.routeId == selected_route.routeId:
+            continue
+        label = f"{r.routeId} ({r.route_string})"
+        if not r.feasible:
+            reason = f"Disqualified: {r.infeasible_reason or 'Insufficient energy reserve or weather violation'}"
+        elif not r.is_selectable:
+            reason = f"Not selectable: {r.unselectable_reason or 'Route constraints not satisfied'}"
+        else:
+            is_r_bad_w = (
+                bool(r.weather and r.weather.is_bad_weather)
+                or (bool(r.weather_summary) and ("alert" in r.weather_summary.lower() or "unsafe" in r.weather_summary.lower()))
+            )
+            if is_r_bad_w:
+                w_detail = (r.weather.warning_message if r.weather and r.weather.warning_message else None) or r.weather_summary or "wind/rain alert"
+                reason = (
+                    f"Not selected: Exposed to adverse weather conditions ({w_detail}), "
+                    f"whereas {selected_route.routeId} avoids this risk."
+                )
+            elif optimization_objective == "ECO" and r.predictedEnergyWh > selected_route.predictedEnergyWh + 0.5:
+                reason = (
+                    f"Not selected: Consumes more battery energy ({r.predictedEnergyWh:.1f} Wh vs "
+                    f"{selected_route.predictedEnergyWh:.1f} Wh on {selected_route.routeId}) due to higher cruise speed or longer detour ({r.distanceKm:.2f} km)."
+                )
+            elif optimization_objective == "FAST" and r.predictedDurationMin > selected_route.predictedDurationMin:
+                reason = (
+                    f"Not selected: Slower transit duration ({r.predictedDurationMin} min vs "
+                    f"{selected_route.predictedDurationMin} min on {selected_route.routeId}), less aligned with Express delivery SLA."
+                )
+            elif len(r.legs_detail) > len(selected_route.legs_detail):
+                reason = (
+                    f"Not selected: Requires {len(r.legs_detail)} flight legs with intermediate relay battery swap, "
+                    f"adding ground turnaround overhead compared to a direct flight."
+                )
+            else:
+                reason = (
+                    f"Not selected: Less optimal trade-off between landing reserve ({r.remainingBatteryPct}%), "
+                    f"energy consumption ({r.predictedEnergyWh:.1f} Wh), and duration ({r.predictedDurationMin} min)."
+                )
+
+        why_not_others.append(
+            AlternativeComparisonItem(
+                id=r.routeId,
+                label=label,
+                feasible=bool(r.feasible and r.is_selectable),
+                reason=reason,
+            )
+        )
+
+    return NaturalLanguageShapExplanation(
+        selected_id=selected_route.routeId,
+        selected_label=f"{selected_route.routeId}: {selected_route.route_string}",
+        summary=summary,
+        reasons_selected=reasons_selected,
+        why_not_others=why_not_others,
+    )
+
+
+async def _evaluate_fleet_for_order(
     db: AsyncSession,
     order_id: str,
     bundled_order_ids: Optional[list[str]],
     recommend_mode: Optional[str],
     compute_routes_fn: Callable[..., Awaitable[tuple[list[RouteOptionSchema], list[dict]]]],
     get_reserved_batteries_fn: Callable[..., Awaitable[tuple[set[str], dict[int, int]]]],
+    eval_all_local: bool = False,
 ) -> dict[str, Any]:
-    """
-    Thực hiện chọn lựa tối ưu hoàn chỉnh (Drone -> Battery -> Route) và tạo báo cáo XAI SHAP.
-    Trả về dict gồm toàn bộ dữ liệu để tạo Mission (nếu dry_run=False) và AutoDispatchResponse.
-    """
+    """Lõi dùng chung đánh giá đội Drone, Pin và Tuyến bay cho cả Recommend Wizard và Full Auto-Dispatch."""
     order, clean_bundle_ids, total_payload_kg, total_fee = await _validate_order_and_bundle_for_auto_dispatch(
         db=db,
         order_id=order_id,
@@ -512,7 +711,6 @@ async def run_auto_dispatch_selection(
         else ("FAST" if order_mode_raw == DeliveryMode.EXPRESS.value else "ECO")
     )
 
-    # Tải phi đội Drone đang AVAILABLE & không bận, cùng danh sách Pin rảnh
     hubs_res = await db.execute(select(Hub).where(func.lower(Hub.status) == "active"))
     active_hubs = list(hubs_res.scalars().all()) or list((await db.execute(select(Hub))).scalars().all())
     hub_dict = {h.id: h for h in active_hubs}
@@ -528,20 +726,23 @@ async def run_auto_dispatch_selection(
     )
     busy_drone_ids = {r[0] for r in busy_drones_res.all() if r[0] is not None}
 
-    drones_res = await db.execute(
-        select(Drone).where(
-            and_(
-                Drone.status == DroneStatus.AVAILABLE,
-                Drone.payload_capacity_kg >= total_payload_kg,
-            )
-        ).order_by(Drone.id)
+    all_idle_drones_res = await db.execute(
+        select(Drone).where(Drone.status == DroneStatus.AVAILABLE).order_by(Drone.id)
     )
-    candidate_drones = [d for d in drones_res.scalars().all() if d.id not in busy_drone_ids]
+    all_idle_drones = [d for d in all_idle_drones_res.scalars().all() if d.id not in busy_drone_ids]
+    under_payload_drones = [
+        d for d in all_idle_drones
+        if float(d.payload_capacity_kg or 0.0) < total_payload_kg
+    ]
+    candidate_drones = [
+        d for d in all_idle_drones
+        if float(d.payload_capacity_kg or 0.0) >= total_payload_kg
+    ]
     if not candidate_drones:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Auto-dispatch failed: No available idle drone in the fleet can carry the payload of {total_payload_kg:.2f} kg."
+                f"No available idle drone in the fleet can carry the payload of {total_payload_kg:.2f} kg."
             ),
         )
 
@@ -597,7 +798,6 @@ async def run_auto_dispatch_selection(
             )
         )
 
-        # Gọi thuật toán lập tuyến thực tế (bao gồm thời tiết Open-Meteo & Relay/Safety reserve)
         routes_schemas, raw_list = await compute_routes_fn(
             db=db,
             order=order,
@@ -630,7 +830,7 @@ async def run_auto_dispatch_selection(
             u_readiness = min(1.0, 0.55 + 0.35 * reserve_frac + (0.10 if has_installed_ready else 0.0))
             readiness_raw = f"Feasible ({rec_route.remainingBatteryPct}% reserve, {len(elig_bats)} ready batteries)"
             readiness_impact = (
-                f"Clears route energy & safety checks with {rec_route.remainingBatteryPct}% final reserve"
+                f"Clears all route energy & weather safety checks with {rec_route.remainingBatteryPct}% post-flight reserve"
             )
         else:
             u_readiness = 0.0
@@ -646,6 +846,8 @@ async def run_auto_dispatch_selection(
             "drone": d,
             "id": d.id,
             "label": f"{d.id} ({d.name} - {d.model})",
+            "hub_name": d_hub.name if d_hub else None,
+            "deadhead_km": deadhead_km,
             "is_local": is_local,
             "is_feasible": is_feasible,
             "weighted_score": weighted_score,
@@ -663,9 +865,9 @@ async def run_auto_dispatch_selection(
             },
             "raw_values": {
                 "hub_locality": (
-                    f"Stationed at Origin Hub #{eff_origin_hub_id} (0.0 km deadhead)"
+                    f"{origin_hub.name} (0.0 km deadhead)"
                     if is_local
-                    else f"Cross-Hub #{d.current_hub_id} ({deadhead_km:.2f} km deadhead)"
+                    else f"{d_hub.name if d_hub else f'Hub #{d.current_hub_id}'} ({deadhead_km:.2f} km away)"
                 ),
                 "payload_fit": f"{total_payload_kg:.2f} / {cap_kg:.2f} kg ({fit_ratio * 100:.0f}% utilization)",
                 "energy_readiness": readiness_raw,
@@ -673,19 +875,18 @@ async def run_auto_dispatch_selection(
             },
             "impacts": {
                 "hub_locality": (
-                    "Zero empty deadhead flight required — stationed directly at effective pickup hub"
+                    f"Stationed directly at departure hub ({origin_hub.name}) — avoids empty positioning flight"
                     if is_local
-                    else f"Requires {deadhead_km:.2f} km empty positioning flight from Hub #{d.current_hub_id}"
+                    else f"Requires {deadhead_km:.2f} km positioning flight from {d_hub.name if d_hub else f'Hub #{d.current_hub_id}'}"
                 ),
                 "payload_fit": (
-                    f"Best-fit airframe sizing for {total_payload_kg:.2f} kg payload ({fit_ratio * 100:.0f}% load ratio)"
+                    f"Airframe capacity ({cap_kg:.1f} kg) matches the {total_payload_kg:.2f} kg payload efficiently ({fit_ratio * 100:.0f}% load ratio)"
                 ),
                 "energy_readiness": readiness_impact,
-                "fleet_utilization_balance": f"Balances fleet wear (current utilization {util_pct:.1f}%)",
+                "fleet_utilization_balance": f"Balances fleet wear across drones (current utilization {util_pct:.1f}%)",
             },
         }
 
-    # Sắp xếp trước ứng viên local có pin sẵn sàng & phù hợp tải trọng nhất (giảm roundtrip DB thừa khi hub nhiều drone)
     local_scored: list[tuple[tuple, Drone, list[Battery]]] = []
     for d in local_drones:
         ebats = await _get_drone_elig_bats(d)
@@ -703,21 +904,23 @@ async def run_auto_dispatch_selection(
 
     evaluated_drones: list[dict[str, Any]] = []
     ready_local = [(d, bats) for _, d, bats in local_scored if bats]
-    for d, bats in ready_local[:5]:
+    local_limit = len(ready_local) if eval_all_local else 5
+    for d, bats in ready_local[:local_limit]:
         ev = await _evaluate_drone(d, preloaded_bats=bats)
         if ev:
             evaluated_drones.append(ev)
 
     feasible_drones = [e for e in evaluated_drones if e["is_feasible"]]
-    if not feasible_drones and len(ready_local) > 5:
+    if not feasible_drones and not eval_all_local and len(ready_local) > 5:
         for d, bats in ready_local[5:]:
             ev = await _evaluate_drone(d, preloaded_bats=bats)
             if ev:
                 evaluated_drones.append(ev)
         feasible_drones = [e for e in evaluated_drones if e["is_feasible"]]
 
-    if not feasible_drones:
+    if not feasible_drones or eval_all_local:
         cross_checked = 0
+        cross_limit = 3 if not feasible_drones else 2
         for od in other_drones:
             obats = await _get_drone_elig_bats(od)
             if not obats:
@@ -726,7 +929,7 @@ async def run_auto_dispatch_selection(
             if ev:
                 evaluated_drones.append(ev)
             cross_checked += 1
-            if cross_checked >= 3:
+            if cross_checked >= cross_limit:
                 break
         feasible_drones = [e for e in evaluated_drones if e["is_feasible"]]
 
@@ -735,7 +938,7 @@ async def run_auto_dispatch_selection(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Auto-dispatch failed: Found {len(candidate_drones)} idle drone(s) matching the payload, "
+                    f"Found {len(candidate_drones)} idle drone(s) matching the payload, "
                     "but none currently have an unreserved compatible active battery (>0% charge) at their hub."
                 ),
             )
@@ -746,7 +949,7 @@ async def run_auto_dispatch_selection(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Auto-dispatch failed: Evaluated {len(evaluated_drones)} eligible drone(s), "
+                f"Evaluated {len(evaluated_drones)} eligible drone(s), "
                 f"but none produced a feasible route. Reason: {sample_reason}"
             ),
         )
@@ -766,17 +969,17 @@ async def run_auto_dispatch_selection(
     available_routes: list[RouteOptionSchema] = chosen_d_eval["routes_schemas"]
     raw_list: list[dict] = chosen_d_eval["raw_list"]
 
-    # Chấm điểm SHAP cho Pin tương thích của Drone được chọn và đồng bộ lại tuyến nếu pin tối ưu khác với pin mặc định của bước lọc
     req_leg1_wh = (
         float(best_route.legs_detail[0].energy_wh)
         if best_route.legs_detail
         else float(best_route.predictedEnergyWh or 0.0)
     )
-    best_battery, battery_shap = _score_battery_candidates_and_explain(
+    bat_candidates, best_bat_idx, battery_shap = _evaluate_battery_candidates_list(
         compatible_bats=chosen_d_eval["elig_bats"],
         drone=best_drone,
         req_leg1_wh=req_leg1_wh,
     )
+    best_battery: Battery = bat_candidates[best_bat_idx]["battery"]
 
     if best_route.assignedBatteryId != best_battery.id:
         recheck_schemas, recheck_raw = await compute_routes_fn(
@@ -794,7 +997,6 @@ async def run_auto_dispatch_selection(
             raw_list = recheck_raw
             best_route = next((s for s in recheck_feasible if s.recommended), recheck_feasible[0])
 
-    # Xây dựng SHAP giải thích cho lựa chọn Drone
     drone_feature_specs = [
         ("hub_locality", "Station Proximity (Deadhead Avoidance)", 35.0),
         ("payload_fit", "Payload Capacity Fit", 25.0),
@@ -803,7 +1005,7 @@ async def run_auto_dispatch_selection(
     ]
     why_drone = (
         f"Selected Drone {best_drone.id} ({best_drone.name}, capacity {best_drone.payload_capacity_kg:.1f} kg) "
-        + ("at pickup hub " if chosen_d_eval["is_local"] else f"via Cross-Hub Dispatch from Hub #{best_drone.current_hub_id} ")
+        + (f"stationed at {origin_hub.name} " if chosen_d_eval["is_local"] else f"via Cross-Hub Dispatch from {chosen_d_eval['hub_name'] or f'Hub #{best_drone.current_hub_id}'} ")
         + f"with utility score {chosen_d_eval['weighted_score']:.2f}/100."
     )
     drone_shap = _compute_additive_shap(
@@ -817,18 +1019,329 @@ async def run_auto_dispatch_selection(
             "score": c["weighted_score"],
             "score_delta_vs_selected": delta,
             "feasible": c["is_feasible"],
-            "comparison_note": (
-                f"Infeasible: {c['infeasible_reason']}"
-                if not c["is_feasible"]
-                else (
-                    f"Scored {abs(delta):.2f} pts lower "
-                    f"({c['raw_values']['payload_fit']}, {c['raw_values']['hub_locality']})."
-                )
-            ),
+            "comparison_note": _compare_drone_vs_winner(c, chosen_d_eval, total_payload_kg),
         },
     )
 
-    # Giải thích SHAP cho tuyến đường tối ưu + Physics Energy SHAP
+    return {
+        "order": order,
+        "clean_bundle_ids": clean_bundle_ids,
+        "total_payload_kg": total_payload_kg,
+        "total_fee": total_fee,
+        "eff_origin_hub_id": eff_origin_hub_id,
+        "origin_hub": origin_hub,
+        "hub_dict": hub_dict,
+        "is_replan": is_replan,
+        "order_mode_raw": order_mode_raw,
+        "optimization_objective": optimization_objective,
+        "evaluated_drones": evaluated_drones,
+        "best_drone_idx": best_drone_idx,
+        "chosen_d_eval": chosen_d_eval,
+        "best_drone": best_drone,
+        "under_payload_drones": under_payload_drones,
+        "local_no_bat_drones": [
+            d for d in local_drones if all(ev["id"] != d.id for ev in evaluated_drones)
+        ],
+        "bat_candidates": bat_candidates,
+        "best_bat_idx": best_bat_idx,
+        "best_battery": best_battery,
+        "req_leg1_wh": req_leg1_wh,
+        "best_route": best_route,
+        "available_routes": available_routes,
+        "raw_list": raw_list,
+        "drone_shap": drone_shap,
+        "battery_shap": battery_shap,
+    }
+
+
+async def recommend_resources_for_order(
+    db: AsyncSession,
+    order_id: str,
+    bundled_order_ids: Optional[list[str]],
+    compute_routes_fn: Callable[..., Awaitable[tuple[list[RouteOptionSchema], list[dict]]]],
+    get_reserved_batteries_fn: Callable[..., Awaitable[tuple[set[str], dict[int, int]]]],
+) -> RecommendResourcesResponse:
+    """
+    Bước 1 của quy trình lập kế hoạch bán tự động:
+    Tự động gợi ý Drone & Pin tối ưu nhất kèm giải thích XAI SHAP bằng tiếng Anh tự nhiên
+    (không hiển thị điểm số thô) và liệt kê đầy đủ Drone/Pin khả dụng để Operator tự do đổi.
+    """
+    ctx = await _evaluate_fleet_for_order(
+        db=db,
+        order_id=order_id,
+        bundled_order_ids=bundled_order_ids,
+        recommend_mode="AUTO",
+        compute_routes_fn=compute_routes_fn,
+        get_reserved_batteries_fn=get_reserved_batteries_fn,
+        eval_all_local=True,
+    )
+
+    order: Order = ctx["order"]
+    origin_hub: Hub = ctx["origin_hub"]
+    hub_dict: dict[int, Hub] = ctx["hub_dict"]
+    evaluated_drones: list[dict[str, Any]] = ctx["evaluated_drones"]
+    chosen_d_eval: dict[str, Any] = ctx["chosen_d_eval"]
+    best_drone: Drone = ctx["best_drone"]
+    bat_candidates: list[dict[str, Any]] = ctx["bat_candidates"]
+    best_bat_idx: int = ctx["best_bat_idx"]
+    best_battery: Battery = ctx["best_battery"]
+    req_leg1_wh: float = ctx["req_leg1_wh"]
+    drone_shap: DecisionShapExplanation = ctx["drone_shap"]
+    battery_shap: DecisionShapExplanation = ctx["battery_shap"]
+    total_payload_kg: float = ctx["total_payload_kg"]
+
+    # 1. Giải thích bằng chữ cho Drone được chọn & lý do loại các Drone khác
+    drone_reasons = _extract_top_shap_reasons(drone_shap)
+    drone_summary = (
+        f"Recommended Drone {best_drone.id} ({best_drone.name}, {float(best_drone.payload_capacity_kg or 0):.1f} kg capacity) "
+        + (f"because it is stationed at {origin_hub.name} with zero positioning flight, " if chosen_d_eval["is_local"] else f"via cross-hub dispatch from {chosen_d_eval['hub_name'] or f'Hub #{best_drone.current_hub_id}'}, ")
+        + f"fits the {total_payload_kg:.2f} kg payload efficiently, and clears energy safety checks with {ctx['best_route'].remainingBatteryPct}% reserve."
+    )
+
+    drone_why_not: list[AlternativeComparisonItem] = []
+    for idx, ev in enumerate(evaluated_drones):
+        if idx == ctx["best_drone_idx"]:
+            continue
+        drone_why_not.append(
+            AlternativeComparisonItem(
+                id=ev["id"],
+                label=ev["label"],
+                feasible=ev["is_feasible"],
+                reason=_compare_drone_vs_winner(ev, chosen_d_eval, total_payload_kg),
+            )
+        )
+    for ud in ctx["under_payload_drones"]:
+        drone_why_not.append(
+            AlternativeComparisonItem(
+                id=ud.id,
+                label=f"{ud.id} ({ud.name} - {ud.model})",
+                feasible=False,
+                reason=(
+                    f"Disqualified: Maximum payload capacity ({float(ud.payload_capacity_kg or 0):.2f} kg) "
+                    f"is below the order payload ({total_payload_kg:.2f} kg)."
+                ),
+            )
+        )
+    for nbd in ctx["local_no_bat_drones"]:
+        drone_why_not.append(
+            AlternativeComparisonItem(
+                id=nbd.id,
+                label=f"{nbd.id} ({nbd.name} - {nbd.model})",
+                feasible=False,
+                reason="Disqualified: No unreserved compatible active battery (>0% charge) available at the departure hub.",
+            )
+        )
+
+    drone_nl_expl = NaturalLanguageShapExplanation(
+        selected_id=best_drone.id,
+        selected_label=chosen_d_eval["label"],
+        summary=drone_summary,
+        reasons_selected=drone_reasons,
+        why_not_others=drone_why_not,
+    )
+
+    # 2. Giải thích bằng chữ cho Pin được chọn & lý do loại các Pin khác
+    bat_reasons = _extract_top_shap_reasons(battery_shap)
+    chosen_bat_entry = bat_candidates[best_bat_idx]
+    bat_summary = (
+        f"Recommended Battery {best_battery.id} ({best_battery.serial_number}, {chosen_bat_entry['charge_pct']}% SoC / {chosen_bat_entry['avail_wh']:.1f} Wh usable) "
+        + ("because it is already pre-mounted on the drone, " if chosen_bat_entry["is_installed"] else "because it is available at the departure hub, ")
+        + f"comfortably covers Leg 1 demand ({req_leg1_wh:.1f} Wh) with >=20% reserve, and maintains healthy lifecycle standing."
+    )
+    bat_why_not: list[AlternativeComparisonItem] = [
+        AlternativeComparisonItem(
+            id=bc["id"],
+            label=bc["label"],
+            feasible=bool(bc["meets_reserve"] and not bc.get("is_expired")),
+            reason=_compare_battery_vs_winner(bc, chosen_bat_entry, best_drone, req_leg1_wh),
+        )
+        for b_idx, bc in enumerate(bat_candidates)
+        if b_idx != best_bat_idx
+    ]
+    bat_nl_expl = NaturalLanguageShapExplanation(
+        selected_id=best_battery.id,
+        selected_label=chosen_bat_entry["label"],
+        summary=bat_summary,
+        reasons_selected=bat_reasons,
+        why_not_others=bat_why_not,
+    )
+
+    # 3. Đóng gói danh sách Drone & Pin để Operator tự do thay đổi trên UI
+    def _to_battery_options(d_obj: Drone, bats_list: list[Battery], leg1_demand_wh: float, selected_bat_id: Optional[str]) -> list[CandidateBatteryOption]:
+        if not bats_list:
+            return []
+        bc_list, b_best_idx, _ = _evaluate_battery_candidates_list(bats_list, d_obj, leg1_demand_wh)
+        win_bc = bc_list[b_best_idx]
+        indexed = list(enumerate(bc_list))
+        indexed.sort(key=lambda pair: (0 if pair[0] == b_best_idx else 1, -pair[1]["weighted_score"]))
+        opts: list[CandidateBatteryOption] = []
+        for idx_b, bc in indexed:
+            b_obj: Battery = bc["battery"]
+            is_rec = (b_obj.id == selected_bat_id) if selected_bat_id else (idx_b == b_best_idx)
+            is_b_feasible = bool(bc["meets_reserve"] and not bc.get("is_expired"))
+            opts.append(
+                CandidateBatteryOption(
+                    id=b_obj.id,
+                    serial_number=b_obj.serial_number,
+                    model=b_obj.battery_model,
+                    capacity_wh=round(bc["cap_wh"], 1),
+                    charge_level_pct=bc["charge_pct"],
+                    available_energy_wh=bc["avail_wh"],
+                    is_pre_mounted=bool(bc["is_installed"]),
+                    is_recommended=is_rec,
+                    feasible=is_b_feasible,
+                    infeasible_reason=(
+                        None if is_b_feasible
+                        else _compare_battery_vs_winner(bc, win_bc, d_obj, leg1_demand_wh)
+                    ),
+                    selection_reason=(
+                        bat_summary if is_rec
+                        else _compare_battery_vs_winner(bc, win_bc, d_obj, leg1_demand_wh)
+                    ),
+                )
+            )
+        return opts
+
+    available_drones: list[CandidateDroneOption] = []
+    sorted_eval_pairs = list(enumerate(evaluated_drones))
+    sorted_eval_pairs.sort(
+        key=lambda pair: (
+            0 if pair[0] == ctx["best_drone_idx"] else 1,
+            0 if pair[1]["is_feasible"] else 1,
+            0 if pair[1]["is_local"] else 1,
+            -pair[1]["weighted_score"],
+        )
+    )
+    for ev_idx, ev in sorted_eval_pairs:
+        d_obj = ev["drone"]
+        is_d_rec = (ev_idx == ctx["best_drone_idx"])
+        ev_route = ev["rec_route"]
+        d_leg1_wh = (
+            float(ev_route.legs_detail[0].energy_wh)
+            if (ev_route and ev_route.legs_detail)
+            else float(ev_route.predictedEnergyWh if ev_route else req_leg1_wh)
+        )
+        bat_opts = _to_battery_options(
+            d_obj=d_obj,
+            bats_list=ev["elig_bats"],
+            leg1_demand_wh=d_leg1_wh,
+            selected_bat_id=(best_battery.id if is_d_rec else None),
+        )
+        available_drones.append(
+            CandidateDroneOption(
+                id=d_obj.id,
+                name=d_obj.name or d_obj.id,
+                model=d_obj.model or "",
+                current_hub_id=d_obj.current_hub_id,
+                current_hub_name=ev["hub_name"],
+                is_local=ev["is_local"],
+                deadhead_km=ev["deadhead_km"],
+                payload_capacity_kg=float(d_obj.payload_capacity_kg or 0.0),
+                is_recommended=is_d_rec,
+                feasible=ev["is_feasible"],
+                infeasible_reason=None if ev["is_feasible"] else ev["infeasible_reason"],
+                selection_reason=(
+                    drone_summary if is_d_rec
+                    else _compare_drone_vs_winner(ev, chosen_d_eval, total_payload_kg)
+                ),
+                eligible_batteries=bat_opts,
+            )
+        )
+
+    for nbd in ctx["local_no_bat_drones"]:
+        d_hub = hub_dict.get(nbd.current_hub_id)
+        available_drones.append(
+            CandidateDroneOption(
+                id=nbd.id,
+                name=nbd.name or nbd.id,
+                model=nbd.model or "",
+                current_hub_id=nbd.current_hub_id,
+                current_hub_name=d_hub.name if d_hub else None,
+                is_local=True,
+                deadhead_km=0.0,
+                payload_capacity_kg=float(nbd.payload_capacity_kg or 0.0),
+                is_recommended=False,
+                feasible=False,
+                infeasible_reason="No unreserved compatible active battery (>0% charge) available at departure hub.",
+                selection_reason="Disqualified: No unreserved compatible active battery available at departure hub.",
+                eligible_batteries=[],
+            )
+        )
+
+    for ud in ctx["under_payload_drones"]:
+        d_hub = hub_dict.get(ud.current_hub_id)
+        is_u_local = ud.current_hub_id == ctx["eff_origin_hub_id"]
+        reason_str = (
+            f"Maximum payload capacity ({float(ud.payload_capacity_kg or 0):.2f} kg) "
+            f"is below order payload ({total_payload_kg:.2f} kg)."
+        )
+        available_drones.append(
+            CandidateDroneOption(
+                id=ud.id,
+                name=ud.name or ud.id,
+                model=ud.model or "",
+                current_hub_id=ud.current_hub_id,
+                current_hub_name=d_hub.name if d_hub else None,
+                is_local=is_u_local,
+                deadhead_km=0.0,
+                payload_capacity_kg=float(ud.payload_capacity_kg or 0.0),
+                is_recommended=False,
+                feasible=False,
+                infeasible_reason=reason_str,
+                selection_reason=f"Disqualified: {reason_str}",
+                eligible_batteries=[],
+            )
+        )
+
+    return RecommendResourcesResponse(
+        order_id=order.id,
+        bundled_order_ids=ctx["clean_bundle_ids"],
+        total_payload_kg=total_payload_kg,
+        effective_origin_hub_id=ctx["eff_origin_hub_id"],
+        effective_origin_hub_name=origin_hub.name,
+        is_replan_dispatch=ctx["is_replan"],
+        is_cross_hub_dispatch=not chosen_d_eval["is_local"],
+        recommended_drone_id=best_drone.id,
+        recommended_drone_name=best_drone.name or best_drone.id,
+        recommended_drone_model=best_drone.model or "",
+        recommended_battery_id=best_battery.id,
+        recommended_battery_serial=best_battery.serial_number,
+        drone_explanation=drone_nl_expl,
+        battery_explanation=bat_nl_expl,
+        available_drones=available_drones,
+    )
+
+
+async def run_auto_dispatch_selection(
+    db: AsyncSession,
+    order_id: str,
+    bundled_order_ids: Optional[list[str]],
+    recommend_mode: Optional[str],
+    compute_routes_fn: Callable[..., Awaitable[tuple[list[RouteOptionSchema], list[dict]]]],
+    get_reserved_batteries_fn: Callable[..., Awaitable[tuple[set[str], dict[int, int]]]],
+) -> dict[str, Any]:
+    """
+    Thực hiện chọn lựa tối ưu hoàn chỉnh (Drone -> Battery -> Route) và tạo báo cáo XAI SHAP.
+    Trả về dict gồm toàn bộ dữ liệu để tạo Mission (nếu dry_run=False) và AutoDispatchResponse.
+    """
+    ctx = await _evaluate_fleet_for_order(
+        db=db,
+        order_id=order_id,
+        bundled_order_ids=bundled_order_ids,
+        recommend_mode=recommend_mode,
+        compute_routes_fn=compute_routes_fn,
+        get_reserved_batteries_fn=get_reserved_batteries_fn,
+        eval_all_local=False,
+    )
+
+    order: Order = ctx["order"]
+    best_drone: Drone = ctx["best_drone"]
+    best_battery: Battery = ctx["best_battery"]
+    best_route: RouteOptionSchema = ctx["best_route"]
+    available_routes: list[RouteOptionSchema] = ctx["available_routes"]
+    raw_list: list[dict] = ctx["raw_list"]
+    optimization_objective: str = ctx["optimization_objective"]
+
     route_shap = _score_and_explain_routes(
         routes_schemas=available_routes,
         selected_route=best_route,
@@ -857,13 +1370,13 @@ async def run_auto_dispatch_selection(
     )
 
     xai_report = AutoDispatchXAIReport(
-        delivery_mode=order_mode_raw,
+        delivery_mode=ctx["order_mode_raw"],
         optimization_objective=optimization_objective,
-        effective_origin_hub_id=eff_origin_hub_id,
-        is_replan_dispatch=is_replan,
+        effective_origin_hub_id=ctx["eff_origin_hub_id"],
+        is_replan_dispatch=ctx["is_replan"],
         is_cross_hub_dispatch=bool(best_route.is_cross_hub),
-        drone_decision=drone_shap,
-        battery_decision=battery_shap,
+        drone_decision=ctx["drone_shap"],
+        battery_decision=ctx["battery_shap"],
         route_decision=route_shap,
         physics_energy_shap=best_route.shap_values,
         physics_energy_explanation=best_route.ai_explanation,
@@ -873,9 +1386,9 @@ async def run_auto_dispatch_selection(
 
     return {
         "order": order,
-        "bundled_order_ids": clean_bundle_ids,
-        "total_payload_kg": total_payload_kg,
-        "total_fee": total_fee,
+        "bundled_order_ids": ctx["clean_bundle_ids"],
+        "total_payload_kg": ctx["total_payload_kg"],
+        "total_fee": ctx["total_fee"],
         "drone": best_drone,
         "battery": best_battery,
         "selected_route": best_route,

@@ -364,6 +364,75 @@ class LiveTrackingResponse(BaseModel):
     active_count: int
     drones: list[LiveTrackingDrone]
 
+
+class AlternativeComparisonItem(BaseModel):
+    id: str
+    label: str
+    feasible: bool = True
+    reason: str
+
+
+class NaturalLanguageShapExplanation(BaseModel):
+    selected_id: str
+    selected_label: str
+    summary: str
+    reasons_selected: list[str] = []
+    why_not_others: list[AlternativeComparisonItem] = []
+
+
+class CandidateBatteryOption(BaseModel):
+    id: str
+    serial_number: Optional[str] = None
+    model: Optional[str] = None
+    capacity_wh: Optional[float] = None
+    charge_level_pct: int = 0
+    available_energy_wh: float = 0.0
+    is_pre_mounted: bool = False
+    is_recommended: bool = False
+    feasible: bool = True
+    infeasible_reason: Optional[str] = None
+    selection_reason: Optional[str] = None
+
+
+class CandidateDroneOption(BaseModel):
+    id: str
+    name: str
+    model: str
+    current_hub_id: Optional[int] = None
+    current_hub_name: Optional[str] = None
+    is_local: bool = True
+    deadhead_km: float = 0.0
+    payload_capacity_kg: float = 0.0
+    is_recommended: bool = False
+    feasible: bool = True
+    infeasible_reason: Optional[str] = None
+    selection_reason: Optional[str] = None
+    eligible_batteries: list[CandidateBatteryOption] = []
+
+
+class RecommendResourcesRequest(BaseModel):
+    orderId: str
+    bundledOrderIds: Optional[list[str]] = None
+
+
+class RecommendResourcesResponse(BaseModel):
+    order_id: str
+    bundled_order_ids: list[str] = []
+    total_payload_kg: float
+    effective_origin_hub_id: int
+    effective_origin_hub_name: Optional[str] = None
+    is_replan_dispatch: bool = False
+    is_cross_hub_dispatch: bool = False
+    recommended_drone_id: str
+    recommended_drone_name: str
+    recommended_drone_model: str
+    recommended_battery_id: str
+    recommended_battery_serial: Optional[str] = None
+    drone_explanation: NaturalLanguageShapExplanation
+    battery_explanation: NaturalLanguageShapExplanation
+    available_drones: list[CandidateDroneOption] = []
+
+
 class MissionPlanningAnalyzeRequest(BaseModel):
     orderId: str
     droneId: Optional[Union[str, int]] = None
@@ -391,6 +460,7 @@ class MissionPlanningAnalyzeResponse(BaseModel):
     pickupHubName: Optional[str] = None
     pickupHubCode: Optional[str] = None
     routes: list[RouteOptionSchema]
+    route_explanation: Optional[NaturalLanguageShapExplanation] = None
 
 class MissionCreateRequest(BaseModel):
     orderId: str
