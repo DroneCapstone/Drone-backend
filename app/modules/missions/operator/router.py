@@ -29,6 +29,7 @@ from app.modules.missions.bundle_service import (
     get_pre_analyze_bundle_candidates,
     validate_bundle_orders,
     get_post_analyze_bundle_candidates,
+    resolve_effective_origin_hub_id,
 )
 from app.modules.fleet.models import Drone, Battery, DroneStatus, batteries_status
 from app.modules.fleet.schemas import CheckAvailabilityRequest, AvailabilityResponse, AvailableBatterySchema
@@ -1484,9 +1485,10 @@ async def compute_mission_routes_internal(
             pass
 
     _set_zone("ZONE 01: Kiểm tra Order & Thông tin Hub xuất phát - đích")
-    if not order.origin_hub_id or not order.destination_hub_id:
+    eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
+    if not eff_origin_hub_id or not order.destination_hub_id:
         raise HTTPException(status_code=400, detail="Order is missing Origin Hub or Destination Hub information")
-    origin_hub = await db.get(Hub, order.origin_hub_id)
+    origin_hub = await db.get(Hub, eff_origin_hub_id)
     dest_hub = await db.get(Hub, order.destination_hub_id)
     if not origin_hub or not dest_hub:
         raise HTTPException(status_code=400, detail="Origin Hub or Destination Hub does not exist in the system")
@@ -3169,7 +3171,7 @@ async def get_eligible_batteries_for_mission_planning(
         order = await db.get(Order, order_id.strip())
         if not order:
             raise HTTPException(status_code=404, detail=f"Order '{order_id}' not found")
-        target_hub_id = order.origin_hub_id
+        target_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
     if not target_hub_id:
         target_hub_id = drone.current_hub_id
 
@@ -3350,6 +3352,7 @@ async def analyze_mission_planning(
         )
 
         zone_tracker["current"] = "ZONE 10: Finalize MissionPlanningAnalyzeResponse"
+        eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
         first_route = routes_schemas[0] if routes_schemas else None
         is_cross = first_route.is_cross_hub if first_route else False
         return MissionPlanningAnalyzeResponse(
@@ -3363,7 +3366,7 @@ async def analyze_mission_planning(
             assignedBatteryCapacityWh=first_route.assignedBatteryCapacityWh if first_route else None,
             assignedBatteryChargePct=first_route.assignedBatteryChargePct if first_route else None,
             assignedBatteryEnergyWh=first_route.assignedBatteryEnergyWh if first_route else None,
-            droneCurrentHubId=first_route.drone_home_hub_id if (first_route and is_cross) else order.origin_hub_id,
+            droneCurrentHubId=first_route.drone_home_hub_id if (first_route and is_cross) else eff_origin_hub_id,
             droneCurrentHubName=first_route.drone_home_hub_name if (first_route and is_cross) else None,
             droneCurrentHubCode=first_route.drone_home_hub_code if (first_route and is_cross) else None,
             isCrossHubDispatch=is_cross,
@@ -3558,12 +3561,13 @@ async def create_mission(
             drone = disp_drone
             assigned_drone_id = disp_drone.id
 
+    eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
     battery_id = selected_schema.assignedBatteryId if selected_schema else requested_battery_id
     assigned_battery = await db.get(Battery, battery_id) if battery_id else None
     if not assigned_battery:
         raise HTTPException(
             status_code=400,
-            detail=f"No compatible battery available at origin Hub #{order.origin_hub_id} to assign to Drone #{drone.id} ({drone.model})."
+            detail=f"No compatible battery available at Hub #{eff_origin_hub_id or order.origin_hub_id} to assign to Drone #{drone.id} ({drone.model})."
         )
 
     # Gắn liên kết viên pin được chọn với Drone thực hiện nhiệm vụ
@@ -3589,14 +3593,14 @@ async def create_mission(
     duration_min = selected_schema.predictedDurationMin if selected_schema else 0
     route_str = selected_schema.route_string if selected_schema else ""
 
-    # 1. Tạo bản ghi Mission
+    # 1. Tạo bản ghi Mission (dùng eff_origin_hub_id để đồng bộ Hub xuất phát khi Replan, vẫn giữ nguyên order.origin_hub_id)
     mission = Mission(
         id=mission_id,
         order_id=order.id,
         customer_id=order.customer_id,
         drone_id=assigned_drone_id,
         battery_id=assigned_battery.id,
-        origin_hub_id=order.origin_hub_id,
+        origin_hub_id=eff_origin_hub_id or order.origin_hub_id,
         destination_hub_id=order.destination_hub_id,
         payload_weight=total_bundle_payload,
         distance_m=round(total_dist_km * 1000, 2),

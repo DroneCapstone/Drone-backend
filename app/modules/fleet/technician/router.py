@@ -394,12 +394,18 @@ async def confirm_arrival(
     drone = await db.get(Drone, mission.drone_id) if mission.drone_id else None
 
     # ── Xác định Hub tiếp nhận thực tế (receiving_hub_id) ───────────────────
-    # 1. Technician đăng nhập tại Hub nào thì tiếp nhận drone tại Hub đó (tech_hub_id)
-    # 2. Nếu không có tech_hub_id: nếu chuyến bay sự cố quay về thì tiếp nhận tại drone.current_hub_id hoặc mission.origin_hub_id; nếu bay bình thường thì destination_hub_id
-    if tech_hub_id is not None:
+    # 1. Với chuyến bay sự cố: ưu tiên lấy vị trí thực tế drone hạ cánh (drone.current_hub_id),
+    #    sau đó đến Hub đích chuyển hướng (mission.destination_hub_id) -> tech_hub_id -> origin_hub.
+    # 2. Với chuyến bay bình thường: ưu tiên tech_hub_id của Technician tiếp nhận, sau đó mission.destination_hub_id.
+    if is_incident_flight:
+        receiving_hub_id = (
+            (drone.current_hub_id if drone and drone.current_hub_id else None)
+            or mission.destination_hub_id
+            or tech_hub_id
+            or mission.origin_hub_id
+        )
+    elif tech_hub_id is not None:
         receiving_hub_id = tech_hub_id
-    elif is_incident_flight:
-        receiving_hub_id = (drone.current_hub_id if drone else None) or mission.origin_hub_id or mission.destination_hub_id
     else:
         receiving_hub_id = mission.destination_hub_id
 
@@ -490,7 +496,11 @@ async def confirm_arrival(
             if not released_battery_id:
                 released_battery_id = b.id
 
-    # ── 5. Order: DELIVERED_TO_HUB (nếu bình thường) hoặc AT_HUB + replan_required_at (nếu sự cố) ──
+    # ── 5. Order: DELIVERED_TO_HUB (nếu bình thường hoặc sự cố đáp đúng Hub Đích) hoặc AT_HUB + replan (nếu đáp Hub khác) ──
+    confirm_msg = "Arrival confirmed. Mission completed, drone returned to Hub Fleet, and battery moved to Battery Management."
+    if is_incident_flight and receiving_hub_id:
+        mission.destination_hub_id = receiving_hub_id
+
     try:
         if mission.order_id:
             order_result = await db.execute(
@@ -503,15 +513,20 @@ async def confirm_arrival(
                     hub = await db.get(HubModel, receiving_hub_id)
                     hub_name = hub.name if hub else None
 
-                if is_incident_flight:
-                    # Kiện hàng quay lại Hub do sự cố chuyến bay
+                landed_at_destination = bool(
+                    receiving_hub_id
+                    and order_obj.destination_hub_id
+                    and int(receiving_hub_id) == int(order_obj.destination_hub_id)
+                )
+
+                if is_incident_flight and not landed_at_destination:
+                    # Kiện hàng hạ cánh khẩn cấp tại Hub khác (không phải Hub Đích) -> Bảo toàn order.origin_hub_id!
                     order_obj.status = OrderStatus.AT_HUB
                     order_obj.replan_required_at = now
                     order_obj.origin_received_at = order_obj.origin_received_at or now
-                    order_obj.origin_received_by = str(user.id)
-                    if receiving_hub_id:
-                        order_obj.origin_hub_id = receiving_hub_id
+                    order_obj.origin_received_by = order_obj.origin_received_by or str(user.id)
                     order_obj.updated_at = now
+                    confirm_msg = "Emergency arrival confirmed. Package secured at intermediate hub for replanning; drone placed into Maintenance."
 
                     # Thông báo cho Customer: đơn hàng tạm hoãn do sự cố kỹ thuật và đang được sắp xếp lại
                     if order_obj.customer_id:
@@ -520,7 +535,7 @@ async def confirm_arrival(
                             user_id=order_obj.customer_id,
                             title="Order delayed due to technical incident",
                             message=(
-                                f"Order #{order_obj.id} encountered an incident in flight and has been returned to "
+                                f"Order #{order_obj.id} encountered an incident in flight and landed safely at "
                                 f"{hub_name or 'a safe hub'}. A replacement flight is being arranged."
                             ),
                             notifications_type=_NT.MISSION_STATUS,
@@ -529,8 +544,14 @@ async def confirm_arrival(
                             created_at=now,
                         ))
                 else:
-                    # Chuyến bay đáp hub đích thành công
+                    # Đáp đúng Hub đích (bình thường HOẶC sự cố khẩn cấp gần Hub đích) -> Hoàn tất giao đơn!
+                    if is_incident_flight and landed_at_destination:
+                        mission.status = MissionStatus.ARRIVAL_COMPLETED
+                        confirm_msg = "Arrival confirmed at destination hub. Order delivered cleanly; drone placed into Maintenance for technical inspection."
                     order_obj.status = OrderStatus.DELIVERED_TO_HUB
+                    order_obj.destination_received_at = order_obj.destination_received_at or now
+                    order_obj.destination_received_by = order_obj.destination_received_by or str(user.id)
+                    order_obj.replan_required_at = None
                     order_obj.updated_at = now
 
                     if order_obj.receiver_email:
@@ -564,7 +585,7 @@ async def confirm_arrival(
     await db.commit()
 
     return {
-        "message": "Arrival confirmed. Mission completed, drone returned to Hub Fleet, and battery moved to Battery Management.",
+        "message": confirm_msg,
         "mission_id": mission.id,
         "order_id": mission.order_id,
         "mission_status": mission.status.value if hasattr(mission.status, "value") else str(mission.status),

@@ -14,6 +14,7 @@ from app.modules.missions.models import Order, OrderStatus, Mission, MissionStat
 from app.modules.system.models import Hub
 from app.modules.fleet.models import Drone, DroneStatus, Battery, batteries_status, compute_battery_available_status
 from app.modules.missions.technician.router import get_compatible_battery_models
+from app.modules.missions.bundle_service import resolve_effective_origin_hub_id
 from app.modules.orders.schemas import (
     HubSchema,
     OrderResponse,
@@ -637,10 +638,11 @@ async def get_eligible_drones(
     order = await db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    if not order.origin_hub_id:
+    eff_origin_id, _ = await resolve_effective_origin_hub_id(db, order)
+    if not eff_origin_id:
         raise HTTPException(status_code=400, detail="Order does not have an origin hub")
         
-    hub = await db.get(Hub, order.origin_hub_id)
+    hub = await db.get(Hub, eff_origin_id)
     if not hub:
         raise HTTPException(status_code=404, detail="Origin Hub not found")
 
@@ -945,10 +947,11 @@ async def get_eligible_batteries_for_order(
     order = await db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    if not order.origin_hub_id:
+    eff_origin_id, _ = await resolve_effective_origin_hub_id(db, order)
+    if not eff_origin_id:
         raise HTTPException(status_code=400, detail="Order does not have an origin hub")
 
-    hub = await db.get(Hub, order.origin_hub_id)
+    hub = await db.get(Hub, eff_origin_id)
     if not hub:
         raise HTTPException(status_code=404, detail="Origin Hub not found")
 
