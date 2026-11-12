@@ -652,10 +652,20 @@ def build_route_nl_explanation(
                     f"Not selected: Slower transit duration ({r.predictedDurationMin} min vs "
                     f"{selected_route.predictedDurationMin} min on {selected_route.routeId}), less aligned with Express delivery SLA."
                 )
+            elif "DETOUR" in r.routeId and "DETOUR" not in selected_route.routeId:
+                reason = (
+                    f"Not selected: Contingency bypass corridor ({r.distanceKm:.2f} km, {r.predictedEnergyWh:.1f} Wh, {r.predictedDurationMin} min) "
+                    f"is held in reserve and only recommended when primary routes violate battery reserve (80%) or weather safety limits."
+                )
             elif len(r.legs_detail) > len(selected_route.legs_detail):
+                baseline_desc = (
+                    "a direct flight"
+                    if len(selected_route.legs_detail) <= 1
+                    else f"{len(selected_route.legs_detail)} legs on {selected_route.routeId}"
+                )
                 reason = (
                     f"Not selected: Requires {len(r.legs_detail)} flight legs with intermediate relay battery swap, "
-                    f"adding ground turnaround overhead compared to a direct flight."
+                    f"adding ground turnaround overhead compared to {baseline_desc}."
                 )
             else:
                 reason = (
