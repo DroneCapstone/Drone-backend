@@ -117,6 +117,7 @@ async def get_incoming_drones(
                 Mission.handling_status.in_([
                     HandlingStatus.INCOMING,
                     HandlingStatus.AT_HUB,
+                    HandlingStatus.READY,
                     HandlingStatus.CANNOT_CONTINUE,
                 ])
             )
