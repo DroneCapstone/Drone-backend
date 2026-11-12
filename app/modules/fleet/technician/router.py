@@ -673,9 +673,6 @@ async def confirm_arrival(
                         mission.status = MissionStatus.ARRIVAL_COMPLETED
                         confirm_msg = "Arrival confirmed at destination hub. Order delivered cleanly; drone placed into Maintenance for technical inspection."
                     order_obj.status = OrderStatus.DELIVERED_TO_HUB
-                    order_obj.destination_received_at = order_obj.destination_received_at or now
-                    order_obj.destination_received_by = order_obj.destination_received_by or str(user.id)
-                    order_obj.replan_required_at = None
                     order_obj.updated_at = now
 
                     if order_obj.receiver_email:
