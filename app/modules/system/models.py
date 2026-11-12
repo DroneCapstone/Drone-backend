@@ -45,16 +45,9 @@ class Hub(Base):
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-class AuditLog(Base):
-    """Giữ lại cho backward compatibility — không dùng nữa."""
-    __tablename__ = "audit_logs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    action: Mapped[str] = mapped_column(String, nullable=False)
-    resource_table: Mapped[str | None] = mapped_column(String, nullable=True)
-    details_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+class AuditLog:
+    """Đã xóa DB table — class này chỉ giữ lại để không break import cũ, không map vào DB."""
+    pass
 
 
 # ── Activity Logs ─────────────────────────────────────────────────
