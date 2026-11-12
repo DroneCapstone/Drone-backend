@@ -24,7 +24,9 @@ from app.modules.missions.schemas import (
     FailsafeEvaluateRequest, FailsafeEvaluateResponse,
     FailsafeExecuteRequest, FailsafeExecuteResponse, FailsafeHubInfo,
     PreAnalyzeBundleCandidatesRequest, ValidateBundleRequest, PostAnalyzeBundleCandidatesRequest,
+    AutoDispatchRequest, AutoDispatchResponse,
 )
+from app.modules.missions.auto_dispatch_service import run_auto_dispatch_selection
 from app.modules.missions.bundle_service import (
     get_pre_analyze_bundle_candidates,
     validate_bundle_orders,
@@ -3470,23 +3472,17 @@ async def analyze_mission_planning(
         )
 
 
-@router.post("", response_model=MissionResponse)
-async def create_mission(
+async def _create_mission_internal(
+    db: AsyncSession,
+    user: CurrentUser,
     request: MissionCreateRequest,
-    user: CurrentUser = Depends(allow_operator),
-    db: AsyncSession = Depends(get_async_db)
-):
+    recommend_mode: str = "AUTO",
+    precomputed_routes: Optional[tuple] = None,
+    custom_recommendation_content: Optional[str] = None,
+) -> MissionResponse:
     """
-    **[Operator API] Tạo nhiệm vụ bay (Create Mission)**
-    
-    - **Mục đích**: Chính thức xác nhận tạo chuyến bay để giao một Order cụ thể kèm lựa chọn Drone và Pin.
-    - **Hoạt động**:
-        1. Validate `Order` bắt buộc phải đang ở trạng thái `AT_HUB` (Technician đã nhận hàng).
-        2. Chặn tạo trùng lặp nếu Order hoặc Drone đã có Mission đang chờ hoặc đang bay.
-        3. Validate viên pin được chọn cho Drone (`batteryId` / `battery_id`) hoặc tự động chọn viên pin tương thích tốt nhất tại Origin Hub.
-        4. Phân tích lại tuyến đường dựa trên năng lượng thực tế của viên pin được gán (`available_energy_wh = capacity_wh * charge_level_pct / 100`) và ngưỡng dự phòng an toàn 20%.
-        5. Ở các tuyến Multi-Hub (Relay), chỉ định và giữ chỗ chính xác từng viên pin cụ thể tại mỗi Hub trung gian (`MissionLeg.battery_id`) để dùng thay thế.
-        6. Tạo bản ghi `Mission`, `MissionLeg`, `AIPrediction`.
+    Hàm lõi dùng chung cho cả tạo Mission thủ công (`POST /operator/missions`)
+    và Tự động điều phối (`POST /operator/missions/auto-dispatch`).
     """
     clean_order_id = request.orderId.strip() if request.orderId else request.orderId
     order = await db.get(Order, clean_order_id)
@@ -3584,14 +3580,18 @@ async def create_mission(
                 bundled_order_objs.append(b_obj)
 
     # Tái hiện các tùy chọn tuyến đường dựa trên năng lượng của pin được gán + chỉ định pin tại các Relay Hub
-    routes_schemas, raw_data_list = await compute_mission_routes_internal(
-        db=db,
-        order=order,
-        drone_id=request.droneId,
-        battery_id=requested_battery_id,
-        strict_battery=True,
-        override_payload_kg=total_bundle_payload,
-    )
+    if precomputed_routes is not None:
+        routes_schemas, raw_data_list = precomputed_routes
+    else:
+        routes_schemas, raw_data_list = await compute_mission_routes_internal(
+            db=db,
+            order=order,
+            drone_id=request.droneId,
+            battery_id=requested_battery_id,
+            strict_battery=True,
+            override_payload_kg=total_bundle_payload,
+            recommend_mode=recommend_mode,
+        )
 
     selected_schema = None
     selected_data = None
@@ -3774,12 +3774,15 @@ async def create_mission(
 
     # 3. Lưu AI Snapshot
     rec_content = (
-        selected_schema.reason
-        if (selected_schema and selected_schema.reason)
-        else (
-            f"Route {route_str} selected by AI analysis ({total_energy_wh:.1f} Wh). "
-            f"Origin battery: {assigned_battery.id} ({assigned_battery.serial_number})."
-            + (f" Relay swap batteries: {', '.join(relay_swap_summary_parts)}." if relay_swap_summary_parts else "")
+        custom_recommendation_content
+        or (
+            selected_schema.reason
+            if (selected_schema and selected_schema.reason)
+            else (
+                f"Route {route_str} selected by AI analysis ({total_energy_wh:.1f} Wh). "
+                f"Origin battery: {assigned_battery.id} ({assigned_battery.serial_number})."
+                + (f" Relay swap batteries: {', '.join(relay_swap_summary_parts)}." if relay_swap_summary_parts else "")
+            )
         )
     )
     ai_pred = AIPrediction(
@@ -3840,6 +3843,105 @@ async def create_mission(
     resp_mission.bundled_order_ids = all_mission_order_ids
     resp_mission.total_orders_count = len(all_mission_order_ids)
     return resp_mission
+
+
+@router.post("", response_model=MissionResponse)
+async def create_mission(
+    request: MissionCreateRequest,
+    user: CurrentUser = Depends(allow_operator),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Operator API] Tạo nhiệm vụ bay (Create Mission)**
+
+    - **Mục đích**: Chính thức xác nhận tạo chuyến bay để giao một Order cụ thể kèm lựa chọn Drone và Pin.
+    """
+    return await _create_mission_internal(db=db, user=user, request=request)
+
+
+@router.post(
+    "/auto-dispatch",
+    response_model=AutoDispatchResponse,
+    summary="Tự động chọn Drone, Pin, Lộ trình tối ưu và Tạo Mission kèm giải thích XAI SHAP",
+)
+async def auto_dispatch_mission(
+    request: AutoDispatchRequest,
+    user: CurrentUser = Depends(allow_operator),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Operator API] Tự động điều phối toàn trình (Auto-Dispatch + XAI SHAP)**
+
+    - **Thay thế hoàn toàn** luồng chọn Drone thủ công, chọn Pin thủ công, chọn Route thủ công và Tạo Mission.
+    - **Chống black-box**: Tính và trả về đầy đủ `xai_shap_report` theo chuẩn Additive SHAP
+      (`base_value + sum(shap_values) == total_score`) cho cả 3 quyết định (Drone, Pin, Route) kèm
+      Physics Energy SHAP (tốc độ, độ cao, quãng đường, tải trọng, gió Open-Meteo) và đối chứng (counterfactuals).
+    - Hỗ trợ `dry_run=True` để xem trước kết quả AI và biểu đồ SHAP trước khi tạo bản ghi Mission trong CSDL.
+    """
+    selection = await run_auto_dispatch_selection(
+        db=db,
+        order_id=request.orderId,
+        bundled_order_ids=request.bundledOrderIds,
+        recommend_mode=request.recommend_mode,
+        compute_routes_fn=compute_mission_routes_internal,
+        get_reserved_batteries_fn=_get_reserved_batteries_and_virtual_holds,
+    )
+
+    order = selection["order"]
+    best_drone = selection["drone"]
+    best_battery = selection["battery"]
+    best_route = selection["selected_route"]
+    available_routes = selection["available_routes"]
+    raw_list = selection["raw_list"]
+    xai_report = selection["xai_report"]
+    bundled_ids = selection["bundled_order_ids"]
+
+    created_mission: Optional[MissionResponse] = None
+    if not request.dry_run:
+        create_req = MissionCreateRequest(
+            orderId=order.id,
+            droneId=best_drone.id,
+            batteryId=best_battery.id,
+            routeId=best_route.routeId,
+            bundledOrderIds=bundled_ids or None,
+        )
+        created_mission = await _create_mission_internal(
+            db=db,
+            user=user,
+            request=create_req,
+            recommend_mode=request.recommend_mode or "AUTO",
+            precomputed_routes=(available_routes, raw_list),
+            custom_recommendation_content=f"[Auto-Dispatch XAI] {xai_report.executive_summary}",
+        )
+
+    is_dry = bool(request.dry_run)
+    status_label = "DRY_RUN_PREVIEW" if is_dry else "MISSION_CREATED"
+    msg = (
+        "Dry-run preview generated. Optimal drone, battery, and route selected with additive XAI SHAP attribution; no mission was created."
+        if is_dry
+        else f"Mission {created_mission.id} created automatically via AI auto-dispatch with full XAI SHAP explainability."
+    )
+
+    return AutoDispatchResponse(
+        status=status_label,
+        dry_run=is_dry,
+        mission_created=not is_dry,
+        message=msg,
+        order_id=order.id,
+        bundled_order_ids=bundled_ids,
+        total_payload_kg=selection["total_payload_kg"],
+        selected_drone_id=best_drone.id,
+        selected_drone_name=best_drone.name,
+        selected_drone_model=best_drone.model,
+        selected_battery_id=best_battery.id,
+        selected_battery_serial=best_battery.serial_number,
+        selected_route_id=best_route.routeId,
+        selected_route_string=best_route.route_string,
+        selected_route=best_route,
+        available_routes=available_routes,
+        xai_shap_report=xai_report,
+        mission=created_mission,
+    )
 
 
 @router.get("/{mission_id}", response_model=MissionResponse, summary="Lấy thông tin chi tiết một mission")

@@ -464,3 +464,69 @@ class FailsafeExecuteResponse(BaseModel):
     incident_id: Optional[int] = None
     alert_id: Optional[int] = None
     message: str
+
+
+class ShapFeatureAttribution(BaseModel):
+    feature: str
+    label: str
+    raw_value: str
+    shap_contribution: float
+    direction: str  # "positive" | "negative" | "neutral"
+    impact: str
+
+
+class DecisionShapExplanation(BaseModel):
+    selected_id: str
+    selected_label: str
+    total_score: float
+    base_value: float
+    baseline_reference: str
+    shap_values: Dict[str, float]
+    feature_contributions: list[ShapFeatureAttribution]
+    why_selected: str
+    counterfactuals: list[Dict[str, Any]] = []
+
+
+class AutoDispatchXAIReport(BaseModel):
+    model_type: str = "Multi-Criteria Additive SHAP + Physics-Informed Flight Energy SHAP"
+    explainability_standard: str = "Additive Shapley Attribution (base_value + sum(shap_values) = total_score)"
+    delivery_mode: str
+    optimization_objective: str
+    effective_origin_hub_id: int
+    is_replan_dispatch: bool = False
+    is_cross_hub_dispatch: bool = False
+    drone_decision: DecisionShapExplanation
+    battery_decision: DecisionShapExplanation
+    route_decision: DecisionShapExplanation
+    physics_energy_shap: Optional[Dict[str, float]] = None
+    physics_energy_explanation: Optional[AIExplanationSchema] = None
+    relay_swap_batteries: list[Dict[str, Any]] = []
+    executive_summary: str
+
+
+class AutoDispatchRequest(BaseModel):
+    orderId: str
+    bundledOrderIds: Optional[list[str]] = None
+    recommend_mode: Optional[str] = "AUTO"  # AUTO (theo delivery_mode), ECO, FAST
+    dry_run: bool = False
+
+
+class AutoDispatchResponse(BaseModel):
+    status: str  # "MISSION_CREATED" | "DRY_RUN_PREVIEW"
+    dry_run: bool = False
+    mission_created: bool = False
+    message: str
+    order_id: str
+    bundled_order_ids: list[str] = []
+    total_payload_kg: float
+    selected_drone_id: str
+    selected_drone_name: str
+    selected_drone_model: str
+    selected_battery_id: str
+    selected_battery_serial: Optional[str] = None
+    selected_route_id: str
+    selected_route_string: str
+    selected_route: RouteOptionSchema
+    available_routes: list[RouteOptionSchema] = []
+    xai_shap_report: AutoDispatchXAIReport
+    mission: Optional[MissionResponse] = None
