@@ -1758,12 +1758,11 @@ async def confirm_relay_arrival(
 
     # Tìm leg đang active (IN_PROGRESS) hoặc PENDING đầu tiên chưa completed
     current_leg = None
-    next_leg = None
+    current_leg_index = None
     for i, leg in enumerate(legs):
         if leg.status in [MissionLegStatus.IN_PROGRESS, MissionLegStatus.PENDING]:
             current_leg = leg
-            if i + 1 < len(legs):
-                next_leg = legs[i + 1]
+            current_leg_index = i
             break
 
     if not current_leg:
@@ -1774,8 +1773,9 @@ async def confirm_relay_arrival(
 
     now = get_vn_naive_datetime()
 
-    # Không phải leg cuối cùng → đây là relay hub, không phải hub đích
-    if next_leg is None:
+    # Kiểm tra xem leg hiện tại có phải leg cuối cùng không
+    # Nếu current_leg_index == len(legs) - 1, thì đó là leg cuối
+    if current_leg_index == len(legs) - 1:
         raise HTTPException(
             status_code=400,
             detail="This is the final leg. Use confirm-arrival to complete the mission instead."
