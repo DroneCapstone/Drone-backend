@@ -672,9 +672,8 @@ async def _fly_incident_return(
                 )
                 leg = leg_res.scalars().first()
                 if leg:
-                    leg.completed_at = now
+                    # Leg vẫn IN_PROGRESS, chỉ set handling_status để Technician thấy
                     leg.updated_at = now
-                    leg.status = MissionLegStatus.COMPLETED
 
                 drone = await db.get(Drone, mission.drone_id) if mission.drone_id else None
                 if drone:
@@ -989,12 +988,10 @@ async def simulate_mission_flight(mission_id: str) -> None:
                 next_leg = next_leg_res.scalars().first()
 
                 # Drone đáp xuống hub → set AT_HUB để Technician thấy nút confirm
+                # Leg vẫn IN_PROGRESS cho tới khi Technician bấm confirm-relay-arrival hoặc confirm-arrival
                 now = get_vn_naive_datetime()
                 mission.handling_status = HandlingStatus.AT_HUB
                 mission.arrived_at = now
-                leg.status = MissionLegStatus.COMPLETED
-                leg.completed_at = now
-                leg.updated_at = now
                 if to_hub:
                     drone = await db.get(Drone, mission.drone_id) if mission.drone_id else None
                     if drone:
