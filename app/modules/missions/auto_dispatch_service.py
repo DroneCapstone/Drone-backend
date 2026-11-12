@@ -606,15 +606,21 @@ def build_route_nl_explanation(
     )
     reasons_selected = _extract_top_shap_reasons(route_shap)
 
-    summary = (
-        selected_route.reason
-        if selected_route.reason and not selected_route.reason.startswith("Infeasible")
-        else (
-            f"Selected route {selected_route.routeId} ({selected_route.route_string}) under {optimization_objective} priority: "
-            f"{selected_route.predictedDurationMin} min flight time, {selected_route.predictedEnergyWh:.1f} Wh estimated energy, "
-            f"and {selected_route.remainingBatteryPct}% landing battery reserve."
+    if not selected_route.feasible:
+        summary = (
+            f"No feasible route found under current battery/weather constraints: "
+            f"{selected_route.infeasible_reason or 'all candidate routes exceed safe 80% battery reserve or weather limits.'}"
         )
-    )
+    else:
+        summary = (
+            selected_route.reason
+            if selected_route.reason and not selected_route.reason.startswith("Infeasible")
+            else (
+                f"Selected route {selected_route.routeId} ({selected_route.route_string}) under {optimization_objective} priority: "
+                f"{selected_route.predictedDurationMin} min flight time, {selected_route.predictedEnergyWh:.1f} Wh estimated energy, "
+                f"and {selected_route.remainingBatteryPct}% landing battery reserve."
+            )
+        )
 
     why_not_others: list[AlternativeComparisonItem] = []
     for r in routes_schemas:
