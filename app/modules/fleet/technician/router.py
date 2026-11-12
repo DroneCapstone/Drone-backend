@@ -128,7 +128,7 @@ async def get_incoming_drones(
                 select(MissionLeg.mission_id)
                 .where(
                     MissionLeg.to_hub_id == tech_hub_id,
-                    MissionLeg.status == MissionLegStatus.IN_PROGRESS,
+                    MissionLeg.status.in_([MissionLegStatus.IN_PROGRESS, MissionLegStatus.COMPLETED]),
                 )
             )
             query = query.where(
