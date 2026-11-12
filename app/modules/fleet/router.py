@@ -19,7 +19,7 @@ def get_drones(user: CurrentUser = Depends(allow_technician)):
     return {"message": "Drones list"}
 
 
-@router.post("/admin/batteries/supply", response_model=BatterySupplyResponse, summary="Phân bổ pin từ kho Admin về Hub (Route Alias)")
+@router.post("/admin/batteries/supply", response_model=BatterySupplyResponse, summary="Allocate batteries from Admin warehouse to Hub (Route Alias)")
 async def supply_batteries_alias(
     body: BatterySupplyRequest,
     user: CurrentUser = Depends(allow_admin),

@@ -28,6 +28,8 @@ from app.modules.system.schemas import (
     KPIChartData,
     SimulatorConfigResponse,
     SimulatorConfigUpdate,
+    SimulatorTriggerIncidentRequest,
+    SimulatorTriggerIncidentResponse,
 )
 from app.modules.system.models import Hub, Notification, NotificationType
 from app.modules.fleet.models import Drone, Battery
@@ -36,7 +38,7 @@ from app.modules.missions.models import Mission, MissionStatus
 from app.modules.system import service
 from app.shared.dependencies import RoleChecker, CurrentUser
 from app.shared.roles import UserRole
-from app.shared.drone_simulator import simulator_config
+from app.shared.drone_simulator import simulator_config, apply_simulator_config_update
 
 router = APIRouter(tags=["System"])
 
@@ -47,12 +49,19 @@ def extract_area(address: Optional[str]) -> str:
     """Trích xuất khu vực (District / TP. Thủ Đức) từ chuỗi địa chỉ."""
     if not address:
         return "Ho Chi Minh City"
-    match = re.search(r"(TP\.\s*Thủ Đức|Thủ Đức|Bình Thạnh|Quận\s*\d+|District\s*\d+)", address, re.IGNORECASE)
+    # Match real Vietnamese hub addresses stored in the DB using Unicode escapes
+    match = re.search(
+        r"(TP\.\s*Th\u1ee7 \u0110\u1ee9c|Th\u1ee7 \u0110\u1ee9c|B\u00ecnh Th\u1ea1nh|Qu\u1eadn\s*\d+|District\s*\d+)",
+        address,
+        re.IGNORECASE,
+    )
     if match:
         val = match.group(1).strip()
-        if "Thủ Đức" in val or "thủ đức" in val.lower():
-            return "Thu Duc"
-        m_q = re.search(r"Quận\s*(\d+)", val, re.IGNORECASE)
+        if "th\u1ee7 \u0111\u1ee9c" in val.lower():
+            return "Thu Duc City"
+        if "b\u00ecnh th\u1ea1nh" in val.lower():
+            return "Binh Thanh District"
+        m_q = re.search(r"Qu\u1eadn\s*(\d+)", val, re.IGNORECASE)
         if m_q:
             return f"District {m_q.group(1)}"
         m_d = re.search(r"District\s*(\d+)", val, re.IGNORECASE)
@@ -87,12 +96,12 @@ async def get_audit_logs(
 
 @router.get("/admin/activity-logs", response_model=ActivityLogListResponse,
             dependencies=[Depends(require_admin)],
-            summary="Activity Logs — Hành động của người dùng")
+            summary="Activity Logs — User actions")
 async def get_activity_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    user_id: Optional[str] = Query(None, description="Lọc theo user_id hoặc email"),
-    action: Optional[str] = Query(None, description="Lọc theo action (LOGIN, CREATE_ORDER...)"),
+    user_id: Optional[str] = Query(None, description="Filter by user_id or email"),
+    action: Optional[str] = Query(None, description="Filter by action (LOGIN, CREATE_ORDER...)"),
     role: Optional[str] = Query(None, description="ADMIN / OPERATOR / TECHNICIAN / CUSTOMER"),
     resource_type: Optional[str] = Query(None, description="order / mission / drone / user..."),
     status: Optional[str] = Query(None, description="success / failed"),
@@ -108,7 +117,7 @@ async def get_activity_logs(
 
 @router.get("/admin/system-logs", response_model=SystemLogListResponse,
             dependencies=[Depends(require_admin)],
-            summary="System Logs — Sự kiện tự động của hệ thống")
+            summary="System Logs — Automated system events")
 async def get_system_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -147,8 +156,8 @@ async def get_hubs_summary(db: AsyncSession = Depends(get_async_db)):
 @router.get("/admin/system/hubs", response_model=list[HubListItemResponse], dependencies=[Depends(require_admin)])
 @router.get("/admin/fleet/hubs", response_model=list[HubListItemResponse], dependencies=[Depends(require_admin)], include_in_schema=False)
 async def get_admin_hubs(
-    search: Optional[str] = Query(None, description="Tìm theo tên, mã code hoặc địa chỉ"),
-    status: Optional[str] = Query(None, description="Lọc theo trạng thái (Active, Inactive)"),
+    search: Optional[str] = Query(None, description="Search by name, code, or address"),
+    status: Optional[str] = Query(None, description="Filter by status (Active, Inactive)"),
     db: AsyncSession = Depends(get_async_db),
 ):
     """
@@ -393,7 +402,7 @@ async def delete_hub(hub_id: int, db: AsyncSession = Depends(get_async_db)):
 @router.get(
     "/admin/fleet/technicians/unassigned",
     response_model=list[UnassignedTechnicianItem],
-    summary="Lấy danh sách Technician chưa được phân công vào Hub nào",
+    summary="List Technicians not yet assigned to any Hub",
 )
 @router.get(
     "/admin/system/technicians/unassigned",
@@ -420,7 +429,7 @@ async def get_unassigned_technicians(
 @router.post(
     "/admin/fleet/hubs/{hub_id}/technicians",
     response_model=HubTechnicianAssignmentResponse,
-    summary="Gán Technician vào Hub",
+    summary="Assign a Technician to a Hub",
 )
 @router.post(
     "/admin/system/hubs/{hub_id}/technicians",
@@ -435,30 +444,30 @@ async def assign_technician_to_hub(
 ):
     hub = await db.get(Hub, hub_id)
     if not hub:
-        raise HTTPException(status_code=404, detail=f"Hub #{hub_id} không tồn tại.")
+        raise HTTPException(status_code=404, detail=f"Hub #{hub_id} not found.")
 
     tech = await db.get(User, body.technician_id)
     if not tech:
-        raise HTTPException(status_code=404, detail=f"Tài khoản '{body.technician_id}' không tồn tại.")
+        raise HTTPException(status_code=404, detail=f"Account '{body.technician_id}' not found.")
     if tech.role_id != "TECHNICIAN":
-        raise HTTPException(status_code=400, detail=f"Tài khoản '{tech.email}' không có vai trò TECHNICIAN.")
+        raise HTTPException(status_code=400, detail=f"Account '{tech.email}' does not have the TECHNICIAN role.")
     if not tech.is_active:
-        raise HTTPException(status_code=400, detail=f"Technician '{tech.full_name}' hiện đang bị vô hiệu hóa.")
+        raise HTTPException(status_code=400, detail=f"Technician '{tech.full_name}' is currently deactivated.")
 
     if tech.hub_id == hub_id:
-        raise HTTPException(status_code=400, detail=f"Technician '{tech.full_name}' đã được phân công tại Hub #{hub_id} từ trước.")
+        raise HTTPException(status_code=400, detail=f"Technician '{tech.full_name}' is already assigned to Hub #{hub_id}.")
     if tech.hub_id is not None:
         raise HTTPException(
             status_code=400,
-            detail=f"Technician '{tech.full_name}' đang thuộc Hub #{tech.hub_id}. Vui lòng dùng chức năng điều chuyển (Transfer)."
+            detail=f"Technician '{tech.full_name}' belongs to Hub #{tech.hub_id}. Please use the Transfer endpoint."
         )
 
     tech.hub_id = hub_id
     now_utc = datetime.now(timezone.utc)
     db.add(Notification(
         user_id=tech.id,
-        title=f"Phân công công tác tại {hub.name}",
-        message=f"Admin đã phân công bạn phụ trách kỹ thuật tại trạm {hub.name} (Hub #{hub.id}).",
+        title=f"Assigned to {hub.name}",
+        message=f"Admin has assigned you as technician at {hub.name} (Hub #{hub.id}).",
         notifications_type=NotificationType.SYSTEM_ALERT,
         reference_id=f"HUB_TECH_ASSIGN_{hub.id}",
         created_at=now_utc,
@@ -472,12 +481,12 @@ async def assign_technician_to_hub(
         role=user.role.value,
         resource_type="accounts",
         resource_id=tech.id,
-        description=f"Gán Technician {tech.full_name} ({tech.email}) vào Hub #{hub.id} ({hub.name}).",
+        description=f"Assigned Technician {tech.full_name} ({tech.email}) to Hub #{hub.id} ({hub.name}).",
         details={"hub_id": hub.id, "hub_name": hub.name, "technician_id": tech.id},
     )
 
     return HubTechnicianAssignmentResponse(
-        message=f"Đã gán Technician '{tech.full_name}' vào Hub #{hub.id} ({hub.name}).",
+        message=f"Assigned Technician '{tech.full_name}' to Hub #{hub.id} ({hub.name}).",
         technician_id=tech.id,
         full_name=tech.full_name,
         email=tech.email,
@@ -490,7 +499,7 @@ async def assign_technician_to_hub(
 @router.delete(
     "/admin/fleet/hubs/{hub_id}/technicians/{technician_id}",
     response_model=HubTechnicianAssignmentResponse,
-    summary="Gỡ Technician khỏi Hub",
+    summary="Unassign a Technician from a Hub",
 )
 @router.delete(
     "/admin/system/hubs/{hub_id}/technicians/{technician_id}",
@@ -505,17 +514,17 @@ async def unassign_technician_from_hub(
 ):
     hub = await db.get(Hub, hub_id)
     if not hub:
-        raise HTTPException(status_code=404, detail=f"Hub #{hub_id} không tồn tại.")
+        raise HTTPException(status_code=404, detail=f"Hub #{hub_id} not found.")
 
     tech = await db.get(User, technician_id)
     if not tech:
-        raise HTTPException(status_code=404, detail=f"Technician '{technician_id}' không tồn tại.")
+        raise HTTPException(status_code=404, detail=f"Technician '{technician_id}' not found.")
     if tech.role_id != "TECHNICIAN":
-        raise HTTPException(status_code=400, detail=f"Tài khoản '{tech.email}' không có vai trò TECHNICIAN.")
+        raise HTTPException(status_code=400, detail=f"Account '{tech.email}' does not have the TECHNICIAN role.")
     if tech.hub_id != hub_id:
         raise HTTPException(
             status_code=400,
-            detail=f"Technician '{tech.full_name}' hiện không trực thuộc Hub #{hub_id} (hiện thuộc Hub: {tech.hub_id})."
+            detail=f"Technician '{tech.full_name}' does not belong to Hub #{hub_id} (current Hub: {tech.hub_id})."
         )
 
     prev_hub_id = tech.hub_id
@@ -523,8 +532,8 @@ async def unassign_technician_from_hub(
     now_utc = datetime.now(timezone.utc)
     db.add(Notification(
         user_id=tech.id,
-        title=f"Kết thúc phân công tại {hub.name}",
-        message=f"Admin đã gỡ phân công của bạn khỏi trạm {hub.name} (Hub #{hub.id}).",
+        title=f"Unassigned from {hub.name}",
+        message=f"Admin has removed your assignment from {hub.name} (Hub #{hub.id}).",
         notifications_type=NotificationType.SYSTEM_ALERT,
         reference_id=f"HUB_TECH_UNASSIGN_{hub.id}",
         created_at=now_utc,
@@ -538,12 +547,12 @@ async def unassign_technician_from_hub(
         role=user.role.value,
         resource_type="accounts",
         resource_id=tech.id,
-        description=f"Gỡ Technician {tech.full_name} khỏi Hub #{hub.id} ({hub.name}).",
+        description=f"Unassigned Technician {tech.full_name} from Hub #{hub.id} ({hub.name}).",
         details={"previous_hub_id": prev_hub_id, "technician_id": tech.id},
     )
 
     return HubTechnicianAssignmentResponse(
-        message=f"Đã gỡ Technician '{tech.full_name}' khỏi Hub #{hub.id} ({hub.name}).",
+        message=f"Unassigned Technician '{tech.full_name}' from Hub #{hub.id} ({hub.name}).",
         technician_id=tech.id,
         full_name=tech.full_name,
         email=tech.email,
@@ -556,7 +565,7 @@ async def unassign_technician_from_hub(
 @router.put(
     "/admin/fleet/hubs/{hub_id}/technicians/{technician_id}/transfer",
     response_model=HubTechnicianAssignmentResponse,
-    summary="Điều chuyển Technician sang Hub khác",
+    summary="Transfer a Technician to another Hub",
 )
 @router.put(
     "/admin/system/hubs/{hub_id}/technicians/{technician_id}/transfer",
@@ -571,32 +580,32 @@ async def transfer_technician_hub(
     db: AsyncSession = Depends(get_async_db),
 ):
     if body.new_hub_id == hub_id:
-        raise HTTPException(status_code=400, detail="Hub mới không được trùng với Hub hiện tại.")
+        raise HTTPException(status_code=400, detail="New Hub cannot be the same as the current Hub.")
 
     old_hub = await db.get(Hub, hub_id)
     new_hub = await db.get(Hub, body.new_hub_id)
     if not old_hub:
-        raise HTTPException(status_code=404, detail=f"Hub nguồn #{hub_id} không tồn tại.")
+        raise HTTPException(status_code=404, detail=f"Source Hub #{hub_id} not found.")
     if not new_hub:
-        raise HTTPException(status_code=404, detail=f"Hub đích #{body.new_hub_id} không tồn tại.")
+        raise HTTPException(status_code=404, detail=f"Destination Hub #{body.new_hub_id} not found.")
 
     tech = await db.get(User, technician_id)
     if not tech:
-        raise HTTPException(status_code=404, detail=f"Technician '{technician_id}' không tồn tại.")
+        raise HTTPException(status_code=404, detail=f"Technician '{technician_id}' not found.")
     if tech.role_id != "TECHNICIAN":
-        raise HTTPException(status_code=400, detail=f"Tài khoản '{tech.email}' không có vai trò TECHNICIAN.")
+        raise HTTPException(status_code=400, detail=f"Account '{tech.email}' does not have the TECHNICIAN role.")
     if tech.hub_id != hub_id:
         raise HTTPException(
             status_code=400,
-            detail=f"Technician '{tech.full_name}' hiện không thuộc Hub nguồn #{hub_id} (hiện thuộc Hub: {tech.hub_id})."
+            detail=f"Technician '{tech.full_name}' does not belong to source Hub #{hub_id} (current Hub: {tech.hub_id})."
         )
 
     tech.hub_id = new_hub.id
     now_utc = datetime.now(timezone.utc)
     db.add(Notification(
         user_id=tech.id,
-        title=f"Điều chuyển công tác sang {new_hub.name}",
-        message=f"Admin đã điều chuyển bạn từ {old_hub.name} sang phụ trách kỹ thuật tại {new_hub.name} (Hub #{new_hub.id}).",
+        title=f"Transferred to {new_hub.name}",
+        message=f"Admin has transferred you from {old_hub.name} to {new_hub.name} (Hub #{new_hub.id}).",
         notifications_type=NotificationType.SYSTEM_ALERT,
         reference_id=f"HUB_TECH_TRANSFER_{new_hub.id}",
         created_at=now_utc,
@@ -610,12 +619,12 @@ async def transfer_technician_hub(
         role=user.role.value,
         resource_type="accounts",
         resource_id=tech.id,
-        description=f"Điều chuyển Technician {tech.full_name} từ Hub #{old_hub.id} ({old_hub.name}) sang Hub #{new_hub.id} ({new_hub.name}).",
+        description=f"Transferred Technician {tech.full_name} from Hub #{old_hub.id} ({old_hub.name}) to Hub #{new_hub.id} ({new_hub.name}).",
         details={"previous_hub_id": old_hub.id, "new_hub_id": new_hub.id, "technician_id": tech.id},
     )
 
     return HubTechnicianAssignmentResponse(
-        message=f"Đã điều chuyển Technician '{tech.full_name}' sang Hub #{new_hub.id} ({new_hub.name}).",
+        message=f"Transferred Technician '{tech.full_name}' to Hub #{new_hub.id} ({new_hub.name}).",
         technician_id=tech.id,
         full_name=tech.full_name,
         email=tech.email,
@@ -691,29 +700,62 @@ async def get_dashboard_kpi(db: AsyncSession = Depends(get_async_db)):
 allow_config_access = RoleChecker([UserRole.ADMIN, UserRole.OPERATOR])
 
 
-@router.get("/system/simulator-config", response_model=SimulatorConfigResponse, summary="Lấy cấu hình Drone Simulator hiện tại")
+@router.get("/system/simulator-config", response_model=SimulatorConfigResponse, summary="Get current Drone Simulator configuration")
 async def get_simulator_config(
     user: CurrentUser = Depends(allow_config_access),
 ):
     return SimulatorConfigResponse(**simulator_config.to_dict())
 
 
-@router.patch("/system/simulator-config", response_model=SimulatorConfigResponse, summary="Cập nhật cấu hình Drone Simulator (bật/tắt sự cố, chỉnh xác suất)")
+@router.patch("/system/simulator-config", response_model=SimulatorConfigResponse, summary="Update Drone Simulator configuration (toggle incidents, adjust probability)")
 async def update_simulator_config(
     body: SimulatorConfigUpdate,
     user: CurrentUser = Depends(allow_config_access),
 ):
-    if body.incident_enabled is not None:
-        simulator_config.incident_enabled = body.incident_enabled
-    if body.incident_probability is not None:
-        simulator_config.incident_probability = max(0.0, min(1.0, float(body.incident_probability)))
-    if body.incident_min_step is not None:
-        simulator_config.incident_min_step = max(1, body.incident_min_step)
-    if body.incident_severity is not None:
-        simulator_config.incident_severity = body.incident_severity
-    if body.interval_sec is not None:
-        simulator_config.interval_sec = max(1, body.interval_sec)
-    if body.steps_per_leg is not None:
-        simulator_config.steps_per_leg = max(5, body.steps_per_leg)
-    return SimulatorConfigResponse(**simulator_config.to_dict())
+    try:
+        cfg = apply_simulator_config_update(
+            incident_enabled=body.incident_enabled,
+            incident_probability=body.incident_probability,
+            incident_min_step=body.incident_min_step,
+            incident_severity=body.incident_severity,
+            interval_sec=body.interval_sec,
+            steps_per_leg=body.steps_per_leg,
+            next_flight_incident=body.next_flight_incident,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return SimulatorConfigResponse(**cfg)
+
+
+@router.post(
+    "/system/simulator-config/trigger-next-incident",
+    response_model=SimulatorTriggerIncidentResponse,
+    summary="Trigger a one-time incident for the next flight (auto-resets to SUCCESS afterward)",
+)
+async def trigger_next_flight_incident_admin(
+    body: Optional[SimulatorTriggerIncidentRequest] = None,
+    user: CurrentUser = Depends(allow_config_access),
+):
+    """
+    When enabled, only the next dispatched flight will encounter an incident,
+    and subsequent flights will automatically reset to normal operation (100% SUCCESS).
+    """
+    req = body or SimulatorTriggerIncidentRequest()
+    try:
+        cfg = simulator_config.arm_next_flight_incident(
+            enabled=req.enabled,
+            severity=req.severity,
+            trigger_step=req.trigger_step,
+            incident_type=req.incident_type,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    msg = (
+        f"Armed incident scenario ({cfg['next_flight_incident_type']} • {cfg['next_flight_incident_severity']}) "
+        f"for the next flight only; subsequent flights will automatically return to normal SUCCESS."
+        if req.enabled
+        else "Disarmed next-flight incident scenario; upcoming flights will run normally with SUCCESS."
+    )
+    return SimulatorTriggerIncidentResponse(message=msg, config=SimulatorConfigResponse(**cfg))
 

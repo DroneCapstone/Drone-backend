@@ -1,49 +1,49 @@
 [
   {
-    "title": "Quy trình bảo trì drone định kỳ",
-    "content": "Lịch bảo trì định kỳ được tự động tạo dựa trên: số giờ bay tích lũy (interval_flight_hours) hoặc khoảng cách thời gian (interval_days). Khi đến hạn, hệ thống tạo MaintenanceAlert tự động mỗi giờ. Technician tạo Work Order từ Alert → tiến hành kiểm tra → ghi Maintenance Record → cập nhật trạng thái drone.",
+    "title": "Scheduled Drone Maintenance Workflow",
+    "content": "Preventive maintenance schedules are automatically generated based on accumulated flight hours (interval_flight_hours) or elapsed days (interval_days). When due, the system generates a MaintenanceAlert automatically every hour. The Technician creates a Work Order from the Alert -> performs inspection -> logs a Maintenance Record -> updates drone status.",
     "category": "maintenance_process",
     "role": "technician"
   },
   {
-    "title": "Quy trình xử lý Work Order",
-    "content": "Work Order có 3 trạng thái: PENDING → IN_PROGRESS → COMPLETED. Khi tạo Work Order từ Alert: nhập mô tả vấn đề và drone liên quan. Dùng PATCH /work-orders/{id}/inspection để cập nhật tiến độ và ghi action_taken. Khi completed, điền resolved_at tự động. Mọi thay đổi trạng thái đều được ghi vào WorkOrderLog để audit.",
+    "title": "Work Order Handling Workflow",
+    "content": "Work Orders have 3 statuses: PENDING -> IN_PROGRESS -> COMPLETED. When creating a Work Order from an Alert, enter the issue description and related drone. Use PATCH /work-orders/{id}/inspection to update progress and record action_taken. Upon completion, resolved_at is populated automatically. All status transitions are logged in WorkOrderLog for auditing.",
     "category": "work_order",
     "role": "technician"
   },
   {
-    "title": "Kiểm tra và quản lý pin (Battery)",
-    "content": "Pin được sạc tự động khi đang đỗ tại Hub theo thuật toán CC-CV: dưới 80% sạc nhanh (tuyến tính), từ 80-100% sạc chậm dần (exponential decay). Technician có thể: xem trạng thái pin tại Hub, gắn pin vào drone cho mission, đánh dấu sạc đầy thủ công (mark-charged). Cảnh báo tự động khi pin ≤20% và khi pin bảo trì quá hạn >7 ngày.",
+    "title": "Battery Inspection and Management",
+    "content": "Batteries charge automatically while docked at a Hub using a CC-CV algorithm: fast linear charging below 80%, and slower exponential decay from 80-100%. Technicians can view battery status at Hubs, mount batteries onto drones for missions, and manually mark batteries charged (mark-charged). Automatic alerts trigger when battery ≤20% or maintenance is overdue >7 days.",
     "category": "battery_management",
     "role": "technician"
   },
   {
-    "title": "Xử lý kiện hàng đến Hub (Inbound Package)",
-    "content": "Quy trình xử lý kiện hàng tại Hub xuất phát: (1) Nhận hàng từ khách → cập nhật handling_status = AT_HUB; (2) Kiểm tra hàng, lắp pin vào drone → handling_status = READY; (3) Drone cất cánh khi nhận telemetry đầu tiên. Xem danh sách kiện cần nhận qua /technician/deliveries/outbound. Xác nhận kiện đã đến Hub đích qua /deliveries/confirmations.",
+    "title": "Inbound Package Handling at Hub",
+    "content": "Package handling at the Origin Hub: (1) Receive package from customer -> update handling_status = AT_HUB; (2) Inspect package and mount battery on drone -> handling_status = READY; (3) Drone takes off upon receiving the first telemetry packet. View outbound packages via /technician/deliveries/outbound and confirm destination arrivals via /deliveries/confirmations.",
     "category": "package_handling",
     "role": "technician"
   },
   {
-    "title": "Ghi nhận kết quả bảo trì (Maintenance Record)",
-    "content": "Sau khi hoàn thành sửa chữa, tạo Maintenance Record bao gồm: chẩn đoán (diagnosis), hành động khắc phục (corrective_action), trạng thái drone sau bảo trì (resulting_drone_status), danh sách hạng mục kiểm tra (inspection_items với is_completed). Maintenance Record liên kết với Work Order và drone để tra cứu lịch sử.",
+    "title": "Recording Maintenance Results (Maintenance Record)",
+    "content": "After completing repairs, create a Maintenance Record including diagnosis, corrective_action, resulting_drone_status, and inspection_items (with is_completed flags). Each Maintenance Record links to its Work Order and drone for full maintenance history traceability.",
     "category": "maintenance_record",
     "role": "technician"
   },
   {
-    "title": "Xác nhận drone về Hub sau khi giao hàng",
-    "content": "Khi drone hạ cánh tại Hub đích sau khi giao hàng: Technician dùng /technician/fleet/missions/{id}/confirm-arrival để xác nhận. Hệ thống tự động cập nhật current_hub_id của drone. Sau xác nhận, drone sẵn sàng cho chuyến bay tiếp theo. Technician cũng xác nhận khách nhận hàng qua /technician/deliveries/confirmations/{orderId}/confirm-pickup.",
+    "title": "Confirming Drone Arrival After Delivery",
+    "content": "When a drone lands at the Destination Hub after delivery, the Technician calls /technician/fleet/missions/{id}/confirm-arrival to confirm. The system automatically updates the drone's current_hub_id, making it ready for the next mission. Technicians also confirm customer package pickup via /technician/deliveries/confirmations/{orderId}/confirm-pickup.",
     "category": "arrival_confirmation",
     "role": "technician"
   },
   {
-    "title": "Cảnh báo bảo trì tự động (Maintenance Alerts)",
-    "content": "Hệ thống tự động tạo 3 loại cảnh báo: (1) Lịch bảo trì đến hạn (từ MaintenanceSchedule); (2) Pin thấp ≤20% (kiểm tra mỗi giờ); (3) Bảo trì quá hạn >7 ngày; (4) Mất tín hiệu drone >3 giây khi đang bay (real-time). Technician xem và xử lý cảnh báo qua /technician/fleet/maintenance-alerts. Mỗi cảnh báo chỉ tạo 1 lần (dedup tự động).",
+    "title": "Automated Maintenance Alerts",
+    "content": "The system automatically generates maintenance alerts for: (1) Due maintenance schedules (from MaintenanceSchedule); (2) Low battery ≤20% (checked hourly); (3) Overdue maintenance >7 days; (4) Drone signal loss >3 seconds in flight (real-time). Technicians view and handle alerts via /technician/fleet/maintenance-alerts. Each alert is deduplicated automatically.",
     "category": "alerts",
     "role": "technician"
   },
   {
     "title": "Drone Fleet Overview",
-    "content": "Xem tổng quan đội drone qua Dashboard: tổng số drone, tỉ lệ sẵn sàng (Available/Total*100%), utilization trung bình, số drone bảo trì. Xem chi tiết từng drone: lần bảo trì cuối, lần bay cuối, lịch bảo trì tiếp theo, lịch sử bảo trì đầy đủ. Drone có các trạng thái: AVAILABLE, IN_MISSION, MAINTENANCE, RETIRED.",
+    "content": "View fleet-wide status on the Dashboard: total drones, readiness rate (Available/Total*100%), average utilization, and drones under maintenance. Inspect per-drone details: last maintenance, last flight, next scheduled maintenance, and full maintenance history. Drone statuses: AVAILABLE, IN_MISSION, MAINTENANCE, RETIRED.",
     "category": "fleet_overview",
     "role": "technician"
   }

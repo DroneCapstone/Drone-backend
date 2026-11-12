@@ -19,16 +19,16 @@ from dataclasses import dataclass
 class WeatherData:
     temperature: Optional[float] = None        # °C
     apparent_temperature: Optional[float] = None  # °C cảm giác
-    dew_point: Optional[float] = None          # °C điểm sương
+    dew_point: Optional[float] = None  # °C điểm sương
     humidity: Optional[float] = None           # %
     wind_speed: Optional[float] = None         # m/s
-    wind_gust: Optional[float] = None          # m/s gió giật
-    wind_direction: Optional[float] = None     # độ (0-360)
+    wind_gust: Optional[float] = None  # m/s gió giật
+    wind_direction: Optional[float] = None  # độ (0-360)
     precipitation: Optional[float] = None      # mm
     pressure: Optional[float] = None           # hPa
     cloud_cover: Optional[float] = None        # %
     weather_code: Optional[int] = None         # WMO weather code
-    condition_label: str = "Trời quang"        # Nhãn mô tả tiếng Việt
+    condition_label: str = "Clear sky"  # Nhãn mô tả tiếng Việt
 
 
 # In-memory cache 5 phút theo tọa độ (lat, lng) làm tròn 2 chữ số thập phân (~1.1 km)
@@ -38,35 +38,35 @@ _WEATHER_CACHE_TTL_SEC = 300.0
 
 # WMO weather code → mô tả ngắn gọn
 WMO_DESCRIPTIONS = {
-    0:  "Trời quang",
-    1:  "Ít mây",
-    2:  "Nhiều mây",
-    3:  "Âm u",
-    45: "Sương mù",
-    48: "Sương mù đóng băng",
-    51: "Mưa phùn nhẹ",
-    53: "Mưa phùn",
-    55: "Mưa phùn dày",
-    61: "Mưa nhẹ",
-    63: "Mưa vừa",
-    65: "Mưa to",
-    71: "Tuyết nhẹ",
-    73: "Tuyết vừa",
-    75: "Tuyết dày",
-    80: "Mưa rào nhẹ",
-    81: "Mưa rào",
-    82: "Mưa rào mạnh",
-    95: "Giông",
-    96: "Giông kèm mưa đá",
-    99: "Giông kèm mưa đá lớn",
+    0:  "Clear sky",
+    1:  "Mainly clear",
+    2:  "Partly cloudy",
+    3:  "Overcast",
+    45: "Fog",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    53: "Moderate drizzle",
+    55: "Dense drizzle",
+    61: "Slight rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    71: "Slight snow",
+    73: "Moderate snow",
+    75: "Heavy snow",
+    80: "Slight rain showers",
+    81: "Moderate rain showers",
+    82: "Violent rain showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with slight hail",
+    99: "Thunderstorm with heavy hail",
 }
 
 
 def weather_description(code: Optional[int]) -> str:
     """Chuyển WMO weather code thành mô tả tiếng Việt."""
     if code is None:
-        return "Không rõ"
-    return WMO_DESCRIPTIONS.get(code, f"Mã {code}")
+        return "Unknown"
+    return WMO_DESCRIPTIONS.get(code, f"Code {code}")
 
 
 async def fetch_weather(lat: float, lng: float, use_cache: bool = True) -> Optional[WeatherData]:
@@ -101,7 +101,7 @@ async def fetch_weather(lat: float, lng: float, use_cache: bool = True) -> Optio
 
             data = resp.json().get("current", {})
             w_code = data.get("weather_code")
-            cond_label = weather_description(int(w_code)) if w_code is not None else "Trời quang"
+            cond_label = weather_description(int(w_code)) if w_code is not None else "Clear sky"
             w_obj = WeatherData(
                 temperature=data.get("temperature_2m"),
                 apparent_temperature=data.get("apparent_temperature"),
@@ -153,10 +153,10 @@ def evaluate_weather_safety(weather: Optional[WeatherData], altitude_m: float = 
             "wind_gust_ms": None,
             "precipitation_mm": None,
             "humidity_pct": None,
-            "condition_label": "Chưa có dữ liệu thời tiết",
+            "condition_label": "Weather data unavailable",
             "is_bad_weather": False,
             "warning_message": None,
-            "weather_summary": "Thời tiết bình thường (mặc định)",
+            "weather_summary": "Normal weather (default)",
         }
 
     # Hiệu ứng đứt gió (Wind Shear): gió tầng 60m thường mạnh hơn mặt đất ~15%
@@ -169,25 +169,25 @@ def evaluate_weather_safety(weather: Optional[WeatherData], altitude_m: float = 
     temp = weather.temperature
     hum = weather.humidity
     w_code = weather.weather_code
-    cond = weather.condition_label or (weather_description(w_code) if w_code is not None else "Trời quang")
+    cond = weather.condition_label or (weather_description(w_code) if w_code is not None else "Clear sky")
 
     warnings = []
     if eff_wind >= 8.0:
-        alt_note = f" tại tầng {int(altitude_m)}m" if altitude_m >= 60.0 else ""
-        warnings.append(f"Gió mạnh {eff_wind:.1f} m/s{alt_note} (>= ngưỡng an toàn 8.0 m/s)")
+        alt_note = f" at {int(altitude_m)}m altitude" if altitude_m >= 60.0 else ""
+        warnings.append(f"Strong wind {eff_wind:.1f} m/s{alt_note} (>= 8.0 m/s safety threshold)")
     if eff_gust >= 11.0:
-        warnings.append(f"Gió giật {eff_gust:.1f} m/s")
+        warnings.append(f"Wind gusts {eff_gust:.1f} m/s")
     if precip >= 2.0:
-        warnings.append(f"Mưa lớn {precip:.1f} mm")
+        warnings.append(f"Heavy rain {precip:.1f} mm")
     elif w_code in (65, 82, 95, 96, 99):
-        warnings.append(f"Thời tiết cực đoan ({cond})")
+        warnings.append(f"Extreme weather ({cond})")
 
     is_bad = len(warnings) > 0
     icon = "⛈️" if is_bad else ("🌧️" if precip > 0.2 else "🌤️")
     temp_str = f"{temp:.0f}°C" if temp is not None else "N/A"
-    parts = [f"{icon} {temp_str}", f"Gió {eff_wind:.1f} m/s"]
+    parts = [f"{icon} {temp_str}", f"Wind {eff_wind:.1f} m/s"]
     if precip > 0:
-        parts.append(f"Mưa {precip:.1f} mm")
+        parts.append(f"Rain {precip:.1f} mm")
     parts.append(cond)
     summary = " • ".join(parts)
 

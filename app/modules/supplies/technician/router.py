@@ -82,7 +82,7 @@ class PartsRequestOut(BaseModel):
 
 def _get_tech_hub(user: CurrentUser) -> int:
     if not user.hub_id:
-        raise HTTPException(status_code=400, detail="Technician chưa được gán Hub. Liên hệ Admin.")
+        raise HTTPException(status_code=400, detail="Technician is not assigned to any hub. Please contact Admin.")
     return user.hub_id
 
 
@@ -151,9 +151,9 @@ async def create_parts_request(
 
     cat = await db.get(PartCategory, body.part_category_id)
     if not cat or not cat.is_active:
-        raise HTTPException(status_code=404, detail="Loại linh kiện không tồn tại hoặc đã ngừng.")
+        raise HTTPException(status_code=404, detail="Part category not found or inactive.")
     if body.quantity_needed < 1:
-        raise HTTPException(status_code=400, detail="Số lượng tối thiểu là 1.")
+        raise HTTPException(status_code=400, detail="Minimum quantity is 1.")
 
     inv = (await db.execute(
         select(HubSupply).where(and_(
@@ -173,7 +173,7 @@ async def create_parts_request(
     )
     if has_stock:
         req.reviewed_at = now
-        req.admin_note = "Tự động duyệt — Hub đủ vật tư."
+        req.admin_note = "Auto-approved — sufficient supplies at hub."
 
     db.add(req)
     await db.flush()
@@ -185,7 +185,7 @@ async def create_parts_request(
             hub_id=hub_id, part_category_id=body.part_category_id,
             quantity_delta=-body.quantity_needed, reason=SupplyTxnReason.REPAIR_USE,
             performed_by=user.id, reference_id=str(req.id),
-            note=f"Auto-approved: sử dụng cho drone {body.drone_id or 'N/A'}",
+            note=f"Auto-approved: used for drone {body.drone_id or 'N/A'}",
             created_at=now,
         ))
 
@@ -208,11 +208,11 @@ async def create_parts_request(
                 for _uid in _admin_ids:
                     db.add(Notification(
                         user_id=_uid,
-                        title=f"🔧 Đề xuất linh kiện mới — Hub #{hub_id}",
+                        title=f"🔧 New Parts Request — Hub #{hub_id}",
                         message=(
-                            f"Kỹ thuật viên đề xuất sử dụng {body.quantity_needed}x {cat.name} "
-                            f"{'cho drone ' + body.drone_id if body.drone_id else ''}. "
-                            f"Hub #{hub_id} không đủ hàng — cần Admin duyệt."
+                            f"Technician requested {body.quantity_needed}x {cat.name}"
+                            f"{' for drone ' + body.drone_id if body.drone_id else ''}. "
+                            f"Hub #{hub_id} has insufficient stock — Admin approval required."
                         ),
                         notifications_type=NotificationType.MAINTENANCE,
                         reference_id=f"PARTS_REQUEST_{req.id}",
@@ -263,9 +263,9 @@ async def get_request_detail(
 ):
     req = await db.get(PartsRequest, request_id)
     if not req:
-        raise HTTPException(status_code=404, detail="Đề xuất không tồn tại.")
+        raise HTTPException(status_code=404, detail="Parts request not found.")
     if req.requested_by != user.id and user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Không có quyền xem đề xuất này.")
+        raise HTTPException(status_code=403, detail="You do not have permission to view this parts request.")
     cat = await db.get(PartCategory, req.part_category_id)
     out = PartsRequestOut.model_validate(req)
     out.part_name = cat.name if cat else None
@@ -282,18 +282,18 @@ async def mark_fulfilled(
 ):
     req = await db.get(PartsRequest, request_id)
     if not req:
-        raise HTTPException(status_code=404, detail="Đề xuất không tồn tại.")
+        raise HTTPException(status_code=404, detail="Parts request not found.")
     if req.requested_by != user.id:
-        raise HTTPException(status_code=403, detail="Chỉ người tạo mới được xác nhận.")
+        raise HTTPException(status_code=403, detail="Only the request creator can confirm fulfillment.")
     if req.status not in (PartsRequestStatus.APPROVED, PartsRequestStatus.AUTO_APPROVED):
         raise HTTPException(status_code=400,
-            detail=f"Trạng thái '{req.status.value}' không thể xác nhận hoàn thành.")
+            detail=f"Status '{req.status.value}' cannot be confirmed as fulfilled.")
     req.status = PartsRequestStatus.FULFILLED
     req.fulfilled_at = datetime.now(timezone.utc)
     if actual_cost is not None:
         req.actual_cost = actual_cost
     await db.commit()
-    return {"message": "Xác nhận thay linh kiện thành công.", "request_id": request_id,
+    return {"message": "Part replacement confirmed successfully.", "request_id": request_id,
             "status": PartsRequestStatus.FULFILLED.value}
 
 
@@ -384,7 +384,7 @@ async def adjust_supply(
     hub_id = _get_tech_hub(user)
     cat = await db.get(PartCategory, body.part_category_id)
     if not cat:
-        raise HTTPException(status_code=404, detail="Danh mục linh kiện không tồn tại.")
+        raise HTTPException(status_code=404, detail="Part category not found.")
 
     now = datetime.now(timezone.utc)
     inv = (await db.execute(
@@ -396,7 +396,7 @@ async def adjust_supply(
 
     if not inv:
         if body.quantity_delta < 0:
-            raise HTTPException(status_code=400, detail="Hub chưa có mục linh kiện này.")
+            raise HTTPException(status_code=400, detail="Hub does not have this part item yet.")
         inv = HubSupply(
             hub_id=hub_id, part_category_id=body.part_category_id,
             quantity=body.quantity_delta, min_stock_threshold=2, updated_at=now,
@@ -407,7 +407,7 @@ async def adjust_supply(
         if new_qty < 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Tồn kho {inv.quantity}, điều chỉnh {body.quantity_delta} sẽ âm.",
+                detail=f"Current stock is {inv.quantity}; adjusting by {body.quantity_delta} would result in a negative balance.",
             )
         inv.quantity = new_qty
         inv.updated_at = now
@@ -416,13 +416,13 @@ async def adjust_supply(
         hub_id=hub_id, part_category_id=body.part_category_id,
         quantity_delta=body.quantity_delta, reason=SupplyTxnReason.ADJUST,
         performed_by=user.id,
-        note=f"[Tech] Kiểm kê điều chỉnh {'+' if body.quantity_delta > 0 else ''}{body.quantity_delta}x {cat.name}. "
+        note=f"[Tech] Stocktake adjustment {'+' if body.quantity_delta > 0 else ''}{body.quantity_delta}x {cat.name}. "
              + (body.note or ""),
         created_at=now,
     ))
     await db.commit()
     return {
-        "message": f"Đã điều chỉnh {'+' if body.quantity_delta > 0 else ''}{body.quantity_delta}x {cat.name}.",
+        "message": f"Adjusted {'+' if body.quantity_delta > 0 else ''}{body.quantity_delta}x {cat.name}.",
         "new_quantity": inv.quantity,
         "is_low_stock": inv.quantity <= inv.min_stock_threshold,
     }
@@ -439,11 +439,11 @@ async def discard_supply(
     → trừ tồn kho, log lý do.
     """
     if body.quantity < 1:
-        raise HTTPException(status_code=400, detail="Số lượng hủy tối thiểu là 1.")
+        raise HTTPException(status_code=400, detail="Minimum discard quantity is 1.")
     hub_id = _get_tech_hub(user)
     cat = await db.get(PartCategory, body.part_category_id)
     if not cat:
-        raise HTTPException(status_code=404, detail="Danh mục linh kiện không tồn tại.")
+        raise HTTPException(status_code=404, detail="Part category not found.")
 
     inv = (await db.execute(
         select(HubSupply).where(and_(
@@ -456,7 +456,7 @@ async def discard_supply(
         avail = inv.quantity if inv else 0
         raise HTTPException(
             status_code=400,
-            detail=f"Tồn kho chỉ còn {avail} đơn vị, không đủ để hủy {body.quantity}.",
+            detail=f"Only {avail} unit(s) remaining in stock, insufficient to discard {body.quantity}.",
         )
 
     now = datetime.now(timezone.utc)
@@ -467,12 +467,12 @@ async def discard_supply(
         hub_id=hub_id, part_category_id=body.part_category_id,
         quantity_delta=-body.quantity, reason=SupplyTxnReason.DISCARD,
         performed_by=user.id,
-        note=f"[Tech] Hủy {body.quantity}x {cat.name}. " + (body.note or "Linh kiện hỏng."),
+        note=f"[Tech] Discarded {body.quantity}x {cat.name}. " + (body.note or "Damaged part."),
         created_at=now,
     ))
     await db.commit()
     return {
-        "message": f"Đã ghi nhận hủy {body.quantity}x {cat.name}.",
+        "message": f"Recorded discard of {body.quantity}x {cat.name}.",
         "remaining_quantity": inv.quantity,
         "is_low_stock": inv.quantity <= inv.min_stock_threshold,
     }
@@ -489,7 +489,7 @@ async def set_threshold(
     Khi quantity <= min_stock_threshold → hệ thống đánh dấu low_stock.
     """
     if body.min_stock_threshold < 0:
-        raise HTTPException(status_code=400, detail="Ngưỡng phải >= 0.")
+        raise HTTPException(status_code=400, detail="Threshold must be >= 0.")
     hub_id = _get_tech_hub(user)
     now = datetime.now(timezone.utc)
 
@@ -512,7 +512,7 @@ async def set_threshold(
 
     await db.commit()
     return {
-        "message": f"Đã đặt ngưỡng cảnh báo = {body.min_stock_threshold}.",
+        "message": f"Alert threshold set to {body.min_stock_threshold}.",
         "part_category_id": body.part_category_id,
         "min_stock_threshold": body.min_stock_threshold,
         "current_quantity": inv.quantity,

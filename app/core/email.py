@@ -4,10 +4,10 @@ from app.core.config import settings
 
 def send_reset_email(to_email: str, reset_link: str):
     body = f"""
-    <h3>Đặt lại mật khẩu DroneOptAI</h3>
-    <p>Nhấn vào link bên dưới để đặt lại mật khẩu (hết hạn sau 15 phút):</p>
+    <h3>Reset Your DroneOptAI Password</h3>
+    <p>Click the link below to reset your password (expires in 15 minutes):</p>
     <a href="{reset_link}">{reset_link}</a>
-    <p>Nếu bạn không yêu cầu, hãy bỏ qua email này.</p>
+    <p>If you did not request this, please ignore this email.</p>
     """
     response = httpx.post(
         "https://api.brevo.com/v3/smtp/email",
@@ -18,7 +18,7 @@ def send_reset_email(to_email: str, reset_link: str):
         json={
             "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
             "to": [{"email": to_email}],
-            "subject": "Đặt lại mật khẩu DroneOptAI",
+            "subject": "Reset Your DroneOptAI Password",
             "htmlContent": body,
         },
         timeout=10,
@@ -46,11 +46,11 @@ async def send_mission_scheduled_email(
                 text-decoration: none;
                 border-radius: 6px;
                 font-weight: bold;
-            ">Theo dõi đơn hàng</a>
+            ">Track Order</a>
         </p>
     """ if tracking_url else ""
 
-    mission_line = f"<p><b>Mã chuyến bay:</b> {mission_id}</p>" if mission_id else ""
+    mission_line = f"<p><b>Mission ID:</b> {mission_id}</p>" if mission_id else ""
 
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -58,19 +58,19 @@ async def send_mission_scheduled_email(
             <h1 style="color: #ffffff; margin: 0;">📅 DroneOptAI</h1>
         </div>
         <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
-            <h2 style="color: #111827;">Đơn hàng đã được lên lịch giao!</h2>
-            <p>Xin chào,</p>
-            <p>Đơn hàng của bạn đã được hệ thống xác nhận và lên lịch chuyến bay drone.</p>
-            <p><b>Mã đơn hàng:</b> {order_id}</p>
+            <h2 style="color: #111827;">Your Order Has Been Scheduled for Delivery!</h2>
+            <p>Hello,</p>
+            <p>Your order has been confirmed and scheduled for a drone delivery mission.</p>
+            <p><b>Order ID:</b> {order_id}</p>
             {mission_line}
-            <p>Drone sẽ cất cánh sau khi trạm gửi xác nhận nhận hàng từ bạn.</p>
+            <p>The drone will take off once the origin station confirms package drop-off.</p>
             {tracking_section}
             <p style="color: #6b7280; font-size: 13px; margin-top: 24px;">
-                Nếu bạn có thắc mắc, vui lòng liên hệ hỗ trợ qua email này.
+                If you have any questions, please contact support via this email.
             </p>
         </div>
         <div style="padding: 12px; text-align: center; color: #9ca3af; font-size: 12px;">
-            DroneOptAI — Hệ thống giao hàng bằng drone
+            DroneOptAI — Drone Delivery System
         </div>
     </div>
     """
@@ -85,7 +85,7 @@ async def send_mission_scheduled_email(
             json={
                 "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
                 "to": [{"email": to_email}],
-                "subject": f"[DroneOptAI] Đơn hàng {order_id} đã được lên lịch bay 📅",
+                "subject": f"[DroneOptAI] Order {order_id} has been scheduled for flight 📅",
                 "htmlContent": html_body,
             },
             timeout=10,
@@ -120,11 +120,11 @@ async def send_delivery_email(
                 text-decoration: none;
                 border-radius: 6px;
                 font-weight: bold;
-            ">Theo dõi đơn hàng</a>
+            ">Track Order</a>
         </p>
     """ if tracking_url else ""
 
-    mission_line = f"<p><b>Mã chuyến bay:</b> {mission_code}</p>" if mission_code else ""
+    mission_line = f"<p><b>Mission Code:</b> {mission_code}</p>" if mission_code else ""
 
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -132,18 +132,18 @@ async def send_delivery_email(
             <h1 style="color: #ffffff; margin: 0;">🚁 DroneOptAI</h1>
         </div>
         <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
-            <h2 style="color: #111827;">Đơn hàng đang được giao!</h2>
-            <p>Xin chào,</p>
-            <p>Đơn hàng của bạn đang được drone giao đến địa chỉ đích.</p>
-            <p><b>Mã đơn hàng:</b> {order_id}</p>
+            <h2 style="color: #111827;">Your Order Is Out for Delivery!</h2>
+            <p>Hello,</p>
+            <p>Your order is currently being delivered by drone to the destination hub.</p>
+            <p><b>Order ID:</b> {order_id}</p>
             {mission_line}
             {tracking_section}
             <p style="color: #6b7280; font-size: 13px; margin-top: 24px;">
-                Nếu bạn có thắc mắc, vui lòng liên hệ hỗ trợ qua email này.
+                If you have any questions, please contact support via this email.
             </p>
         </div>
         <div style="padding: 12px; text-align: center; color: #9ca3af; font-size: 12px;">
-            DroneOptAI — Hệ thống giao hàng bằng drone
+            DroneOptAI — Drone Delivery System
         </div>
     </div>
     """
@@ -158,7 +158,7 @@ async def send_delivery_email(
             json={
                 "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
                 "to": [{"email": to_email}],
-                "subject": f"[DroneOptAI] Đơn hàng {order_id} đang được giao 🚁",
+                "subject": f"[DroneOptAI] Order {order_id} is out for delivery 🚁",
                 "htmlContent": html_body,
             },
             timeout=10,
@@ -180,7 +180,7 @@ async def send_hub_arrival_email(
     """
     Gửi email thông báo đơn hàng đã đến trạm hub đích, chờ khách đến nhận.
     """
-    hub_line = f"<p><b>Trạm nhận hàng:</b> {hub_name}</p>" if hub_name else ""
+    hub_line = f"<p><b>Pickup Hub:</b> {hub_name}</p>" if hub_name else ""
     tracking_url = f"{frontend_url}/orders/{order_id}/tracking" if frontend_url else ""
     tracking_section = f"""
         <p>
@@ -192,7 +192,7 @@ async def send_hub_arrival_email(
                 text-decoration: none;
                 border-radius: 6px;
                 font-weight: bold;
-            ">Xem chi tiết đơn hàng</a>
+            ">View Order Details</a>
         </p>
     """ if tracking_url else ""
 
@@ -202,21 +202,21 @@ async def send_hub_arrival_email(
             <h1 style="color: #ffffff; margin: 0;">✅ DroneOptAI</h1>
         </div>
         <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
-            <h2 style="color: #111827;">Đơn hàng đã đến nơi!</h2>
-            <p>Xin chào,</p>
-            <p>Drone đã giao đơn hàng của bạn đến trạm đích thành công. Vui lòng đến nhận hàng sớm.</p>
-            <p><b>Mã đơn hàng:</b> {order_id}</p>
+            <h2 style="color: #111827;">Your Order Has Arrived!</h2>
+            <p>Hello,</p>
+            <p>The drone has successfully delivered your order to the destination hub. Please pick up your package soon.</p>
+            <p><b>Order ID:</b> {order_id}</p>
             {hub_line}
             {tracking_section}
             <p style="color: #dc2626; font-size: 13px; margin-top: 12px;">
-                ⚠️ Đơn hàng sẽ bị huỷ nếu không được nhận trong vòng 5 ngày.
+                ⚠️ Your order will be cancelled if it is not picked up within 5 days.
             </p>
             <p style="color: #6b7280; font-size: 13px; margin-top: 12px;">
-                Nếu bạn có thắc mắc, vui lòng liên hệ hỗ trợ qua email này.
+                If you have any questions, please contact support via this email.
             </p>
         </div>
         <div style="padding: 12px; text-align: center; color: #9ca3af; font-size: 12px;">
-            DroneOptAI — Hệ thống giao hàng bằng drone
+            DroneOptAI — Drone Delivery System
         </div>
     </div>
     """
@@ -231,7 +231,7 @@ async def send_hub_arrival_email(
             json={
                 "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
                 "to": [{"email": to_email}],
-                "subject": f"[DroneOptAI] Đơn hàng {order_id} đã đến trạm nhận hàng 📦",
+                "subject": f"[DroneOptAI] Order {order_id} has arrived at the pickup hub 📦",
                 "htmlContent": html_body,
             },
             timeout=10,
