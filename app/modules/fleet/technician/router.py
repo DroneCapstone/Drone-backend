@@ -254,10 +254,7 @@ async def get_transit_history(
             leg_mission_ids_subq = (
                 select(MissionLeg.mission_id)
                 .where(
-                    or_(
-                        MissionLeg.to_hub_id == tech_hub_id,
-                        MissionLeg.from_hub_id == tech_hub_id,
-                    )
+                    MissionLeg.to_hub_id == tech_hub_id  # Chỉ hub tiếp nhận, không phải gửi đi
                 )
             )
             query = query.where(
