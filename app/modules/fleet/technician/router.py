@@ -27,7 +27,7 @@ from app.modules.fleet.technician.schemas import (
     PartsRequestCreate, PartsRequestApprove, PartsRequestReject, PartsRequestResponse,
     HubInventoryCreate, HubInventoryUpdate, HubInventoryResponse, HubInventoryDetailedResponse
 )
-from app.modules.missions.models import Mission, MissionStatus, HandlingStatus, Incident, IncidentStatus, Order
+from app.modules.missions.models import Mission, MissionStatus, HandlingStatus, Incident, IncidentStatus, Order, MissionLeg, MissionLegStatus
 from app.core.config import settings
 
 router = APIRouter(prefix="/technician/fleet", tags=["Fleet"])
@@ -179,6 +179,42 @@ async def get_incoming_drones(
             else:
                 mission_state = None
 
+            # Lấy thông tin legs để show current_leg và next_leg
+            legs_res = await db.execute(
+                select(MissionLeg)
+                .where(MissionLeg.mission_id == m_id)
+                .order_by(MissionLeg.sequence_no)
+            )
+            legs = legs_res.scalars().all()
+            
+            current_leg_info = None
+            next_leg_info = None
+            
+            if legs:
+                # Tìm leg đang active (IN_PROGRESS hoặc COMPLETED) ở hub hiện tại
+                for i, leg in enumerate(legs):
+                    if leg.status in [MissionLegStatus.IN_PROGRESS, MissionLegStatus.COMPLETED]:
+                        current_leg_info = {
+                            "id": leg.id,
+                            "sequence_no": leg.sequence_no,
+                            "from_hub_id": leg.from_hub_id,
+                            "to_hub_id": leg.to_hub_id,
+                            "battery_id": leg.battery_id,
+                            "status": leg.status.value if hasattr(leg.status, "value") else leg.status,
+                        }
+                        # Next leg info
+                        if i + 1 < len(legs):
+                            next_leg = legs[i + 1]
+                            next_leg_info = {
+                                "id": next_leg.id,
+                                "sequence_no": next_leg.sequence_no,
+                                "from_hub_id": next_leg.from_hub_id,
+                                "to_hub_id": next_leg.to_hub_id,
+                                "battery_id": next_leg.battery_id,
+                                "status": next_leg.status.value if hasattr(next_leg.status, "value") else next_leg.status,
+                            }
+                        break
+
             response.append({
                 "id": str(m_id),
                 "mission_id": str(m_id),
@@ -196,6 +232,8 @@ async def get_incoming_drones(
                 "battery_percent": battery_percent,
                 "handling_status": handling_val if m_handling else None,
                 "arrival_confirmed_at": arrival_confirmed_at.isoformat() if arrival_confirmed_at else None,
+                "current_leg": current_leg_info,
+                "next_leg": next_leg_info,
             })
             
         return response
