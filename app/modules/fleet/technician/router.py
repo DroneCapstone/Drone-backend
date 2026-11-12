@@ -2714,23 +2714,22 @@ async def fulfill_parts_request(
 
 # ── Outbound History (Chuyến bay đã gửi đi từ hub của technician) ────────────
 
-@router.get("/outbound-history", summary="Lịch sử chuyến bay đã gửi đi từ Hub")
+@router.get("/outbound-history", summary="Lịch sử gửi hàng đi từ Hub")
 async def get_outbound_history(
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):
     """
-    Lịch sử chuyến bay đã gửi đi từ hub của technician.
+    Lịch sử gửi hàng đi từ hub của technician.
     
-    Hiển thị tất cả chuyến bay từ hub của technician, bao gồm:
-    - SCHEDULED, IN_PROGRESS, FLYING, ACTIVE_MISSION (đang/sắp gửi)
-    - ARRIVAL_COMPLETED, MISSION_COMPLETED (đã gửi và hoàn thành)
-    - INCIDENT_RETURN (gặp sự cố quay về)
-    - CANCELLED, FAILED (đã hủy/thất bại)
+    Hiển thị:
+    - Khi khách hàng gửi hàng tại hub (order.origin_received_at)
+    - Khi drone xuất phát (mission.start_time)
+    - Status hiện tại chuyến bay
     
-    Sorted by departed_at descending (mới nhất trước)
+    Sorted by order.origin_received_at descending (gửi mới nhất trước)
     """
-    from sqlalchemy import cast, String, or_
+    from sqlalchemy import cast, String
     
     try:
         tech_hub_id = None
@@ -2743,32 +2742,28 @@ async def get_outbound_history(
                 Mission.order_id,
                 Mission.origin_hub_id,
                 Mission.destination_hub_id,
-                Mission.departed_at,
                 Mission.start_time,
-                Mission.arrived_at,
-                Mission.end_time,
                 cast(Mission.status, String).label("status"),
-                cast(Mission.handling_status, String).label("handling_status"),
+                Order.origin_received_at,  # Lúc khách gửi hàng tại hub
+                Order.receiver_name,
                 Drone.id.label("drone_id"),
                 Drone.name.label("drone_code"),
-                Drone.model.label("model"),
                 Battery.id.label("battery_id"),
                 Battery.serial_number.label("battery_code"),
-                Battery.charge_level_pct.label("battery_percent"),
             )
             .outerjoin(Drone, Mission.drone_id == Drone.id)
             .outerjoin(Battery, Mission.battery_id == Battery.id)
+            .outerjoin(Order, Mission.order_id == Order.id)
         )
         
         # Filter: chỉ chuyến bay từ hub của technician
         if tech_hub_id is not None:
             query = query.where(Mission.origin_hub_id == tech_hub_id)
         else:
-            # Nếu không có hub_id, return empty
             return []
         
-        # Order by departed_at descending
-        query = query.order_by(Mission.departed_at.desc().nullslast(), Mission.id.desc())
+        # Order by order.origin_received_at descending (khách gửi mới nhất trước)
+        query = query.order_by(Order.origin_received_at.desc().nullslast(), Mission.id.desc())
         
         result = await db.execute(query)
         rows = result.all()
@@ -2777,37 +2772,23 @@ async def get_outbound_history(
         for row in rows:
             (
                 m_id, order_id, origin_hub_id, dest_hub_id,
-                departed_at, start_time, arrived_at, end_time,
-                m_status, m_handling, drone_id, drone_code, model,
-                battery_id, battery_code, battery_percent,
+                start_time, m_status, origin_received_at, receiver_name,
+                drone_id, drone_code, battery_id, battery_code,
             ) = row
-            
-            # Map status
-            mission_state = m_status or "Unknown"
-            if m_status in ["Arrival completed", "Mission completed"]:
-                mission_state = "Completed"
-            elif m_status == "Incident return":
-                mission_state = "Incident"
-            elif m_status in ["In Progress", "Flying", "Active mission", "Scheduled"]:
-                mission_state = "In Transit"
             
             response.append({
                 "mission_id": str(m_id) if m_id else None,
                 "order_id": order_id,
                 "origin_hub_id": origin_hub_id,
                 "destination_hub_id": dest_hub_id,
-                "status": mission_state,
-                "status_raw": m_status,
-                "departed_at": departed_at.isoformat() if departed_at else None,
-                "start_time": start_time.isoformat() if start_time else None,
-                "arrived_at": arrived_at.isoformat() if arrived_at else None,
-                "end_time": end_time.isoformat() if end_time else None,
+                "customer_dropoff_at": origin_received_at.isoformat() if origin_received_at else None,  # Lúc khách gửi tại hub
+                "drone_departed_at": start_time.isoformat() if start_time else None,  # Lúc drone xuất phát
+                "status": m_status,
+                "receiver_name": receiver_name,
                 "drone_id": drone_id,
                 "drone_code": drone_code,
-                "drone_model": model,
                 "battery_id": battery_id,
                 "battery_code": battery_code,
-                "battery_percent": battery_percent,
             })
         
         return response
@@ -2815,4 +2796,4 @@ async def get_outbound_history(
     except Exception as e:
         import traceback
         print(f"[OUTBOUND_HISTORY] Error: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử gửi đi: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử gửi hàng: {str(e)}")
