@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text, cast, String
+from sqlalchemy import select, text, cast, String, and_
 
 from app.core.timezone import get_vn_naive_datetime, get_vn_datetime
 
@@ -134,9 +134,18 @@ async def get_incoming_drones(
             )
             query = query.where(
                 or_(
-                    Mission.destination_hub_id == tech_hub_id,
-                    Drone.current_hub_id == tech_hub_id,
+                    # Show mission khi handling_status = AT_HUB (drone thực sự đang ở hub này)
+                    and_(
+                        Mission.handling_status == HandlingStatus.AT_HUB,
+                        Drone.current_hub_id == tech_hub_id,
+                    ),
+                    # Show mission khi leg đang bay tới hub này hoặc hoàn thành tại hub này
                     Mission.id.in_(leg_mission_ids_subq),
+                    # Show destination hub missions
+                    and_(
+                        Mission.destination_hub_id == tech_hub_id,
+                        Mission.handling_status != HandlingStatus.AT_HUB,
+                    ),
                 )
             )
             
