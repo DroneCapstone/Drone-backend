@@ -289,14 +289,43 @@ async def _notify_hub_technicians_drone_arrived(
         return 0
 
 
+async def _find_nearest_active_hub(
+    db: AsyncSession,
+    lat: float,
+    lng: float,
+    fallback_hub: Hub,
+) -> Hub:
+    """
+    Tìm Hub đang hoạt động (active) gần tọa độ gặp sự cố nhất (tính theo Haversine).
+    Bao gồm Hub xuất phát, Hub đích và toàn bộ Hub lân cận đang active.
+    """
+    res = await db.execute(select(Hub).where(func.lower(Hub.status) == "active"))
+    hubs = list(res.scalars().all())
+    if not hubs:
+        res = await db.execute(select(Hub))
+        hubs = list(res.scalars().all())
+
+    best_hub = fallback_hub
+    best_dist = float("inf")
+    for h in hubs:
+        if h.latitude is None or h.longitude is None:
+            continue
+        d_m = _haversine_m(lat, lng, h.latitude, h.longitude)
+        if d_m < best_dist:
+            best_dist = d_m
+            best_hub = h
+    return best_hub
+
+
 async def _trigger_incident(
     mission_id: str,
     incident_lat: float,
     incident_lng: float,
-    from_hub: Hub,
+    return_hub: Hub,
+    from_hub: Optional[Hub] = None,
     severity: str = "Medium",
 ) -> None:
-    """Xử lý Failsafe RTH cho mission khi sự cố xảy ra, thông báo cho Operators."""
+    """Xử lý Failsafe chuyển hướng về Hub gần nhất (hoặc quay đầu) cho mission khi gặp sự cố, thông báo cho Operators."""
     from app.modules.system.models import Notification, NotificationType
     from app.shared.workers import get_operator_ids
 
@@ -307,16 +336,36 @@ async def _trigger_incident(
                 return
 
             now_tz = get_vn_datetime()
+            now_naive = get_vn_naive_datetime()
+            is_divert = bool(from_hub and return_hub.id != from_hub.id)
 
-            # 1. Chuyển mission → INCIDENT_RETURN
+            # 1. Chuyển mission → INCIDENT_RETURN và cập nhật Hub hạ cánh khẩn cấp (nearest hub)
             mission.status = MissionStatus.INCIDENT_RETURN
             mission.handling_status = HandlingStatus.INCOMING
+            mission.destination_hub_id = return_hub.id
+
+            # Cập nhật chặng bay đang IN_PROGRESS hướng tới return_hub để bản đồ & Confirm Arrival đồng bộ
+            leg_res = await db.execute(
+                select(MissionLeg)
+                .where(
+                    MissionLeg.mission_id == str(mission_id),
+                    MissionLeg.status == MissionLegStatus.IN_PROGRESS,
+                )
+                .order_by(MissionLeg.sequence_no)
+                .limit(1)
+            )
+            curr_leg = leg_res.scalars().first()
+            if curr_leg:
+                curr_leg.to_hub_id = return_hub.id
+                curr_leg.updated_at = now_naive
 
             # Tạo bản ghi Incident nếu chưa có
             inc_res = await db.execute(
                 select(Incident).where(Incident.mission_id == str(mission_id)).limit(1)
             )
             existing_inc = inc_res.scalars().first()
+            tag = "[FAILSAFE DIVERT]" if is_divert else "[FAILSAFE RTH]"
+            action_phrase = "diverting to nearest hub" if is_divert else "returning to"
             if not existing_inc:
                 sev_enum = IncidentSeverity.HIGH if str(severity).lower() == "high" else (
                     IncidentSeverity.LOW if str(severity).lower() == "low" else IncidentSeverity.MEDIUM
@@ -326,22 +375,26 @@ async def _trigger_incident(
                     drone_id=str(mission.drone_id) if mission.drone_id else None,
                     reporter_id=mission.operator_id,
                     severity=sev_enum,
-                    description=f"[FAILSAFE RTH] Incident automatically detected at ({incident_lat:.5f}, {incident_lng:.5f}) — Drone returning to {from_hub.name}.",
+                    description=(
+                        f"{tag} Incident automatically detected at ({incident_lat:.5f}, {incident_lng:.5f}) — "
+                        f"Drone {action_phrase} {return_hub.name}."
+                    ),
                     status=IncidentStatus.OPEN,
                     reported_at=now_tz,
                     requires_technical_inspection=True,
                 ))
 
-            # 2. Gửi Notification cho tất cả Operators (theo dõi chú ý trên Live-tracking, không tạo rác trong tab Incidents)
+            # 2. Gửi Notification cho tất cả Operators (theo dõi chú ý trên Live-tracking)
             try:
                 operator_ids = await get_operator_ids(db)
+                notif_title = f"⚠️ Failsafe {'Divert' if is_divert else 'RTH'}: Mission #{mission_id}"
                 for op_id in operator_ids:
                     db.add(Notification(
                         user_id=op_id,
-                        title=f"⚠️ Failsafe RTH: Mission #{mission_id}",
+                        title=notif_title,
                         message=(
-                            f"Drone #{mission.drone_id} triggered Failsafe RTH at ({incident_lat:.5f}, {incident_lng:.5f}). "
-                            f"Safely returning to {from_hub.name}."
+                            f"Drone #{mission.drone_id} triggered incident at ({incident_lat:.5f}, {incident_lng:.5f}). "
+                            f"Safely {action_phrase} {return_hub.name}."
                         ),
                         notifications_type=NotificationType.SYSTEM_ALERT,
                         mission_id=str(mission_id),
@@ -352,7 +405,7 @@ async def _trigger_incident(
                 print(f"[SIMULATOR] Lỗi gửi notification incident: {e}")
 
             await db.commit()
-            print(f"[SIMULATOR] Failsafe RTH kích hoạt: mission {mission_id} → INCIDENT_RETURN, quay về {from_hub.name}.")
+            print(f"[SIMULATOR] {tag} kích hoạt: mission {mission_id} → INCIDENT_RETURN, đáp về {return_hub.name}.")
 
         except Exception as e:
             print(f"[SIMULATOR] Lỗi kích hoạt Failsafe RTH: {e}")
@@ -437,6 +490,7 @@ async def _fly_incident_return(
             if mission:
                 now = get_vn_naive_datetime()
                 mission.arrived_at = now
+                mission.destination_hub_id = return_hub.id
                 mission.handling_status = HandlingStatus.CANNOT_CONTINUE
 
                 # Cập nhật chặng bay (leg) kết thúc khi tiếp đất Hub
@@ -708,16 +762,24 @@ async def simulate_mission_flight(mission_id: str) -> None:
                 # Ngừng phát telemetry giữa chặng để Worker run_telemetry_signal_loss_watcher tự phát hiện mất tín hiệu >3s
                 print(f"[SIMULATOR] 📡 Ngừng phát telemetry cho Mission {mission_id} (SIGNAL_LOSS).")
                 return
+
+            # Xác định Hub active gần tọa độ gặp sự cố nhất (chuyển hướng thay vì quay lại điểm đầu nếu gần Hub khác hơn)
+            async with AsyncSessionLocal() as db_hub:
+                target_hub = await _find_nearest_active_hub(db_hub, lat, lng, fallback_hub=from_hub)
+
             await _trigger_incident(
                 mission_id=mission_id,
                 incident_lat=lat,
                 incident_lng=lng,
+                return_hub=target_hub,
                 from_hub=from_hub,
                 severity=trigger_sev,
             )
-            # Bay ngược về from_hub
-            return_waypoints = _interpolate(lat, lng, from_hub.latitude, from_hub.longitude, max(5, (total_points - idx)))
-            await _fly_incident_return(mission_id, return_waypoints, from_hub, active_battery_id, active_drone_id, battery_capacity_wh, current_battery_pct)
+            # Bay tới Hub gần nhất (target_hub)
+            target_lat = target_hub.latitude if target_hub.latitude is not None else from_hub.latitude
+            target_lng = target_hub.longitude if target_hub.longitude is not None else from_hub.longitude
+            return_waypoints = _interpolate(lat, lng, target_lat, target_lng, max(5, (total_points - idx)))
+            await _fly_incident_return(mission_id, return_waypoints, target_hub, active_battery_id, active_drone_id, battery_capacity_wh, current_battery_pct)
             return
 
     # ── Hết điểm → drone đã đến hub đích của leg này ─────────────────────────

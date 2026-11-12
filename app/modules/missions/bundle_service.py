@@ -26,6 +26,54 @@ async def get_active_mission_order_ids(db: AsyncSession) -> set[str]:
     )
     return set(res.scalars().all())
 
+
+async def resolve_effective_origin_hub_id(
+    db: AsyncSession,
+    order: Optional[Order],
+) -> tuple[Optional[int], bool]:
+    """
+    Xác định Hub xuất phát thực tế cho nhiệm vụ bay mà KHÔNG làm thay đổi `order.origin_hub_id` gốc của Customer.
+    Nếu đơn hàng đang cần Replan (`replan_required_at != None` hoặc Mission gần nhất kết thúc bằng `INCIDENT_RETURN`/`FAILED`),
+    tự động lấy `last_incident_mission.destination_hub_id` (Hub drone vừa đáp khẩn cấp) làm điểm xuất phát cho chuyến bay mới.
+    """
+    if not order:
+        return None, False
+
+    if order.status == OrderStatus.AT_HUB or order.replan_required_at is not None:
+        last_inc_res = await db.execute(
+            select(Mission)
+            .where(
+                Mission.order_id == order.id,
+                Mission.status.in_([MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED]),
+            )
+            .order_by(Mission.id.desc())
+            .limit(1)
+        )
+        last_inc_mission = last_inc_res.scalars().first()
+        if (
+            last_inc_mission
+            and last_inc_mission.destination_hub_id
+            and (order.replan_required_at is not None or last_inc_mission.arrival_confirmed_at is not None)
+        ):
+            newer_completed_res = await db.execute(
+                select(Mission.id)
+                .where(
+                    Mission.order_id == order.id,
+                    Mission.id > last_inc_mission.id,
+                    Mission.status.in_(
+                        [
+                            MissionStatus.ARRIVAL_COMPLETED,
+                            MissionStatus.MISSION_COMPLETED,
+                        ] + ACTIVE_MISSION_STATUSES
+                    ),
+                )
+                .limit(1)
+            )
+            if not newer_completed_res.scalars().first():
+                return last_inc_mission.destination_hub_id, True
+
+    return order.origin_hub_id, False
+
 async def get_available_orders_query(
     db: AsyncSession,
     origin_hub_id: int,
