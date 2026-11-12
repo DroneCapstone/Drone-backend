@@ -1,4 +1,4 @@
-﻿from pydantic import BaseModel
+﻿from pydantic import BaseModel, field_validator
 from typing import Dict, Optional, Union, Any
 from datetime import datetime
 from app.modules.missions.models import MissionStatus
@@ -81,6 +81,16 @@ class RouteLegSchema(BaseModel):
     note: Optional[str] = None
     weather: Optional[RouteWeatherSchema] = None
     weather_summary: Optional[str] = None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_leg_status(cls, v):
+        if not v:
+            return v
+        s = v.value if hasattr(v, "value") else str(v)
+        if s.strip().upper() in ("IN_PROGRESS", "IN PROGRESS", "IN-PROGRESS"):
+            return "FLYING"
+        return s
 
 
 class HubBatteryStatus(BaseModel):
@@ -203,6 +213,16 @@ class MissionResponse(BaseModel):
     distance_m: Optional[float] = None
     delivery_fee: Optional[float] = None
     status: MissionStatus
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_mission_status(cls, v):
+        if not v:
+            return v
+        s = v.value if hasattr(v, "value") else str(v)
+        if s.strip().lower() in ("in progress", "in_progress", "in-progress", "active mission", "active_mission"):
+            return MissionStatus.FLYING
+        return v
     scheduled_time: Optional[datetime] = None
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
