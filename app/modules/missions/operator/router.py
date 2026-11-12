@@ -154,6 +154,8 @@ async def get_live_tracking(
     **Polling pattern**: Frontend gọi endpoint này mỗi **3–5 giây**.
     Trả về `active_count = 0` và `drones = []` khi không có drone nào đang bay.
     """
+    now_vn_naive = get_vn_naive_datetime()
+    ten_mins_ago = now_vn_naive - timedelta(minutes=10)
     flying_result = await db.execute(
         select(Mission).where(
             or_(
@@ -166,7 +168,17 @@ async def get_live_tracking(
                     Mission.status == MissionStatus.INCIDENT_RETURN,
                     Mission.arrived_at.is_(None),
                     Mission.end_time.is_(None),
-                )
+                ),
+                # Giữ hiển thị các chuyến bay vừa rớt / mất kết nối trong 10 phút gần nhất khi chưa thu hồi xong
+                and_(
+                    Mission.status == MissionStatus.FAILED,
+                    Mission.arrival_confirmed_at.is_(None),
+                    or_(
+                        Mission.end_time >= ten_mins_ago,
+                        Mission.departed_at >= ten_mins_ago,
+                        Mission.scheduled_time >= ten_mins_ago,
+                    ),
+                ),
             )
         )
     )
@@ -268,6 +280,21 @@ async def get_live_tracking(
         if inc.mission_id not in incidents_by_mid:
             incidents_by_mid[inc.mission_id] = inc
 
+    # Lấy MaintenanceAlert mất tín hiệu đang mở của các mission
+    sig_alerts_res = await db.execute(
+        select(MaintenanceAlert.mission_id).where(
+            MaintenanceAlert.mission_id.in_(mission_ids),
+            MaintenanceAlert.source == "Incident",
+            MaintenanceAlert.status.in_(["Pending", "PENDING"]),
+            MaintenanceAlert.title.in_([
+                "Telemetry signal lost (>10s)",
+                "Signal lost for over 3s",
+                "Mất tín hiệu quá 3s",
+            ]),
+        )
+    )
+    signal_loss_alert_mids = {mid for mid in sig_alerts_res.scalars().all() if mid}
+
     drones = []
     for mission in flying_missions:
         log = latest_logs.get(mission.id)
@@ -343,25 +370,52 @@ async def get_live_tracking(
         divert_hub_id = None
         divert_hub_name = None
 
-        if inc and "[FAILSAFE DIVERT]" in (inc.description or ""):
+        inc_desc = (inc.description or "") if inc else ""
+        inc_desc_upper = inc_desc.upper()
+        is_airborne_stale = bool(
+            mission.status in (MissionStatus.FLYING, MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION)
+            and mission.handling_status in (None, HandlingStatus.INCOMING)
+            and log is not None
+            and log.timestamp is not None
+            and (now_vn_naive - log.timestamp).total_seconds() > 10.0
+        )
+        is_disconnected = bool(
+            mission.status == MissionStatus.FAILED
+            or "[DISCONNECT" in inc_desc_upper
+            or "[SIGNAL LOSS]" in inc_desc_upper
+            or mission.id in signal_loss_alert_mids
+            or is_airborne_stale
+        )
+
+        if is_disconnected:
+            failsafe_status = "DISCONNECTED"
+            failsafe_alert = (
+                inc_desc
+                if inc_desc and ("[DISCONNECT" in inc_desc_upper or "[SIGNAL LOSS]" in inc_desc_upper)
+                else "🚨 CONNECTION LOST: Complete telemetry signal loss / potential drone crash!"
+            )
+            divert_hub_id = mission.destination_hub_id
+            if divert_hub_id and divert_hub_id in hubs_map:
+                divert_hub_name = hubs_map[divert_hub_id].name
+        elif inc and "[FAILSAFE DIVERT]" in inc_desc:
             failsafe_status = "DIVERTED"
             failsafe_alert = inc.description
             is_diverted = True
             divert_hub_id = mission.destination_hub_id
             if divert_hub_id and divert_hub_id in hubs_map:
                 divert_hub_name = hubs_map[divert_hub_id].name
-        elif inc and "[FAILSAFE RTH]" in (inc.description or ""):
+        elif inc and "[FAILSAFE RTH]" in inc_desc:
             failsafe_status = "RTH"
             failsafe_alert = inc.description
             is_diverted = True
-            divert_hub_id = mission.origin_hub_id
+            divert_hub_id = mission.destination_hub_id or mission.origin_hub_id
             if divert_hub_id and divert_hub_id in hubs_map:
                 divert_hub_name = hubs_map[divert_hub_id].name
         elif mission.status == MissionStatus.INCIDENT_RETURN:
             failsafe_status = "RTH"
             failsafe_alert = inc.description if inc else "In-flight incident — Drone is returning safely to Hub."
             is_diverted = True
-            divert_hub_id = mission.origin_hub_id
+            divert_hub_id = mission.destination_hub_id or mission.origin_hub_id
             if divert_hub_id and divert_hub_id in hubs_map:
                 divert_hub_name = hubs_map[divert_hub_id].name
         elif bat_pct is not None and bat_pct < 20:
@@ -480,6 +534,7 @@ async def create_incident(
     if body.requires_technical_inspection:
         alert = MaintenanceAlert(
             drone_id=body.drone_id,
+            mission_id=str(body.mission_id) if body.mission_id else None,
             source="INCIDENT",
             incident_id=incident.id,
             title=f"Incident #{incident.id}: {body.description[:50]}",
@@ -487,6 +542,29 @@ async def create_incident(
             created_at=now.replace(tzinfo=None),
         )
         db.add(alert)
+
+    # Gửi thông báo sự cố tới toàn bộ Operators & Admins
+    try:
+        from app.modules.system.models import Notification, NotificationType
+        from app.shared.workers import get_operator_and_admin_ids
+
+        sev_label = body.severity.value if hasattr(body.severity, "value") else str(body.severity or "Medium")
+        for uid in await get_operator_and_admin_ids(db):
+            db.add(Notification(
+                user_id=uid,
+                title=f"🚨 Incident #{incident.id} ({sev_label}) — Mission #{body.mission_id or 'N/A'}",
+                message=(
+                    f"Incident reported for Drone #{body.drone_id or 'N/A'}"
+                    f"{f' on Mission #{body.mission_id}' if body.mission_id else ''}: {body.description}"
+                ),
+                notifications_type=NotificationType.SYSTEM_ALERT,
+                mission_id=str(body.mission_id) if body.mission_id else None,
+                drone_id=str(body.drone_id) if body.drone_id else None,
+                reference_id=str(incident.id),
+                created_at=now,
+            ))
+    except Exception as e:
+        print(f"[INCIDENT] Lỗi gửi notification khi tạo incident: {e}")
 
     await db.commit()
     await db.refresh(incident)
@@ -3445,11 +3523,11 @@ async def create_mission(
             detail="This order already has a scheduled or active mission"
         )
 
-    # Chặn nếu có Mission sự cố trước đó nhưng Technician chưa confirm thu hồi kiện hàng tại Hub
+    # Chặn nếu có Mission sự cố hoặc rớt Drone trước đó nhưng Technician chưa confirm thu hồi kiện hàng tại Hub
     unconfirmed_incident_res = await db.execute(
         select(Mission).where(
             Mission.order_id == order.id,
-            Mission.status == MissionStatus.INCIDENT_RETURN,
+            Mission.status.in_([MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED]),
             or_(
                 Mission.arrival_confirmed_at.is_(None),
                 Mission.handling_status.is_not(None),
@@ -3459,7 +3537,7 @@ async def create_mission(
     if unconfirmed_incident_res.scalars().first():
         raise HTTPException(
             status_code=400,
-            detail="A previous flight for this order encountered an incident, and a Technician has not yet confirmed package recovery at the hub. Please wait for the Technician to confirm arrival before creating a replacement mission."
+            detail="A previous flight for this order encountered an incident or disconnection, and a Technician has not yet confirmed drone/package recovery at a hub. Please wait for the Technician to confirm recovery via confirm-arrival before creating a replacement mission."
         )
 
     drone = await db.get(Drone, request.droneId)
@@ -4632,6 +4710,38 @@ async def execute_mission_failsafe(
             if drone:
                 drone.status = DroneStatus.MAINTENANCE
 
+        # Bắn Notification khẩn cho Operator, Admin và Customer khi kích hoạt EMERGENCY_LAND
+        from app.shared.workers import get_operator_and_admin_ids
+        now_tz = get_vn_datetime()
+        for uid in await get_operator_and_admin_ids(db):
+            db.add(Notification(
+                user_id=uid,
+                title=f"🚨 EMERGENCY LANDING — Mission #{mission_id}",
+                message=(
+                    f"Failsafe EMERGENCY_LAND triggered for Mission #{mission_id} "
+                    f"(Drone #{mission.drone_id}). Reason: {body.reason}. Drone switched to MAINTENANCE."
+                ),
+                notifications_type=NotificationType.SYSTEM_ALERT,
+                mission_id=str(mission.id),
+                drone_id=str(mission.drone_id) if mission.drone_id else None,
+                reference_id=str(incident.id),
+                created_at=now_tz,
+            ))
+
+        if mission.customer_id:
+            db.add(Notification(
+                user_id=mission.customer_id,
+                title="⚠️ Flight Emergency Landing — Safety Inspection",
+                message=(
+                    f"Flight #{mission_id} performed a precautionary emergency landing for safety inspection. "
+                    f"Our team is securing your package and will update you shortly."
+                ),
+                notifications_type=NotificationType.SYSTEM_ALERT,
+                mission_id=str(mission.id),
+                reference_id=str(incident.id),
+                created_at=now_tz,
+            ))
+
         await db.commit()
 
         return FailsafeExecuteResponse(
@@ -4711,10 +4821,9 @@ async def execute_mission_failsafe(
     db.add(alert)
     await db.flush()
 
-    # Gửi Thông báo cho Operator & Customer
-    op_role_id = ROLE_NAME_TO_ID.get(_Role.OPERATOR)
-    op_result = await db.execute(select(User.id).where(User.role_id == op_role_id))
-    operator_ids = op_result.scalars().all()
+    # Gửi Thông báo cho Operator, Admin & Customer
+    from app.shared.workers import get_operator_and_admin_ids
+    recipient_ids = await get_operator_and_admin_ids(db)
 
     notif_title = f"🚨 EMERGENCY DIVERT — Mission #{mission_id}"
     notif_msg = (
@@ -4722,15 +4831,17 @@ async def execute_mission_failsafe(
         f"(Drone #{mission.drone_id}) to {target_hub.name} (Hub #{target_hub.id}). "
         f"Reason: {body.reason}."
     )
-    for op_id in operator_ids:
+    now_tz = get_vn_datetime()
+    for op_id in recipient_ids:
         db.add(Notification(
             user_id=op_id,
             title=notif_title,
             message=notif_msg,
             notifications_type=NotificationType.SYSTEM_ALERT,
             mission_id=str(mission.id),
+            drone_id=str(mission.drone_id) if mission.drone_id else None,
             reference_id=str(incident.id),
-            created_at=now,
+            created_at=now_tz,
         ))
 
     if mission.customer_id:

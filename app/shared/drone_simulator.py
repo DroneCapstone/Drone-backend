@@ -50,7 +50,7 @@ INCIDENT_ENABLED     = False  # Tắt random incident mặc định (luôn SUCCE
 INCIDENT_PROBABILITY = 0.0    # Xác suất random incident mỗi điểm (0.0 → 0%)
 INCIDENT_MIN_STEP    = 3      # Không xảy ra trước điểm thứ N (tránh incident ngay khi cất cánh)
 INCIDENT_SEVERITY    = "Medium"  # Low / Medium / High
-VALID_INCIDENT_TYPES = ("FAILSAFE_RTH", "SIGNAL_LOSS")
+VALID_INCIDENT_TYPES = ("FAILSAFE_RTH", "SIGNAL_LOSS", "DISCONNECT_CRASH")
 
 
 class _SimulatorConfig:
@@ -317,6 +317,172 @@ async def _find_nearest_active_hub(
     return best_hub
 
 
+async def _trigger_disconnect_crash(
+    mission_id: str,
+    incident_lat: float,
+    incident_lng: float,
+    from_hub: Hub,
+    severity: str = "High",
+) -> None:
+    """
+    Xử lý kịch bản DISCONNECT_CRASH: Drone mất tín hiệu / rớt giữa chặng.
+    Ghi điểm rơi cuối (alt=0, speed=0), gắn recovery hub gần nhất để Technician thấy trên Incoming
+    và xác nhận thu hồi bằng chính nút Confirm Arrival khi mang hàng/drone về Hub.
+    """
+    from app.modules.auth.models import Account, ROLE_NAME_TO_ID
+    from app.modules.fleet.models import DroneStatus, MaintenanceAlert
+    from app.modules.system.models import Notification, NotificationType
+    from app.shared.roles import UserRole
+    from app.shared.workers import get_operator_and_admin_ids
+
+    async with AsyncSessionLocal() as db:
+        try:
+            mission = await db.get(Mission, mission_id)
+            if not mission:
+                return
+
+            now_naive = get_vn_naive_datetime()
+            now_tz = get_vn_datetime()
+            recovery_hub = await _find_nearest_active_hub(db, incident_lat, incident_lng, fallback_hub=from_hub)
+
+            # 1. Ghi 1 TelemetryLog cuối cùng tại tọa độ rơi (altitude=0, speed=0)
+            db.add(TelemetryLog(
+                mission_id=mission_id,
+                timestamp=now_naive,
+                latitude=incident_lat,
+                longitude=incident_lng,
+                altitude=0.0,
+                speed=0.0,
+                battery_voltage=0.0,
+                battery_pct=0.0,
+                energy_consumed_wh=None,
+                wind_speed=None,
+            ))
+
+            # 2. Chuyển Mission → FAILED + CANNOT_CONTINUE (chưa đặt arrived_at để chờ Technician xác nhận thu hồi qua confirm-arrival)
+            mission.status = MissionStatus.FAILED
+            mission.handling_status = HandlingStatus.CANNOT_CONTINUE
+            mission.end_time = now_naive
+            mission.destination_hub_id = recovery_hub.id
+
+            # Cập nhật chặng bay đang IN_PROGRESS trỏ đích dự kiến thu hồi về recovery_hub
+            leg_res = await db.execute(
+                select(MissionLeg)
+                .where(
+                    MissionLeg.mission_id == str(mission_id),
+                    MissionLeg.status == MissionLegStatus.IN_PROGRESS,
+                )
+                .order_by(MissionLeg.sequence_no)
+                .limit(1)
+            )
+            curr_leg = leg_res.scalars().first()
+            if curr_leg:
+                curr_leg.to_hub_id = recovery_hub.id
+                curr_leg.updated_at = now_naive
+
+            # 3. Khóa Drone → MAINTENANCE (không giải phóng Pin hay đưa Order về AT_HUB khi hàng chưa về Hub)
+            if mission.drone_id:
+                drone = await db.get(Drone, mission.drone_id)
+                if drone:
+                    drone.status = DroneStatus.MAINTENANCE
+
+            # 4. Tạo Incident mức HIGH & MaintenanceAlert Pending
+            inc_res = await db.execute(
+                select(Incident).where(Incident.mission_id == str(mission_id)).limit(1)
+            )
+            inc = inc_res.scalars().first()
+            if not inc:
+                inc = Incident(
+                    mission_id=str(mission_id),
+                    drone_id=str(mission.drone_id) if mission.drone_id else None,
+                    reporter_id=mission.operator_id,
+                    severity=IncidentSeverity.HIGH,
+                    description=(
+                        f"🚨 [DISCONNECT / CRASH] Complete telemetry signal loss / suspected drone crash at GPS "
+                        f"({incident_lat:.5f}, {incident_lng:.5f}). Field recovery assigned to {recovery_hub.name}."
+                    ),
+                    status=IncidentStatus.OPEN,
+                    reported_at=now_tz,
+                    requires_technical_inspection=True,
+                )
+                db.add(inc)
+                await db.flush()
+
+            alert = MaintenanceAlert(
+                drone_id=str(mission.drone_id) if mission.drone_id else None,
+                source="Incident",
+                incident_id=inc.id,
+                mission_id=str(mission_id),
+                title=f"Signal lost — Potential drone crash at ({incident_lat:.5f}, {incident_lng:.5f})",
+                status="Pending",
+                created_at=now_naive,
+            )
+            db.add(alert)
+            await db.flush()
+
+            # 5. Bắn Notification khẩn tới Operator, Admin, Technician tại Hub thu hồi và Customer
+            op_admin_ids = await get_operator_and_admin_ids(db)
+            for uid in op_admin_ids:
+                db.add(Notification(
+                    user_id=uid,
+                    title=f"🚨 CRITICAL: Drone Disconnected — Mission #{mission_id}",
+                    message=(
+                        f"Drone #{mission.drone_id} lost all telemetry signal / potential crash at GPS "
+                        f"({incident_lat:.5f}, {incident_lng:.5f}). Recovery team at {recovery_hub.name} notified."
+                    ),
+                    notifications_type=NotificationType.SYSTEM_ALERT,
+                    mission_id=str(mission_id),
+                    drone_id=str(mission.drone_id) if mission.drone_id else None,
+                    reference_id=str(inc.id),
+                    created_at=now_tz,
+                ))
+
+            tech_role_id = ROLE_NAME_TO_ID.get(UserRole.TECHNICIAN, "TECHNICIAN")
+            tech_ids = list((await db.execute(
+                select(Account.id).where(
+                    Account.role_id == tech_role_id,
+                    Account.is_active == True,
+                    Account.hub_id == recovery_hub.id,
+                )
+            )).scalars().all())
+            for tid in tech_ids:
+                db.add(Notification(
+                    user_id=tid,
+                    title=f"🚨 Field Recovery Needed: Drone #{mission.drone_id}",
+                    message=(
+                        f"Mission #{mission_id} lost connection at GPS ({incident_lat:.5f}, {incident_lng:.5f}). "
+                        f"Please recover the drone and package back to {recovery_hub.name} and click Confirm Arrival."
+                    ),
+                    notifications_type=NotificationType.SYSTEM_ALERT,
+                    mission_id=str(mission_id),
+                    drone_id=str(mission.drone_id) if mission.drone_id else None,
+                    reference_id=str(inc.id),
+                    created_at=now_tz,
+                ))
+
+            if mission.customer_id:
+                db.add(Notification(
+                    user_id=mission.customer_id,
+                    title="⚠️ Flight Signal Interrupted — Order Under Investigation",
+                    message=(
+                        f"Flight #{mission_id} carrying your order #{mission.order_id} experienced an unexpected "
+                        f"signal interruption mid-route. Our recovery team is actively securing your parcel and will update you shortly."
+                    ),
+                    notifications_type=NotificationType.SYSTEM_ALERT,
+                    mission_id=str(mission_id),
+                    reference_id=str(inc.id),
+                    created_at=now_tz,
+                ))
+
+            await db.commit()
+            print(
+                f"[SIMULATOR] 🚨 DISCONNECT_CRASH đã ghi nhận cho mission {mission_id} tại ({incident_lat:.5f}, {incident_lng:.5f}) "
+                f"→ recovery_hub={recovery_hub.name}, notified ops/admins={len(op_admin_ids)}, techs={len(tech_ids)}."
+            )
+        except Exception as e:
+            print(f"[SIMULATOR] Lỗi xử lý DISCONNECT_CRASH: {e}")
+
+
 async def _trigger_incident(
     mission_id: str,
     incident_lat: float,
@@ -384,13 +550,14 @@ async def _trigger_incident(
                     requires_technical_inspection=True,
                 ))
 
-            # 2. Gửi Notification cho tất cả Operators (theo dõi chú ý trên Live-tracking)
+            # 2. Gửi Notification cho tất cả Operators & Admins (theo dõi chú ý trên Live-tracking)
             try:
-                operator_ids = await get_operator_ids(db)
+                from app.shared.workers import get_operator_and_admin_ids
+                recipient_ids = await get_operator_and_admin_ids(db)
                 notif_title = f"⚠️ Failsafe {'Divert' if is_divert else 'RTH'}: Mission #{mission_id}"
-                for op_id in operator_ids:
+                for uid in recipient_ids:
                     db.add(Notification(
-                        user_id=op_id,
+                        user_id=uid,
                         title=notif_title,
                         message=(
                             f"Drone #{mission.drone_id} triggered incident at ({incident_lat:.5f}, {incident_lng:.5f}). "
@@ -758,8 +925,17 @@ async def simulate_mission_flight(mission_id: str) -> None:
 
         if triggered_now:
             print(f"[SIMULATOR] ⚠️ INCIDENT ({trigger_type}) xảy ra tại điểm {idx+1}/{total_points} ({lat:.6f}, {lng:.6f})")
+            if trigger_type == "DISCONNECT_CRASH":
+                await _trigger_disconnect_crash(
+                    mission_id=mission_id,
+                    incident_lat=lat,
+                    incident_lng=lng,
+                    from_hub=from_hub,
+                    severity=trigger_sev,
+                )
+                return
             if trigger_type == "SIGNAL_LOSS":
-                # Ngừng phát telemetry giữa chặng để Worker run_telemetry_signal_loss_watcher tự phát hiện mất tín hiệu >3s
+                # Ngừng phát telemetry giữa chặng để Worker run_telemetry_signal_loss_watcher tự phát hiện mất tín hiệu >10s
                 print(f"[SIMULATOR] 📡 Ngừng phát telemetry cho Mission {mission_id} (SIGNAL_LOSS).")
                 return
 

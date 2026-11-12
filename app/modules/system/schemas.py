@@ -258,7 +258,7 @@ class SimulatorTriggerIncidentRequest(BaseModel):
     enabled: bool = True
     severity: Optional[str] = None         # Low / Medium / High
     trigger_step: Optional[int] = None     # Trigger step (1-based). Defaults to ~60% of the flight route
-    incident_type: Optional[str] = "FAILSAFE_RTH"  # FAILSAFE_RTH (return-to-home failsafe) or SIGNAL_LOSS (communication loss)
+    incident_type: Optional[str] = "FAILSAFE_RTH"  # FAILSAFE_RTH (chuyển hướng/quay về), SIGNAL_LOSS (mất tín hiệu), hoặc DISCONNECT_CRASH (rớt Drone)
 
 
 class SimulatorTriggerIncidentResponse(BaseModel):

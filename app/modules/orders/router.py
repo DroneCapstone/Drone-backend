@@ -155,15 +155,13 @@ def calculate_planning_state(order: Order, mission: Mission = None) -> str | Non
         ms_str = (mission.status.value if hasattr(mission.status, "value") else str(mission.status or "")).upper()
         if ms_str in ACTIVE_MISSION_STATUS_STRINGS:
             return "PLANNED"
-        if ms_str in ("INCIDENT_RETURN", "INCIDENT RETURN"):
-            # Nếu sự cố chưa được Technician confirm thu hồi kiện hàng tại Hub (chưa có arrival_confirmed_at hoặc còn handling_status)
+        if ms_str in ("INCIDENT_RETURN", "INCIDENT RETURN") or ms_str in FAILED_MISSION_STATUS_STRINGS:
+            # Nếu sự cố/rớt Drone chưa được Technician xác nhận thu hồi tại Hub (chưa có arrival_confirmed_at hoặc còn handling_status)
             if mission.arrival_confirmed_at is None or mission.handling_status is not None:
-                return None  # Đang xử lý sự cố / đang bay về / chờ xác nhận thu hồi tại Hub, CHƯA ĐƯỢC lập lịch lại!
+                return None  # Đang chờ Technician thu hồi xác nhận qua confirm-arrival, CHƯA ĐƯỢC lập lịch lại!
             if order.status == OrderStatus.AT_HUB:
                 return "NEEDS_REPLANNING"
             return None
-        if ms_str in FAILED_MISSION_STATUS_STRINGS:
-            return "NEEDS_REPLANNING"
         if ms_str in COMPLETED_MISSION_STATUS_STRINGS or mission.arrived_at is not None:
             return None
 
