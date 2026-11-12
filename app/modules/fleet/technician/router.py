@@ -1813,6 +1813,11 @@ async def confirm_relay_arrival(
 
     await db.commit()
 
+    # Xây dựng next_leg từ current_leg_index
+    next_leg = None
+    if current_leg_index + 1 < len(legs):
+        next_leg = legs[current_leg_index + 1]
+
     relay_hub = await db.get(Hub, relay_hub_id) if relay_hub_id else None
     designated_bat = await db.get(Battery, str(next_leg.battery_id)) if (next_leg and next_leg.battery_id) else None
     return {
@@ -1837,8 +1842,8 @@ async def confirm_relay_arrival(
             "designated_battery_serial": designated_bat.serial_number if designated_bat else None,
             "designated_battery_model": designated_bat.battery_model if designated_bat else None,
             "designated_battery_charge_pct": designated_bat.charge_level_pct if designated_bat else None,
-        },
-        "designated_battery_id": designated_bat.id if designated_bat else next_leg.battery_id,
+        } if next_leg else None,
+        "designated_battery_id": designated_bat.id if designated_bat else (next_leg.battery_id if next_leg else None),
         "designated_battery_serial": designated_bat.serial_number if designated_bat else None,
         "designated_battery_model": designated_bat.battery_model if designated_bat else None,
         "relay_hub": relay_hub.name if relay_hub else str(relay_hub_id),
