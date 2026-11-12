@@ -39,6 +39,18 @@ class RelayHubBatteryOptionSchema(BaseModel):
     available_energy_wh: float
 
 
+class RouteWeatherSchema(BaseModel):
+    temperature_c: Optional[float] = None
+    wind_speed_ms: Optional[float] = None
+    wind_gust_ms: Optional[float] = None
+    precipitation_mm: Optional[float] = None
+    humidity_pct: Optional[float] = None
+    condition_label: Optional[str] = None
+    weather_summary: Optional[str] = None
+    is_bad_weather: bool = False
+    warning_message: Optional[str] = None
+
+
 class RouteLegSchema(BaseModel):
     from_hub_code: str
     to_hub_code: str
@@ -67,6 +79,8 @@ class RouteLegSchema(BaseModel):
     is_dispatch: bool = False
     payload_kg: Optional[float] = None
     note: Optional[str] = None
+    weather: Optional[RouteWeatherSchema] = None
+    weather_summary: Optional[str] = None
 
 
 class HubBatteryStatus(BaseModel):
@@ -155,7 +169,10 @@ class RouteOptionSchema(BaseModel):
     pickup_hub_code: Optional[str] = None
     # Thông tin tốc độ hành trình & giải thích AI XAI (SHAP theo FA26IS01)
     flight_speed_mps: Optional[float] = None
+    flight_altitude_m: Optional[float] = None
     speed_profile_label: Optional[str] = None
+    weather: Optional[RouteWeatherSchema] = None
+    weather_summary: Optional[str] = None
     shap_values: Optional[Dict[str, float]] = None
     ai_explanation: Optional[Union[AIExplanationSchema, Dict[str, Any]]] = None
 
@@ -329,10 +346,11 @@ class LiveTrackingResponse(BaseModel):
 
 class MissionPlanningAnalyzeRequest(BaseModel):
     orderId: str
-    droneId: Union[str, int]
+    droneId: Optional[Union[str, int]] = None
     batteryId: Optional[str] = None
     battery_id: Optional[str] = None
     bundledOrderIds: Optional[list[str]] = None
+    recommend_mode: Optional[str] = "AUTO"  # AUTO (theo delivery_mode), ECO (tiết kiệm pin), FAST (tốc độ nhanh)
 
 class MissionPlanningAnalyzeResponse(BaseModel):
     orderId: Optional[str] = None
