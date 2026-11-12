@@ -1,8 +1,8 @@
 # Database Schema Documentation
 Đây là tài liệu Single Source of Truth cho cấu trúc cơ sở dữ liệu của dự án Drone-backend, được tự động cập nhật và đồng bộ theo models và các bản migration mới nhất (tuân thủ quy định `GEMINI.md`).
 
-> **Kiến trúc Cơ sở dữ liệu Chuẩn hóa (Database Schema - 21 Bảng)**:
-> Hệ thống gồm **21 bảng chính thức** lưu trữ và điều phối toàn bộ chu trình vận hành bay, phân phối trạm, bảo trì, quản lý pin, vật tư linh kiện, đơn hàng và nhật ký hệ thống.
+> **Kiến trúc Cơ sở dữ liệu Chuẩn hóa (Database Schema - 22 Bảng)**:
+> Hệ thống gồm **22 bảng chính thức** lưu trữ và điều phối toàn bộ chu trình vận hành bay, phân phối trạm, bảo trì, quản lý pin, vật tư linh kiện, yêu cầu thay thế, đơn hàng và nhật ký hệ thống.
 > *(Các bảng cũ `audit_logs`, `hub_inventories`, `inventory_transactions` đã được thay thế/đổi tên hoàn toàn sang `activity_logs`, `system_logs`, `hub_supplies`, `supply_transactions` và xóa khỏi Database).*
 
 > **Lưu ý về Múi giờ (Timezone)**: 
@@ -13,7 +13,7 @@
 
 ---
 
-## I. Cấu trúc 21 Bảng Hệ Thống (Database Tables)
+## I. Cấu trúc 22 Bảng Hệ Thống (Database Tables)
 
 ### 1. Bảng accounts (trước đây là users)
 | Cột | Kiểu dữ liệu | Khóa / Ràng buộc |
@@ -274,6 +274,7 @@ Số lượng linh kiện / vật tư tại từng Hub. Không có kho trung tâ
 | refund_at | TIMESTAMP | Nullable |
 | refund_amount | FLOAT | Nullable |
 | refund_reason | VARCHAR(255) | Nullable |
+| refund_status | VARCHAR(50) | Nullable (`refund_status_enum`), Default `'PENDING'` |
 
 ### 16. Bảng part_categories
 Danh mục loại linh kiện / vật tư — dùng chung toàn hệ thống.
@@ -389,6 +390,28 @@ Ghi lại sự kiện tự động của hệ thống: background workers, cron 
 | status_logs_json | JSONB | Nullable, Default `'[]'` (Hợp nhất từ work_order_logs) |
 | created_at | TIMESTAMPTZ | Nullable, Default `now()` |
 
+### 22. Bảng replacement_requests
+Yêu cầu thay thế pin hoặc linh kiện từ Technician (được Admin cấp phát hoặc từ chối).
+
+| Cột | Kiểu dữ liệu | Khóa / Ràng buộc |
+| :--- | :--- | :--- |
+| id | BIGSERIAL | **PK**, Non-nullable |
+| requested_by | VARCHAR | Non-nullable |
+| hub_id | INTEGER | **FK** (`hubs.id`), Non-nullable |
+| type | VARCHAR | Non-nullable (`replacement_type_enum`: BATTERY, PART) |
+| damaged_item_id | VARCHAR | Nullable |
+| part_category_id | BIGINT | **FK** (`part_categories.id`), Nullable |
+| quantity | INTEGER | Non-nullable, Default `1` |
+| reason | TEXT | Non-nullable |
+| photo_urls | JSONB | Nullable |
+| status | VARCHAR | Non-nullable (`replacement_status_enum`: AWAITING_SUPPLY, SUPPLIED, REJECTED) |
+| reviewed_by | VARCHAR | Nullable |
+| reviewed_at | TIMESTAMPTZ | Nullable |
+| rejection_reason | TEXT | Nullable |
+| supplied_item_id | VARCHAR | Nullable |
+| supplied_at | TIMESTAMPTZ | Nullable |
+| created_at | TIMESTAMPTZ | Non-nullable |
+
 ---
 
 ## II. Lịch sử Migration & Quản lý Backup
@@ -405,4 +428,4 @@ Ghi lại sự kiện tự động của hệ thống: background workers, cron 
   - `app/shared/database/migrate_rename_inventory_to_supplies.py`: Đổi tên `hub_inventories` $\rightarrow$ `hub_supplies` và `inventory_transactions` $\rightarrow$ `supply_transactions`.
   - `app/shared/database/migrate_logs_schema.py`: Tách `audit_logs` thành `activity_logs` (user actions) và `system_logs` (cron/background events).
   - `app/shared/database/migrate_battery_catalog.py`: Thêm bảng `battery_model_catalog` (seed 3 model pin chuẩn: `TB48D` 130Wh, `Aurelia UltraPower` 444Wh, `DJI DB2000` 980Wh).
-  - Chuẩn hóa Database còn chính xác **21 bảng chính thức** hoạt động ổn định và tối ưu hiệu năng.
+  - `app/shared/database/migrate_replacement_requests.py`: Thêm bảng `replacement_requests` và đồng bộ `orders.refund_status` (Chuẩn hóa **22 bảng chính thức**, không còn cột `orders.sender_email`).
