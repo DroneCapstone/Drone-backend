@@ -700,6 +700,8 @@ async def track_delivery(
             f_hub = hubs.get(leg.from_hub_id)
             t_hub = hubs.get(leg.to_hub_id)
             leg_status_val = leg.status.value if hasattr(leg.status, "value") else str(leg.status or "")
+            if str(leg_status_val).upper() in ("IN_PROGRESS", "IN PROGRESS", "IN-PROGRESS"):
+                leg_status_val = "FLYING"
             leg_started = leg.started_at
             leg_completed = leg.completed_at
             if leg_started and leg_completed:
@@ -724,7 +726,7 @@ async def track_delivery(
                 completed_at=leg_completed,
             )
             legs_list.append(leg_schema)
-            if leg.status == MissionLegStatus.IN_PROGRESS:
+            if leg.status == MissionLegStatus.IN_PROGRESS or str(leg.status).upper() in ("IN_PROGRESS", "FLYING"):
                 current_leg_item = leg_schema
 
         if not current_leg_item and legs_list:

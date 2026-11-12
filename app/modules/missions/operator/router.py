@@ -307,6 +307,8 @@ async def get_live_tracking(
             f_hub = hubs_map.get(leg.from_hub_id)
             t_hub = hubs_map.get(leg.to_hub_id)
             leg_stat = leg.status.value if hasattr(leg.status, "value") else str(leg.status or "")
+            if str(leg_stat).upper() in ("IN_PROGRESS", "IN PROGRESS", "IN-PROGRESS"):
+                leg_stat = "FLYING"
             item = {
                 "id": leg.id,
                 "sequence_no": leg.sequence_no or 1,
@@ -326,11 +328,11 @@ async def get_live_tracking(
                 "battery_id": leg.battery_id,
             }
             legs_data.append(item)
-            if leg.status == MissionLegStatus.IN_PROGRESS:
+            if leg.status == MissionLegStatus.IN_PROGRESS or str(leg.status).upper() in ("IN_PROGRESS", "FLYING"):
                 curr_leg = {
                     "id": item["id"],
                     "sequence_no": item["sequence_no"],
-                    "status": item["status"],
+                    "status": "FLYING",
                     "from_hub": item["from_hub"],
                     "to_hub": item["to_hub"],
                     "assigned_battery_id": item["battery_id"],
@@ -3002,7 +3004,7 @@ async def build_missions_response_list(
                         from_longitude=h1.longitude if h1 else None,
                         to_latitude=h2.latitude if h2 else None,
                         to_longitude=h2.longitude if h2 else None,
-                        status=leg.status.value if hasattr(leg.status, "value") else (str(leg.status) if leg.status else None),
+                        status="FLYING" if str(leg.status.value if hasattr(leg.status, "value") else (leg.status or "")).strip().upper() in ("IN_PROGRESS", "IN PROGRESS", "IN-PROGRESS") else (leg.status.value if hasattr(leg.status, "value") else (str(leg.status) if leg.status else None)),
                         energy_wh=round(e, 2),
                         battery_id=leg_bat_id,
                         battery_serial=leg_bat_obj.serial_number if leg_bat_obj else None,
@@ -3104,7 +3106,7 @@ async def build_missions_response_list(
                         status=(
                             "COMPLETED" if str(m.status.value if hasattr(m.status, "value") else (m.status or "")).strip().lower() in ("completed", "mission completed")
                             else (
-                                "IN_PROGRESS" if str(m.status.value if hasattr(m.status, "value") else (m.status or "")).strip().lower() in ("flying", "in progress", "active mission")
+                                "FLYING" if str(m.status.value if hasattr(m.status, "value") else (m.status or "")).strip().lower() in ("flying", "in progress", "active mission")
                                 else (
                                     "CANCELLED" if str(m.status.value if hasattr(m.status, "value") else (m.status or "")).strip().lower() in ("cancelled", "rejected", "failed", "incident return")
                                     else "PENDING"

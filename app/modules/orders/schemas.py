@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List, Union
 from datetime import datetime
 from app.modules.missions.models import OrderStatus, DeliveryMode
@@ -195,6 +195,16 @@ class TrackingLegSchema(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_leg_status(cls, v):
+        if not v:
+            return v
+        s = v.value if hasattr(v, "value") else str(v)
+        if s.strip().upper() in ("IN_PROGRESS", "IN PROGRESS", "IN-PROGRESS"):
+            return "FLYING"
+        return s
+
 
 class TrackingCurrentLegSchema(BaseModel):
     id: Optional[int] = None
@@ -205,6 +215,16 @@ class TrackingCurrentLegSchema(BaseModel):
     assigned_battery_id: Optional[str] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_current_leg_status(cls, v):
+        if not v:
+            return v
+        s = v.value if hasattr(v, "value") else str(v)
+        if s.strip().upper() in ("IN_PROGRESS", "IN PROGRESS", "IN-PROGRESS"):
+            return "FLYING"
+        return s
 
 
 class TrailPointSchema(BaseModel):
