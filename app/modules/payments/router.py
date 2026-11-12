@@ -459,17 +459,23 @@ async def refund_order(
         
         await db.commit()
         
-        # Gửi email hoàn tiền cho khách hàng gửi hàng (sender)
-        if order.sender_email:
+        # Gửi email hoàn tiền cho khách hàng gửi hàng qua tài khoản customer (bảng orders không dùng cột sender_email)
+        sender_email_addr = None
+        if order.customer_id:
+            from app.modules.auth.models import Account
+            cust_acc = await db.get(Account, str(order.customer_id))
+            sender_email_addr = cust_acc.email if (cust_acc and cust_acc.email) else None
+
+        if sender_email_addr:
             from app.core.email import send_refund_email
             await send_refund_email(
-                to_email=order.sender_email,
+                to_email=sender_email_addr,
                 order_id=order_id,
                 refund_amount=refund_amount,
                 refund_reason=body.reason,
             )
         else:
-            print(f"[REFUND] Order {order_id} không có sender_email, bỏ qua gửi email")
+            print(f"[REFUND] Order {order_id} không tìm thấy email người gửi từ Account, bỏ qua gửi email")
         
         return RefundResponse(
             message="Refund processed successfully",
@@ -584,7 +590,7 @@ async def get_refunds(
             order_id=order.id,
             refund_amount=order.refund_amount or 0,
             reason=order.refund_reason or "N/A",
-            status=order.refund_status or "PENDING",
+            status=order.refund_status.value if hasattr(order.refund_status, "value") else (order.refund_status or "PENDING"),
             processed_at=order.refund_at,
         )
         for order in orders

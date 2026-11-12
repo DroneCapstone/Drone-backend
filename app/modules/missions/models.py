@@ -15,6 +15,13 @@ class PaymentStatus(str, enum.Enum):
     REFUNDED  = "REFUNDED"
 
 
+class RefundStatus(str, enum.Enum):
+    PENDING   = "PENDING"
+    COMPLETED = "COMPLETED"
+    FAILED    = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
 class OrderStatus(str, enum.Enum):
     PENDING = "PENDING"
     AWAITING_DROP_OFF = "AWAITING_DROP_OFF"  # Đã thanh toán, chờ KH mang hàng đến hub
@@ -159,7 +166,6 @@ class Order(Base):
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
     customer_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     sender_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    sender_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     receiver_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     receiver_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     package_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -199,7 +205,10 @@ class Order(Base):
     refund_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     refund_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     refund_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    refund_status: Mapped[str | None] = mapped_column(String(50), nullable=True, default="PENDING")  # PENDING, COMPLETED, FAILED, CANCELLED
+    refund_status: Mapped[RefundStatus | None] = mapped_column(
+        SAEnum(RefundStatus, name="refund_status_enum", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=True, default=RefundStatus.PENDING
+    )
     # ── Aging Priority fields (NORMAL mode) ──────────────────────────────────
     is_aging_priority: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     aging_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

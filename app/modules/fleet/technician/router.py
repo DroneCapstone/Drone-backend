@@ -609,17 +609,23 @@ async def confirm_arrival(
                         else "Emergency arrival confirmed. Package secured at intermediate hub for replanning; drone placed into Maintenance."
                     )
 
-                    # Gửi email thông báo sự cố cho cả sender và receiver (nếu có email)
+                    # Gửi email thông báo sự cố cho cả người gửi (qua Account.email) và người nhận (nếu có email)
                     incident_detail = ""
                     if body and body.issue_description:
                         incident_detail = body.issue_description.strip()
                     elif open_incident and open_incident.description:
                         incident_detail = open_incident.description.strip()
 
-                    if order_obj.sender_email:
+                    sender_email_addr = None
+                    if order_obj.customer_id:
+                        from app.modules.auth.models import Account
+                        cust_acc = await db.get(Account, str(order_obj.customer_id))
+                        sender_email_addr = cust_acc.email if (cust_acc and cust_acc.email) else None
+
+                    if sender_email_addr:
                         from app.core.email import send_incident_notification_email
                         await send_incident_notification_email(
-                            to_email=order_obj.sender_email,
+                            to_email=sender_email_addr,
                             order_id=order_obj.id,
                             incident_detail=incident_detail,
                             role="sender",
