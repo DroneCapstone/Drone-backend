@@ -1779,11 +1779,16 @@ async def compute_mission_routes_internal(
         exclude_nodes=None,
         allow_direct=True,
         blocked_edges=None,
+        speed: float = 10.0,
+        altitude: float = 45.0,
+        soft_avoid_nodes=None,
     ):
         if exclude_nodes is None:
             exclude_nodes = set()
         if blocked_edges is None:
             blocked_edges = set()
+        if soft_avoid_nodes is None:
+            soft_avoid_nodes = set()
 
         distances = {h.id: float('inf') for h in hubs}
         distances[origin_hub.id] = 0
@@ -1826,14 +1831,15 @@ async def compute_mission_routes_internal(
                     curr_h.latitude or 0, curr_h.longitude or 0,
                     n_hub.latitude or 0, n_hub.longitude or 0
                 )
-                pred = predict_flight_energy(dist_km, payload, speed=10.0, altitude=45.0)
+                pred = predict_flight_energy(dist_km, payload, speed=speed, altitude=altitude)
                 energy_wh = pred["energy_wh"]
 
                 # Kiểm tra giới hạn năng lượng của viên pin ở chặng hiện tại (tối đa 80% -> dự phòng >= 20%)
                 if energy_wh > leg_available_energy_wh * 0.8:
                     continue
 
-                flight_time = dist_km * 2  # ~2 mins per km
+                flight_time = (dist_km * 1000.0) / max(float(speed), 1.0) / 60.0
+                swap_overhead = 3.0 if n_hub.id != dest_hub.id else 0.0
                 wait_time = 0
                 exp = f"{n_hub.name} (Uses {energy_wh:.1f}Wh)"
 
@@ -1848,14 +1854,21 @@ async def compute_mission_routes_internal(
                     else:
                         exp += f" - Charge wait {wait_time}m"
 
+                avoid_penalty = (
+                    5000.0
+                    if n_hub.id in soft_avoid_nodes and n_hub.id not in (origin_hub.id, dest_hub.id)
+                    else 0.0
+                )
                 if mode == "energy":
-                    edge_cost = energy_wh + 3.0
+                    edge_cost = energy_wh + 3.0 + avoid_penalty
                 elif mode == "shortest":
-                    edge_cost = dist_km
+                    edge_cost = dist_km + avoid_penalty
                 elif mode == "zero_wait":
-                    edge_cost = flight_time
+                    edge_cost = flight_time + swap_overhead + avoid_penalty
+                elif mode in ("time", "fastest"):
+                    edge_cost = flight_time + swap_overhead + wait_time + avoid_penalty
                 else:  # balanced
-                    edge_cost = flight_time + wait_time
+                    edge_cost = flight_time + wait_time + avoid_penalty
 
                 new_cost = distances[current_node] + edge_cost
                 if new_cost < distances[n_hub.id]:
@@ -1891,7 +1904,7 @@ async def compute_mission_routes_internal(
                 h1.latitude or 0, h1.longitude or 0,
                 h2.latitude or 0, h2.longitude or 0
             )
-            e = predict_flight_energy(d, payload, speed=10.0, altitude=45.0)["energy_wh"]
+            e = predict_flight_energy(d, payload, speed=speed, altitude=altitude)["energy_wh"]
             total_dist += d
             total_energy += e
 
@@ -1911,7 +1924,8 @@ async def compute_mission_routes_internal(
         last_hub = hub_dict[path[-1]]
         route_codes.append(last_hub.code or last_hub.name)
         route_string = " -> ".join(route_codes)
-        total_time = int(total_dist * 2) + total_wait
+        num_swaps = max(0, len(path) - 2)
+        total_time = int(math.ceil(total_dist * 2.2 * (10.0 / max(float(speed), 1.0)))) + len(path) - 1 + (num_swaps * 3) + total_wait
 
         return {
             "path": path,
@@ -1992,7 +2006,313 @@ async def compute_mission_routes_internal(
     route_str_eco = f"{origin_hub.code or origin_hub.name} -> {dest_hub.code or dest_hub.name} (Energy Saver • 36 km/h • Altitude 45m)"
     t_eco = max(3, int(math.ceil(dist_direct * 2.2)) + 2)
 
-    # ── 1. Tuyến 1: Bay thẳng trực tiếp - Tiết kiệm năng lượng (10 m/s • Độ cao 45m) ──
+    dist_fast = round(dist_direct * 1.04 + 0.08, 2)
+    pred_direct_fast = predict_flight_energy(
+        dist_fast, payload, speed=15.0, altitude=60.0, weather_override=w_direct_override
+    )
+    e_fast = round(max(float(pred_direct_fast["energy_wh"]), e_direct * 1.24 + 2.5), 2)
+    t_fast = max(1, min(t_eco - 2, int(math.floor(dist_direct * 1.25)) + 1))
+
+    async def _build_multi_hop_relay_route_data(
+        path: list[int],
+        wait_min: int = 0,
+        is_fallback: bool = False,
+        speed_mps: float = 10.0,
+        altitude_m: float = 45.0,
+        profile_name: str = "Battery Swap Relay",
+        summary_override: Optional[str] = None,
+    ) -> dict:
+        seg_pairs = [(hub_dict[path[i]], hub_dict[path[i + 1]]) for i in range(len(path) - 1)]
+        await _prefetch_seg_weathers(seg_pairs)
+
+        speed_kmh = round(speed_mps * 3.6, 1)
+        speed_kmh_int = int(round(speed_kmh))
+        alt_int = int(round(altitude_m))
+
+        legs_detail = []
+        legs_breakdown = []
+        relay_labels = []
+        leg_energies = []
+        tot_d = 0.0
+        tot_e = 0.0
+        shap_speed_tot = 0.0
+        shap_dist_tot = 0.0
+        shap_payload_tot = 0.0
+        shap_wind_tot = 0.0
+        shap_alt_tot = 0.0
+        max_leg_wind = 0.0
+        cond_labels: list[str] = []
+        route_has_bad_weather = False
+
+        for i, (h1, h2) in enumerate(seg_pairs):
+            d_leg = haversine_distance(
+                h1.latitude or 0, h1.longitude or 0,
+                h2.latitude or 0, h2.longitude or 0,
+            )
+            w_raw = await _fetch_seg_weather(h1, h2)
+            w_eval = evaluate_weather_safety(w_raw, altitude_m=altitude_m)
+            pred_leg = predict_flight_energy(
+                d_leg, payload, speed=speed_mps, altitude=altitude_m, weather_override=weather_to_override_dict(w_raw)
+            )
+            e_leg = pred_leg["energy_wh"]
+            leg_energies.append(e_leg)
+            tot_d += d_leg
+            tot_e += e_leg
+
+            s_leg = pred_leg.get("shap_values") or {}
+            shap_speed_tot += float(s_leg.get("speed", 0.0))
+            shap_dist_tot += float(s_leg.get("distance", 0.0))
+            shap_payload_tot += float(s_leg.get("payload", 0.0))
+            shap_wind_tot += float(s_leg.get("relative_wind_angle", 0.0))
+            shap_alt_tot += float(s_leg.get("altitude", 0.0))
+
+            max_leg_wind = max(max_leg_wind, float(w_eval.get("wind_speed_ms") or 0.0))
+            if w_eval.get("condition_label") and w_eval["condition_label"] not in cond_labels:
+                cond_labels.append(w_eval["condition_label"])
+            if w_eval.get("is_bad_weather"):
+                route_has_bad_weather = True
+
+            h1_code = h1.code or h1.name
+            h2_code = h2.code or h2.name
+            legs_detail.append({
+                "from_hub_id": h1.id,
+                "to_hub_id": h2.id,
+                "from_hub_code": h1_code,
+                "to_hub_code": h2_code,
+                "distance_km": round(d_leg, 2),
+                "energy_wh": round(e_leg, 2),
+                "payload_kg": payload,
+                "weather": w_eval,
+                "weather_summary": w_eval["weather_summary"],
+            })
+
+            if i == 0:
+                action_txt = f"Fly from {h1.name} to {h2.name} ({speed_kmh_int} km/h • Altitude {alt_int}m • Uses {e_leg:.1f} Wh • {w_eval['weather_summary']})"
+            else:
+                action_txt = f"Swap battery at {h1.name} and continue to {h2.name} ({speed_kmh_int} km/h • Altitude {alt_int}m • Uses {e_leg:.1f} Wh • {w_eval['weather_summary']})"
+            legs_breakdown.append({
+                "leg": i + 1,
+                "from_hub_code": h1_code,
+                "to_hub_code": h2_code,
+                "distance_km": round(d_leg, 2),
+                "energy_wh": round(e_leg, 2),
+                "speed_mps": speed_mps,
+                "speed_kmh": speed_kmh,
+                "action": action_txt,
+            })
+
+            if i < len(seg_pairs) - 1:
+                relay_labels.append(
+                    f"{h2.name} (Uses {e_leg:.1f}Wh) - Insufficient safe battery range / stock for relay"
+                    if is_fallback
+                    else f"{h2.name} (Uses {e_leg:.1f}Wh)"
+                )
+
+        shap_speed_tot = round(shap_speed_tot, 2)
+        shap_dist_tot = round(shap_dist_tot, 2)
+        shap_payload_tot = round(shap_payload_tot, 2)
+        shap_wind_tot = round(shap_wind_tot, 2)
+        shap_alt_tot = round(shap_alt_tot, 2)
+        aggregated_shap = {
+            "speed": shap_speed_tot,
+            "distance": shap_dist_tot,
+            "payload": shap_payload_tot,
+            "relative_wind_angle": shap_wind_tot,
+            "altitude": shap_alt_tot,
+        }
+
+        diff_dist = round(tot_d - dist_direct, 2)
+        diff_energy = round(tot_e - e_direct, 1)
+        wind_impact = (
+            "Tailwind assists battery efficiency along the entire route"
+            if shap_wind_tot <= 0
+            else "Headwind increases aerodynamic drag across flight legs"
+        )
+        speed_impact = (
+            f"High-speed cruise ({speed_mps:.1f} m/s ~ {speed_kmh_int} km/h) adds +{shap_speed_tot:.1f} Wh due to aerodynamic drag while cutting transit time"
+            if shap_speed_tot > 0
+            else f"Cruising at energy-saving speed ({speed_kmh_int} km/h) across all {len(seg_pairs)} legs minimizes aerodynamic drag"
+        )
+        mid_names = [hub_dict[nid].name for nid in path[1:-1]]
+        mid_names_str = " -> ".join(mid_names)
+        o_code = hub_dict[path[0]].code or hub_dict[path[0]].name
+        d_code = hub_dict[path[-1]].code or hub_dict[path[-1]].name
+        mid_route_parts = [f"{hub_dict[nid].code or hub_dict[nid].name} (Battery Swap)" for nid in path[1:-1]]
+        route_str = f"{' -> '.join([o_code] + mid_route_parts + [d_code])} ({profile_name} • {speed_kmh_int} km/h • Altitude {alt_int}m)"
+        cond_summary = " / ".join(cond_labels[:3]) if cond_labels else "Clear"
+
+        relay_ai_explanation = {
+            "flight_speed_mps": speed_mps,
+            "flight_speed_kmh": speed_kmh,
+            "flight_altitude_m": altitude_m,
+            "total_energy_wh": round(tot_e, 2),
+            "feature_contributions": [] if is_fallback else [
+                {
+                    "feature": "distance",
+                    "label": "Route Distance",
+                    "value": f"{tot_d:.2f} km ({len(seg_pairs)} legs via {mid_names_str})",
+                    "shap_contribution_wh": shap_dist_tot,
+                    "impact": f"Multi-hub corridor spans {tot_d:.2f} km (+{diff_dist:.2f} km vs direct line, {'+' if diff_energy >= 0 else ''}{diff_energy:.1f} Wh vs direct Eco baseline)",
+                },
+                {
+                    "feature": "payload",
+                    "label": "Cargo Payload",
+                    "value": f"{payload:.2f} kg",
+                    "shap_contribution_wh": shap_payload_tot,
+                    "impact": f"Carrying cargo payload over {tot_d:.2f} km adds +{shap_payload_tot:.1f} Wh consumption",
+                },
+                {
+                    "feature": "speed",
+                    "label": "Flight Speed",
+                    "value": f"{speed_mps:.1f} m/s ({speed_kmh:.1f} km/h)",
+                    "shap_contribution_wh": shap_speed_tot,
+                    "impact": speed_impact,
+                },
+                {
+                    "feature": "wind",
+                    "label": "Wind Effect",
+                    "value": f"Max {max_leg_wind:.1f} m/s ({cond_summary})",
+                    "shap_contribution_wh": shap_wind_tot,
+                    "impact": wind_impact,
+                },
+            ],
+            "legs_breakdown": legs_breakdown,
+            "summary": summary_override or (
+                f"Fallback relay route via {mid_names_str}. Total distance {tot_d:.2f} km, "
+                f"energy consumption {tot_e:.1f} Wh. Relay leg energy exceeds safe battery reserve (80%) or compatible stock is unavailable."
+                if is_fallback
+                else (
+                    f"{profile_name} multi-hub route via {len(path) - 2} battery swap stop(s) ({mid_names_str}). "
+                    f"Total distance {tot_d:.2f} km, total energy {tot_e:.1f} Wh at {speed_kmh_int} km/h across {len(seg_pairs)} feasible legs."
+                )
+            ),
+        }
+
+        num_swaps = max(1, len(path) - 2)
+        fly_min = max(1, int(math.ceil(tot_d * 2.2 * (10.0 / max(float(speed_mps), 1.0)))) + len(seg_pairs))
+        return {
+            "path": path,
+            "relayHubs": relay_labels,
+            "distanceKm": round(tot_d, 2),
+            "predictedEnergyWh": round(tot_e, 2),
+            "predictedDurationMin": fly_min + (num_swaps * 3) + int(wait_min),
+            "wait_time": int(wait_min),
+            "flight_speed_mps": speed_mps,
+            "flight_altitude_m": altitude_m,
+            "speed_profile_label": f"{profile_name} ({speed_kmh_int} km/h • Altitude {alt_int}m)",
+            "shap_values": aggregated_shap,
+            "ai_explanation": relay_ai_explanation,
+            "legs_detail": legs_detail,
+            "route_string": route_str,
+            "cost_metric": tot_e + tot_d * 2,
+            "has_bad_weather": route_has_bad_weather,
+            "_e1": leg_energies[0] if leg_energies else 0.0,
+            "_e2": leg_energies[1] if len(leg_energies) > 1 else 0.0,
+            "_leg_energies": leg_energies,
+        }
+
+    leg1_max_safe_wh = (
+        hub_best_energy_wh.get(origin_hub.id, 0.0) * 0.8
+        if is_cross_hub and hub_best_energy_wh.get(origin_hub.id, 0.0) > 0
+        else max_safe_origin_energy_wh
+    )
+    effective_leg1_safe_wh = (
+        leg1_max_safe_wh
+        if leg1_max_safe_wh > 0
+        else (drone_capacity_wh * 0.8 if (not assigned_battery and drone_capacity_wh > 0) else 0.0)
+    )
+
+    async def _find_feasible_multi_hop_route(
+        mode: str,
+        speed_mps: float,
+        altitude_m: float,
+        profile_name: str,
+        allow_direct: bool = False,
+        initial_blocked_edges: Optional[set[tuple[int, int]]] = None,
+        soft_avoid_nodes: Optional[set[int]] = None,
+        avoid_bad_weather: bool = False,
+    ) -> Optional[dict]:
+        blocked_edges: set[tuple[int, int]] = set(initial_blocked_edges or set())
+        exclude_nodes_mh: set[int] = set()
+        weather_tolerant_fallback: Optional[dict] = None
+
+        for _attempt in range(6):
+            dijk_res = plan_single_path(
+                mode=mode,
+                exclude_nodes=exclude_nodes_mh,
+                allow_direct=allow_direct,
+                blocked_edges=blocked_edges,
+                speed=speed_mps,
+                altitude=altitude_m,
+                soft_avoid_nodes=soft_avoid_nodes,
+            )
+            if not dijk_res or (not allow_direct and len(dijk_res.get("path") or []) < 3):
+                break
+            mh_path = dijk_res["path"]
+            mh_cand = await _build_multi_hop_relay_route_data(
+                path=mh_path,
+                wait_min=int(dijk_res.get("wait_time") or 0),
+                is_fallback=False,
+                speed_mps=speed_mps,
+                altitude_m=altitude_m,
+                profile_name=profile_name,
+            )
+            legs_copy = [dict(l) for l in mh_cand["legs_detail"]]
+            mh_feasible, _, mh_statuses = await check_relay_hub_battery_availability(
+                db=db,
+                relay_hub_ids=mh_path[1:-1],
+                hub_dict=hub_dict,
+                all_batteries=all_batteries,
+                compatible_models=compatible_models,
+                drone_id=suggested_drone_id,
+                drone_capacity_wh=drone_capacity_wh,
+                legs_detail=legs_copy,
+                assigned_battery=assigned_battery,
+                assigned_battery_energy_wh=(
+                    hub_best_energy_wh.get(origin_hub.id, 0.0)
+                    if is_cross_hub and hub_best_energy_wh.get(origin_hub.id, 0.0) > 0
+                    else origin_bat_energy_wh
+                ),
+                reserved_battery_ids=reserved_battery_ids,
+                held_count_by_hub=held_count_by_hub,
+                is_cross_hub=False,
+                origin_hub_id=origin_hub.id,
+            )
+            if mh_feasible:
+                if avoid_bad_weather and mh_cand.get("has_bad_weather"):
+                    if weather_tolerant_fallback is None:
+                        weather_tolerant_fallback = mh_cand
+                    blocked_w = False
+                    for leg_d in mh_cand["legs_detail"]:
+                        w_d = leg_d.get("weather") or {}
+                        if w_d.get("is_bad_weather") and leg_d.get("from_hub_id") and leg_d.get("to_hub_id"):
+                            blocked_edges.add((leg_d["from_hub_id"], leg_d["to_hub_id"]))
+                            blocked_w = True
+                    if blocked_w:
+                        continue
+                return mh_cand
+
+            added_block = False
+            # Kiểm tra từng chặng (kể cả Leg 1 khi gió ngược thực tế đẩy mức tiêu thụ > 80%)
+            for leg_i, leg_d in enumerate(legs_copy):
+                bat_e = float(leg_d.get("battery_energy_wh") or 0.0)
+                leg_e = float(leg_d.get("energy_wh") or 0.0)
+                if bat_e > 0 and leg_e > bat_e * 0.8 and leg_i + 1 < len(mh_path):
+                    blocked_edges.add((mh_path[leg_i], mh_path[leg_i + 1]))
+                    added_block = True
+            for idx_s, st in enumerate(mh_statuses):
+                if not st.feasible:
+                    if not st.selected_battery_id:
+                        exclude_nodes_mh.add(st.hub_id)
+                    elif idx_s + 1 < len(mh_path) - 1:
+                        blocked_edges.add((mh_path[idx_s + 1], mh_path[idx_s + 2]))
+                    added_block = True
+            if not added_block and len(mh_path) >= 2:
+                blocked_edges.add((mh_path[0], mh_path[1]))
+
+        return weather_tolerant_fallback
+
+    # ── 1. Tuyến 1: Tiết kiệm năng lượng (10 m/s • 45m) — Bay thẳng nếu <= 80% pin, ngược lại tự động Multi-Hub ──
     ai_exp_eco = dict(pred_direct_eco.get("ai_explanation") or {})
     ai_exp_eco["legs_breakdown"] = [{
         "leg": 1,
@@ -2029,15 +2349,18 @@ async def compute_mission_routes_internal(
         }],
         "route_string": route_str_eco
     }
-    raw_routes.append({"key": "ENG", "type": "energy", "data": r_direct_eco})
+    eng_data = None
+    if effective_leg1_safe_wh > 0 and e_direct > effective_leg1_safe_wh:
+        eng_data = await _find_feasible_multi_hop_route(
+            mode="energy",
+            speed_mps=10.0,
+            altitude_m=45.0,
+            profile_name="Energy Saver Relay",
+            allow_direct=False,
+        )
+    raw_routes.append({"key": "ENG", "type": "energy", "data": eng_data or r_direct_eco})
 
-    # ── 2. Tuyến 2: Bay thẳng trực tiếp - Ưu tiên tốc độ nhanh (15 m/s • Độ cao 60m) ──
-    dist_fast = round(dist_direct * 1.04 + 0.08, 2)
-    pred_direct_fast = predict_flight_energy(
-        dist_fast, payload, speed=15.0, altitude=60.0, weather_override=w_direct_override
-    )
-    e_fast = round(max(float(pred_direct_fast["energy_wh"]), e_direct * 1.24 + 2.5), 2)
-    t_fast = max(1, min(t_eco - 2, int(math.floor(dist_direct * 1.25)) + 1))
+    # ── 2. Tuyến 2: Ưu tiên tốc độ nhanh (15 m/s • 60m, hoặc nấc tốc độ nhanh khả thi Multi-Hub) ──
     route_str_fast = f"{origin_hub.code or origin_hub.name} -> {dest_hub.code or dest_hub.name} (Express Fast • 54 km/h • Altitude 60m)"
     ai_exp_fast = dict(pred_direct_fast.get("ai_explanation") or {})
     ai_exp_fast["legs_breakdown"] = [{
@@ -2075,192 +2398,34 @@ async def compute_mission_routes_internal(
         }],
         "route_string": route_str_fast
     }
-    raw_routes.append({"key": "FAST", "type": "fastest", "data": r_direct_fast})
-
-    # ── 3. Tuyến 3: Trung chuyển qua trạm đổi pin trên tuyến (1-hop hoặc Multi-hop Dijkstra) hoặc Điều phối Drone từ Hub khác ──
-    async def _build_multi_hop_relay_route_data(
-        path: list[int],
-        wait_min: int = 0,
-        is_fallback: bool = False,
-    ) -> dict:
-        seg_pairs = [(hub_dict[path[i]], hub_dict[path[i + 1]]) for i in range(len(path) - 1)]
-        await _prefetch_seg_weathers(seg_pairs)
-
-        legs_detail = []
-        legs_breakdown = []
-        relay_labels = []
-        leg_energies = []
-        tot_d = 0.0
-        tot_e = 0.0
-        shap_dist_tot = 0.0
-        shap_payload_tot = 0.0
-        shap_wind_tot = 0.0
-        shap_alt_tot = 0.0
-        max_leg_wind = 0.0
-        cond_labels: list[str] = []
-        route_has_bad_weather = False
-
-        for i, (h1, h2) in enumerate(seg_pairs):
-            d_leg = haversine_distance(
-                h1.latitude or 0, h1.longitude or 0,
-                h2.latitude or 0, h2.longitude or 0,
+    fast_data = None
+    if effective_leg1_safe_wh > 0 and e_fast > effective_leg1_safe_wh:
+        for fast_spd, fast_alt in [(15.0, 60.0), (13.5, 55.0), (13.0, 55.0), (12.0, 55.0)]:
+            fast_data = await _find_feasible_multi_hop_route(
+                mode="time",
+                speed_mps=fast_spd,
+                altitude_m=fast_alt,
+                profile_name="Express Fast Relay",
+                allow_direct=False,
             )
-            w_raw = await _fetch_seg_weather(h1, h2)
-            w_eval = evaluate_weather_safety(w_raw, altitude_m=45.0)
-            pred_leg = predict_flight_energy(
-                d_leg, payload, speed=10.0, altitude=45.0, weather_override=weather_to_override_dict(w_raw)
-            )
-            e_leg = pred_leg["energy_wh"]
-            leg_energies.append(e_leg)
-            tot_d += d_leg
-            tot_e += e_leg
+            if fast_data:
+                break
+    raw_routes.append({"key": "FAST", "type": "fastest", "data": fast_data or r_direct_fast})
 
-            s_leg = pred_leg.get("shap_values") or {}
-            shap_dist_tot += float(s_leg.get("distance", 0.0))
-            shap_payload_tot += float(s_leg.get("payload", 0.0))
-            shap_wind_tot += float(s_leg.get("relative_wind_angle", 0.0))
-            shap_alt_tot += float(s_leg.get("altitude", 0.0))
-
-            max_leg_wind = max(max_leg_wind, float(w_eval.get("wind_speed_ms") or 0.0))
-            if w_eval.get("condition_label") and w_eval["condition_label"] not in cond_labels:
-                cond_labels.append(w_eval["condition_label"])
-            if w_eval.get("is_bad_weather"):
-                route_has_bad_weather = True
-
-            h1_code = h1.code or h1.name
-            h2_code = h2.code or h2.name
-            legs_detail.append({
-                "from_hub_id": h1.id,
-                "to_hub_id": h2.id,
-                "from_hub_code": h1_code,
-                "to_hub_code": h2_code,
-                "distance_km": round(d_leg, 2),
-                "energy_wh": round(e_leg, 2),
-                "payload_kg": payload,
-                "weather": w_eval,
-                "weather_summary": w_eval["weather_summary"],
-            })
-
-            if i == 0:
-                action_txt = f"Fly from {h1.name} to {h2.name} (Uses {e_leg:.1f} Wh • {w_eval['weather_summary']})"
-            else:
-                action_txt = f"Swap battery at {h1.name} and continue to {h2.name} (Uses {e_leg:.1f} Wh • {w_eval['weather_summary']})"
-            legs_breakdown.append({
-                "leg": i + 1,
-                "from_hub_code": h1_code,
-                "to_hub_code": h2_code,
-                "distance_km": round(d_leg, 2),
-                "energy_wh": round(e_leg, 2),
-                "speed_mps": 10.0,
-                "speed_kmh": 36.0,
-                "action": action_txt,
-            })
-
-            if i < len(seg_pairs) - 1:
-                relay_labels.append(
-                    f"{h2.name} (Uses {e_leg:.1f}Wh) - Insufficient safe battery range / stock for relay"
-                    if is_fallback
-                    else f"{h2.name} (Uses {e_leg:.1f}Wh)"
-                )
-
-        shap_dist_tot = round(shap_dist_tot, 2)
-        shap_payload_tot = round(shap_payload_tot, 2)
-        shap_wind_tot = round(shap_wind_tot, 2)
-        shap_alt_tot = round(shap_alt_tot, 2)
-        aggregated_shap = {
-            "speed": 0.0,
-            "distance": shap_dist_tot,
-            "payload": shap_payload_tot,
-            "relative_wind_angle": shap_wind_tot,
-            "altitude": shap_alt_tot,
-        }
-
-        diff_dist = round(tot_d - dist_direct, 2)
-        diff_energy = round(tot_e - e_direct, 1)
-        wind_impact = (
-            "Tailwind assists battery efficiency along the entire route"
-            if shap_wind_tot <= 0
-            else "Headwind increases aerodynamic drag across flight legs"
-        )
-        mid_names = [hub_dict[nid].name for nid in path[1:-1]]
-        mid_names_str = " -> ".join(mid_names)
-        o_code = hub_dict[path[0]].code or hub_dict[path[0]].name
-        d_code = hub_dict[path[-1]].code or hub_dict[path[-1]].name
-        mid_route_parts = [f"{hub_dict[nid].code or hub_dict[nid].name} (Battery Swap)" for nid in path[1:-1]]
-        route_str = " -> ".join([o_code] + mid_route_parts + [d_code])
-        cond_summary = " / ".join(cond_labels[:3]) if cond_labels else "Clear"
-
-        relay_ai_explanation = {
-            "flight_speed_mps": 10.0,
-            "flight_speed_kmh": 36.0,
-            "flight_altitude_m": 45.0,
-            "total_energy_wh": round(tot_e, 2),
-            "feature_contributions": [] if is_fallback else [
-                {
-                    "feature": "distance",
-                    "label": "Route Distance",
-                    "value": f"{tot_d:.2f} km ({len(seg_pairs)} legs via {mid_names_str})",
-                    "shap_contribution_wh": shap_dist_tot,
-                    "impact": f"Extra +{diff_dist:.2f} km distance compared to direct flight adds +{diff_energy:.1f} Wh energy consumption",
-                },
-                {
-                    "feature": "payload",
-                    "label": "Cargo Payload",
-                    "value": f"{payload:.2f} kg",
-                    "shap_contribution_wh": shap_payload_tot,
-                    "impact": f"Carrying cargo payload over {tot_d:.2f} km adds +{shap_payload_tot:.1f} Wh consumption",
-                },
-                {
-                    "feature": "speed",
-                    "label": "Flight Speed",
-                    "value": "10.0 m/s (36.0 km/h)",
-                    "shap_contribution_wh": 0.0,
-                    "impact": f"Cruising at energy-saving speed (36 km/h) across all {len(seg_pairs)} legs minimizes aerodynamic drag",
-                },
-                {
-                    "feature": "wind",
-                    "label": "Wind Effect",
-                    "value": f"Max {max_leg_wind:.1f} m/s ({cond_summary})",
-                    "shap_contribution_wh": shap_wind_tot,
-                    "impact": wind_impact,
-                },
-            ],
-            "legs_breakdown": legs_breakdown,
-            "summary": (
-                f"Fallback relay route via {mid_names_str}. Total distance {tot_d:.2f} km, "
-                f"energy consumption {tot_e:.1f} Wh. Relay leg energy exceeds safe battery reserve (80%) or compatible stock is unavailable."
-                if is_fallback
-                else (
-                    f"Multi-hub relay route via {len(path) - 2} battery swap stop(s) ({mid_names_str}). "
-                    f"Total distance {tot_d:.2f} km, total energy {tot_e:.1f} Wh across {len(seg_pairs)} feasible legs."
-                )
-            ),
-        }
-
-        num_swaps = max(1, len(path) - 2)
-        return {
-            "path": path,
-            "relayHubs": relay_labels,
-            "distanceKm": round(tot_d, 2),
-            "predictedEnergyWh": round(tot_e, 2),
-            "predictedDurationMin": int(math.ceil(tot_d * 2.2)) + (num_swaps * 3) + int(wait_min),
-            "wait_time": int(wait_min),
-            "flight_speed_mps": 10.0,
-            "flight_altitude_m": 45.0,
-            "speed_profile_label": "Battery Swap Relay (36 km/h • Altitude 45m)",
-            "shap_values": aggregated_shap,
-            "ai_explanation": relay_ai_explanation,
-            "legs_detail": legs_detail,
-            "route_string": route_str,
-            "cost_metric": tot_e + tot_d * 2,
-            "has_bad_weather": route_has_bad_weather,
-            "_e1": leg_energies[0] if leg_energies else 0.0,
-            "_e2": leg_energies[1] if len(leg_energies) > 1 else 0.0,
-            "_leg_energies": leg_energies,
-        }
-
+    # ── 3. Tuyến 3: Hành lang dự phòng né 2 điều kiện (vượt 80% pin hoặc thời tiết xấu) / Điều phối Cross-Hub ──
     detour_candidates = []
     in_corridor_hubs = list(corridor_geo_candidates)
+    eng_mid_nodes = set((raw_routes[0]["data"].get("path") or [])[1:-1])
+    fast_mid_nodes = set((raw_routes[1]["data"].get("path") or [])[1:-1])
+    primary_bad_edges_45m: set[tuple[int, int]] = set()
+    for r_entry in raw_routes[:2]:
+        for leg_d in r_entry["data"].get("legs_detail", []):
+            h_from = hub_dict.get(leg_d.get("from_hub_id"))
+            h_to = hub_dict.get(leg_d.get("to_hub_id"))
+            if h_from and h_to:
+                w45_raw = await _fetch_seg_weather(h_from, h_to)
+                if evaluate_weather_safety(w45_raw, altitude_m=45.0).get("is_bad_weather"):
+                    primary_bad_edges_45m.add((h_from.id, h_to.id))
 
     for mid_h, d1, d2 in corridor_geo_candidates:
         mid_energy = hub_best_energy_wh.get(mid_h.id, 0.0)
@@ -2272,82 +2437,61 @@ async def compute_mission_routes_internal(
             path=[origin_hub.id, mid_h.id, dest_hub.id],
             wait_min=int(mid_wait) if mid_wait != float('inf') else 0,
             is_fallback=False,
+            speed_mps=10.0,
+            altitude_m=45.0,
+            profile_name="Contingency Bypass Relay",
         )
-        # Chặng 1: Drone đủ pin xuất phát tới trạm trung gian (an toàn <= 80% pin xuất phát)
-        leg1_limit = (
-            hub_best_energy_wh.get(origin_hub.id, 0.0) * 0.8
-            if is_cross_hub and hub_best_energy_wh.get(origin_hub.id, 0.0) > 0
-            else max_safe_origin_energy_wh
-        )
-        if leg1_limit > 0 and cand["_e1"] > leg1_limit:
+        # Chặng 1 & Chặng 2 phải <= 80% pin
+        if leg1_max_safe_wh > 0 and cand["_e1"] > leg1_max_safe_wh:
             continue
-        # Chặng 2: Pin tại trạm trung gian đủ tới đích (an toàn <= 80% pin trạm trung gian)
         if cand["_e2"] > mid_energy * 0.8:
             continue
         detour_candidates.append(cand)
 
-    # Ưu tiên trạm trung chuyển thời tiết an toàn trước, rồi mới xét chi phí năng lượng + cự ly
-    detour_candidates.sort(key=lambda x: (1 if x.get("has_bad_weather") else 0, x.get("cost_metric", 0)))
+    # Ưu tiên trạm trung chuyển thời tiết an toàn và khác hành lang tuyến chính trước
+    detour_candidates.sort(
+        key=lambda x: (
+            1 if x.get("has_bad_weather") else 0,
+            1 if (x.get("path") == raw_routes[0]["data"].get("path") or x.get("path") == raw_routes[1]["data"].get("path")) else 0,
+            x.get("cost_metric", 0),
+        )
+    )
 
-    # Nếu không có tuyến 1-trạm khả thi (hoặc tất cả tuyến 1-trạm bị thời tiết xấu),
-    # chạy thuật toán Dijkstra đa chặng (multi-hop relay) để nối chuỗi nhiều trạm trung chuyển liên hoàn.
-    has_safe_one_hop = any(not c.get("has_bad_weather") for c in detour_candidates)
-    if not has_safe_one_hop:
-        blocked_edges: set[tuple[int, int]] = set()
-        exclude_nodes_mh: set[int] = set()
-        for _attempt in range(5):
-            dijk_res = plan_single_path(
+    has_distinct_safe_one_hop = any(
+        not c.get("has_bad_weather")
+        and c.get("path") != raw_routes[0]["data"].get("path")
+        for c in detour_candidates
+    )
+    if not has_distinct_safe_one_hop:
+        mh_detour = await _find_feasible_multi_hop_route(
+            mode="energy",
+            speed_mps=10.0,
+            altitude_m=45.0,
+            profile_name="Contingency Bypass Relay",
+            allow_direct=False,
+            initial_blocked_edges=primary_bad_edges_45m,
+            soft_avoid_nodes=eng_mid_nodes,
+            avoid_bad_weather=True,
+        )
+        if not mh_detour and primary_bad_edges_45m:
+            mh_detour = await _find_feasible_multi_hop_route(
                 mode="energy",
-                exclude_nodes=exclude_nodes_mh,
+                speed_mps=10.0,
+                altitude_m=45.0,
+                profile_name="Contingency Bypass Relay",
                 allow_direct=False,
-                blocked_edges=blocked_edges,
+                soft_avoid_nodes=eng_mid_nodes or fast_mid_nodes,
+                avoid_bad_weather=True,
             )
-            if not dijk_res or len(dijk_res.get("path") or []) < 3:
-                break
-            mh_path = dijk_res["path"]
-            mh_cand = await _build_multi_hop_relay_route_data(
-                path=mh_path,
-                wait_min=int(dijk_res.get("wait_time") or 0),
-                is_fallback=False,
+        if mh_detour:
+            detour_candidates.append(mh_detour)
+            detour_candidates.sort(
+                key=lambda x: (
+                    1 if x.get("has_bad_weather") else 0,
+                    1 if (x.get("path") == raw_routes[0]["data"].get("path") or x.get("path") == raw_routes[1]["data"].get("path")) else 0,
+                    x.get("cost_metric", 0),
+                )
             )
-            # Kiểm tra lại từng chặng sau khi áp dụng weather_override và pin thực tế tại mỗi hub
-            legs_copy = [dict(l) for l in mh_cand["legs_detail"]]
-            mh_feasible, _, mh_statuses = await check_relay_hub_battery_availability(
-                db=db,
-                relay_hub_ids=mh_path[1:-1],
-                hub_dict=hub_dict,
-                all_batteries=all_batteries,
-                compatible_models=compatible_models,
-                drone_id=suggested_drone_id,
-                drone_capacity_wh=drone_capacity_wh,
-                legs_detail=legs_copy,
-                assigned_battery=assigned_battery,
-                assigned_battery_energy_wh=(
-                    hub_best_energy_wh.get(origin_hub.id, 0.0)
-                    if is_cross_hub and hub_best_energy_wh.get(origin_hub.id, 0.0) > 0
-                    else origin_bat_energy_wh
-                ),
-                reserved_battery_ids=reserved_battery_ids,
-                held_count_by_hub=held_count_by_hub,
-                is_cross_hub=False,
-                origin_hub_id=origin_hub.id,
-            )
-            if mh_feasible:
-                detour_candidates.append(mh_cand)
-                break
-            # Nếu có chặng vượt ngưỡng 80% do gió ngược thực tế hoặc hết pin tại relay hub -> chặn để tìm tuyến khác
-            added_block = False
-            for idx_s, st in enumerate(mh_statuses):
-                if not st.feasible:
-                    if not st.selected_battery_id:
-                        exclude_nodes_mh.add(st.hub_id)
-                    elif idx_s + 1 < len(mh_path) - 1:
-                        blocked_edges.add((mh_path[idx_s + 1], mh_path[idx_s + 2]))
-                    added_block = True
-            if not added_block and len(mh_path) >= 2:
-                blocked_edges.add((mh_path[0], mh_path[1]))
-
-        detour_candidates.sort(key=lambda x: (1 if x.get("has_bad_weather") else 0, x.get("cost_metric", 0)))
 
     if detour_candidates:
         # Trường hợp 1: Tồn tại tuyến trung chuyển (1 trạm hoặc nhiều trạm) đủ pin -> Tuyến 3 trung chuyển đổi pin
@@ -2598,15 +2742,19 @@ async def compute_mission_routes_internal(
             d["predictedEnergyWh"] = round(d["predictedEnergyWh"] + e_disp, 2)
             d["predictedDurationMin"] = d["predictedDurationMin"] + t_disp
 
+            mid_hubs = [hub_dict[nid].code or hub_dict[nid].name for nid in d["path"] if nid not in (drone_home_hub.id, origin_hub.id, dest_hub.id)]
+            mid_str = " -> ".join([f"{m} (Battery Swap)" for m in mid_hubs])
+            spd_kmh = int(round(float(d.get("flight_speed_mps", 10.0)) * 3.6))
+            alt_m = int(round(float(d.get("flight_altitude_m", 45.0))))
             if entry["key"] in ("ENG", "DIR"):
-                d["route_string"] = f"[Dispatch from {home_code}] -> {origin_code} (Pickup) -> {dest_code} (Delivery) (Energy Saver • 36 km/h • Altitude 45m)"
+                body = f"{mid_str} -> {dest_code} (Delivery)" if mid_str else f"{dest_code} (Delivery)"
+                d["route_string"] = f"[Dispatch from {home_code}] -> {origin_code} (Pickup) -> {body} (Energy Saver • {spd_kmh} km/h • Altitude {alt_m}m)"
             elif entry["key"] == "FAST":
-                d["route_string"] = f"[Dispatch from {home_code}] -> {origin_code} (Pickup) -> {dest_code} (Delivery) (Express Fast • 54 km/h • Altitude 60m)"
+                body = f"{mid_str} -> {dest_code} (Delivery)" if mid_str else f"{dest_code} (Delivery)"
+                d["route_string"] = f"[Dispatch from {home_code}] -> {origin_code} (Pickup) -> {body} (Express Fast • {spd_kmh} km/h • Altitude {alt_m}m)"
             elif entry["key"] == "DETOUR":
-                mid_hubs = [hub_dict[nid].code or hub_dict[nid].name for nid in d["path"] if nid not in (drone_home_hub.id, origin_hub.id, dest_hub.id)]
-                mid_str = " -> ".join([f"{m} (Battery Swap)" for m in mid_hubs])
                 if mid_str:
-                    d["route_string"] = f"[Dispatch from {home_code}] -> {origin_code} (Pickup) -> {mid_str} -> {dest_code} (Delivery)"
+                    d["route_string"] = f"[Dispatch from {home_code}] -> {origin_code} (Pickup) -> {mid_str} -> {dest_code} (Delivery) (Contingency Bypass • {spd_kmh} km/h • Altitude {alt_m}m)"
                 else:
                     d["route_string"] = f"[Dispatch from {home_code}] -> {origin_code} (Pickup) -> {dest_code} (Delivery) (Battery Swap)"
             elif entry["key"] == "SAFE":
@@ -2847,9 +2995,16 @@ async def compute_mission_routes_internal(
 
             def _score_route(i: int):
                 s_item = routes_schemas[i]
+                # Tuyến 3 (DETOUR/SAFE/DISPATCH) chỉ được recommend khi các tuyến chính (ENG/FAST)
+                # vi phạm 1 trong 2 điều kiện an toàn: (1) thiếu pin/dự phòng <20%, hoặc (2) thời tiết xấu.
+                is_contingency = (
+                    1
+                    if ("DETOUR" in s_item.routeId or "SAFE" in s_item.routeId or "DISPATCH" in s_item.routeId)
+                    else 0
+                )
                 if pref_mode == "FAST":
-                    return (s_item.predictedDurationMin, s_item.predictedEnergyWh)
-                return (s_item.predictedEnergyWh, s_item.predictedDurationMin)
+                    return (is_contingency, s_item.predictedDurationMin, s_item.predictedEnergyWh)
+                return (is_contingency, s_item.predictedEnergyWh, s_item.predictedDurationMin)
 
             unfiltered_best_idx = min(feasible_indices, key=_score_route)
             best_idx = min(candidate_indices, key=_score_route)
@@ -2865,6 +3020,8 @@ async def compute_mission_routes_internal(
             weather_avoided_note = (
                 f"AI proactively avoided {skipped_r.routeId} due to weather alert ({skipped_warn}), switching to a safer route. "
             )
+
+        eng_ref_route = next((r for r in routes_schemas if "ENG" in r.routeId), routes_schemas[0])
 
         for idx, (s, d) in enumerate(zip(routes_schemas, raw_data_list)):
             swap_notes = [
@@ -2893,6 +3050,13 @@ async def compute_mission_routes_internal(
                         f"⚠️ Severe weather warning ({s.weather.warning_message}) — AI does not recommend this route. "
                     )
 
+            spd_mps = float(s.flight_speed_mps or 10.0)
+            spd_kmh = int(round(spd_mps * 3.6))
+            alt_m = int(round(float(s.flight_altitude_m or 45.0)))
+            delivery_legs = [lg for lg in s.legs_detail if not lg.is_dispatch]
+            is_multi_leg = len(delivery_legs) > 1
+            flight_mode_phrase = f"Multi-hub relay ({len(delivery_legs)} legs)" if is_multi_leg else "Direct flight"
+
             if not s.feasible:
                 s.recommended = False
                 s.is_selectable = False
@@ -2907,12 +3071,12 @@ async def compute_mission_routes_internal(
                     intro = (
                         weather_avoided_note
                         if weather_avoided_note
-                        else "Direct route lacks safe battery margin (exceeds 80%). "
+                        else "Primary routes (Energy Saver / Express Fast) cannot meet the 80% battery safety threshold or stock constraints. "
                     )
                     s.reason = (
                         f"{opt_disp_prefix}{bad_weather_prefix}AI Recommended: {intro}"
-                        f"Relay route via battery swap hub(s) {relays_str} ensures safe energy reserves to complete the mission "
-                        f"(total {s.predictedEnergyWh:.1f} Wh, reserve {s.remainingBatteryPct}%). "
+                        f"Contingency relay route via battery swap hub(s) {relays_str} ensures safe energy reserves to complete the mission "
+                        f"(total {s.predictedEnergyWh:.1f} Wh, max leg {s.batteryConsumptionPct}% / reserve {s.remainingBatteryPct}%). "
                         f"{s_bat_note}{swap_summary}{weather_note}"
                     ).strip()
                 elif "DISPATCH" in s.routeId:
@@ -2922,23 +3086,24 @@ async def compute_mission_routes_internal(
                         f"(total {s.predictedEnergyWh:.1f} Wh, reserve {s.remainingBatteryPct}%). {s_bat_note}{weather_note}"
                     ).strip()
                 elif "FAST" in s.routeId:
-                    diff_wh = round(s.predictedEnergyWh - routes_schemas[0].predictedEnergyWh, 1) if routes_schemas else 0.0
+                    diff_wh = round(s.predictedEnergyWh - eng_ref_route.predictedEnergyWh, 1)
+                    diff_sign = "+" if diff_wh >= 0 else ""
                     s.reason = (
                         f"{opt_disp_prefix}{bad_weather_prefix}AI Recommended ({order_mode_val} Order • Express Fast Priority): "
-                        f"Direct flight at high speed (15 m/s ~ 54 km/h • Altitude 60m) in safe weather conditions, "
-                        f"reducing flight time to {s.predictedDurationMin} min (consumes {s.predictedEnergyWh:.1f} Wh, +{diff_wh:.1f} Wh vs Energy Saver, "
-                        f"reserve {s.remainingBatteryPct}%). {s_bat_note}{weather_note}"
+                        f"{flight_mode_phrase} at high cruise speed ({spd_mps:.1f} m/s ~ {spd_kmh} km/h • Altitude {alt_m}m) in safe weather conditions, "
+                        f"reducing transit time to {s.predictedDurationMin} min (total {s.predictedEnergyWh:.1f} Wh, {diff_sign}{diff_wh:.1f} Wh vs Energy Saver, "
+                        f"reserve {s.remainingBatteryPct}%). {s_bat_note}{swap_summary}{weather_note}"
                     ).strip()
                 else:
                     mode_reason = (
                         weather_avoided_note
                         if weather_avoided_note
-                        else f"Direct energy-saver route ({order_mode_val} Order • 10 m/s ~ 36 km/h • Altitude 45m). "
+                        else f"{flight_mode_phrase} Energy Saver route ({order_mode_val} Order • {spd_mps:.1f} m/s ~ {spd_kmh} km/h • Altitude {alt_m}m). "
                     )
                     s.reason = (
                         f"{opt_disp_prefix}{bad_weather_prefix}AI Recommended: {mode_reason}"
-                        f"SHAP analysis confirms 10 m/s cruise speed minimizes aerodynamic drag for the lowest battery consumption "
-                        f"(total {s.predictedEnergyWh:.1f} Wh, ~{s.batteryConsumptionPct}% battery/leg, "
+                        f"SHAP analysis confirms {spd_mps:.1f} m/s cruise speed minimizes aerodynamic drag for the lowest battery consumption "
+                        f"(total {s.predictedEnergyWh:.1f} Wh, ~{s.batteryConsumptionPct}% max battery/leg, "
                         f"reserve {s.remainingBatteryPct}%). {s_bat_note}{swap_summary}{weather_note}"
                     ).strip()
             else:
@@ -2947,13 +3112,14 @@ async def compute_mission_routes_internal(
                 s.unselectable_reason = None
                 if "DETOUR" in s.routeId:
                     relays_str = " -> ".join([leg.to_hub_code for leg in s.legs_detail[:-1]])
-                    diff_d = round(s.distanceKm - routes_schemas[0].distanceKm, 2) if routes_schemas else 0.0
-                    diff_e = round(s.predictedEnergyWh - routes_schemas[0].predictedEnergyWh, 1) if routes_schemas else 0.0
+                    diff_d = round(s.distanceKm - eng_ref_route.distanceKm, 2)
+                    diff_e = round(s.predictedEnergyWh - eng_ref_route.predictedEnergyWh, 1)
+                    diff_e_sign = "+" if diff_e >= 0 else ""
                     s.reason = (
-                        f"{opt_disp_prefix}{bad_weather_prefix}Battery Swap Relay route: Stop at {relays_str} for battery swap. "
-                        f"SHAP analysis shows the relay stop adds +{diff_d:.2f} km distance and +{diff_e:.1f} Wh energy vs direct flight. "
-                        f"Suitable as a safe refueling fallback option "
-                        f"(Total distance {s.distanceKm} km, {s.predictedEnergyWh:.1f} Wh). {s_bat_note}{swap_summary}{weather_note}"
+                        f"{opt_disp_prefix}{bad_weather_prefix}Contingency Bypass Relay route: Stop at {relays_str} for battery swap. "
+                        f"Reserved as an alternate corridor to bypass primary battery deficits or bad weather "
+                        f"({'+' if diff_d >= 0 else ''}{diff_d:.2f} km, {diff_e_sign}{diff_e:.1f} Wh vs Energy Saver; "
+                        f"Total distance {s.distanceKm} km, {s.predictedEnergyWh:.1f} Wh). {s_bat_note}{swap_summary}{weather_note}"
                     ).strip()
                 elif "DISPATCH" in s.routeId:
                     s.reason = (
@@ -2970,21 +3136,23 @@ async def compute_mission_routes_internal(
                     ).strip()
                 elif "ENG" in s.routeId:
                     s.reason = (
-                        f"{opt_disp_prefix}{bad_weather_prefix}Direct Energy Saver route (10 m/s ~ 36 km/h • Altitude 45m): "
-                        f"Lowest energy consumption ({s.predictedEnergyWh:.1f} Wh, duration {s.predictedDurationMin} min, reserve {s.remainingBatteryPct}%). "
-                        f"{s_bat_note}{weather_note}"
+                        f"{opt_disp_prefix}{bad_weather_prefix}{flight_mode_phrase} Energy Saver route ({spd_mps:.1f} m/s ~ {spd_kmh} km/h • Altitude {alt_m}m): "
+                        f"Lowest energy consumption ({s.predictedEnergyWh:.1f} Wh, duration {s.predictedDurationMin} min, max leg {s.batteryConsumptionPct}%, reserve {s.remainingBatteryPct}%). "
+                        f"{s_bat_note}{swap_summary}{weather_note}"
                     ).strip()
                 elif "SHORT" in s.routeId:
                     s.reason = f"{opt_disp_prefix}{bad_weather_prefix}Shortest path: Distance {s.distanceKm} km, consumes {s.predictedEnergyWh:.1f} Wh. {s_bat_note}{swap_summary}{weather_note}".strip()
                 elif "DIR" in s.routeId:
                     s.reason = f"{opt_disp_prefix}{bad_weather_prefix}Direct point-to-point route: Distance {s.distanceKm} km, no intermediate charging stop. {s_bat_note}{weather_note}".strip()
                 elif "FAST" in s.routeId:
-                    diff_wh = round(s.predictedEnergyWh - routes_schemas[0].predictedEnergyWh, 1) if routes_schemas else 2.8
-                    pct_inc = int(round((diff_wh / routes_schemas[0].predictedEnergyWh) * 100)) if (routes_schemas and routes_schemas[0].predictedEnergyWh > 0) else 15
+                    diff_wh = round(s.predictedEnergyWh - eng_ref_route.predictedEnergyWh, 1)
+                    pct_inc = int(round((diff_wh / eng_ref_route.predictedEnergyWh) * 100)) if eng_ref_route.predictedEnergyWh > 0 else 15
+                    diff_sign = "+" if diff_wh >= 0 else ""
+                    pct_sign = "+" if pct_inc >= 0 else ""
                     s.reason = (
-                        f"{opt_disp_prefix}{bad_weather_prefix}Express Fast route: Direct flight at high speed (15 m/s ~ 54 km/h • Altitude 60m). "
-                        f"Shortens flight time to {s.predictedDurationMin} min, while SHAP analysis shows quadratic aerodynamic drag (v²) "
-                        f"increases energy consumption by +{diff_wh:.1f} Wh (+{pct_inc}%, total {s.predictedEnergyWh:.1f} Wh). {s_bat_note}{weather_note}"
+                        f"{opt_disp_prefix}{bad_weather_prefix}Express Fast route ({flight_mode_phrase} at {spd_mps:.1f} m/s ~ {spd_kmh} km/h • Altitude {alt_m}m): "
+                        f"Shortens transit time to {s.predictedDurationMin} min, while SHAP analysis shows aerodynamic drag at higher speed "
+                        f"adjusts energy consumption by {diff_sign}{diff_wh:.1f} Wh ({pct_sign}{pct_inc}%, total {s.predictedEnergyWh:.1f} Wh). {s_bat_note}{swap_summary}{weather_note}"
                     ).strip()
                 else:
                     s.reason = f"{opt_disp_prefix}{bad_weather_prefix}Alternative route: Distance {s.distanceKm} km, duration {s.predictedDurationMin} min. {s_bat_note}{swap_summary}{weather_note}".strip()
