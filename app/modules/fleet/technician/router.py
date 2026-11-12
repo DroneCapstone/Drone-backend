@@ -125,23 +125,36 @@ async def get_incoming_drones(
         
         if user.hub_id and str(user.hub_id).isdigit():
             tech_hub_id = int(user.hub_id)
-            leg_mission_ids_subq = (
+            
+            # Leg đang bay tới hub này (IN_PROGRESS)
+            in_progress_leg_subq = (
                 select(MissionLeg.mission_id)
                 .where(
                     MissionLeg.to_hub_id == tech_hub_id,
-                    MissionLeg.status.in_([MissionLegStatus.IN_PROGRESS, MissionLegStatus.COMPLETED]),
+                    MissionLeg.status == MissionLegStatus.IN_PROGRESS,
                 )
             )
+            
+            # Leg đã hoàn thành tại hub này (COMPLETED) VÀ technician vẫn ở hub (chờ swap pin hoặc dispatch)
+            completed_leg_at_hub_subq = (
+                select(MissionLeg.mission_id)
+                .where(
+                    MissionLeg.to_hub_id == tech_hub_id,
+                    MissionLeg.status == MissionLegStatus.COMPLETED,
+                )
+            )
+            
             query = query.where(
                 or_(
-                    # Show mission khi handling_status = AT_HUB (drone thực sự đang ở hub này)
+                    # Show mission khi leg đang IN_PROGRESS tới hub này
+                    Mission.id.in_(in_progress_leg_subq),
+                    # Show mission khi leg COMPLETED tại hub này VÀ drone vẫn AT_HUB hoặc READY (chờ swap pin hoặc dispatch)
                     and_(
-                        Mission.handling_status == HandlingStatus.AT_HUB,
+                        Mission.id.in_(completed_leg_at_hub_subq),
+                        Mission.handling_status.in_([HandlingStatus.AT_HUB, HandlingStatus.READY]),
                         Drone.current_hub_id == tech_hub_id,
                     ),
-                    # Show mission khi leg đang bay tới hub này hoặc hoàn thành tại hub này
-                    Mission.id.in_(leg_mission_ids_subq),
-                    # Show destination hub missions
+                    # Show destination hub missions (không phải AT_HUB)
                     and_(
                         Mission.destination_hub_id == tech_hub_id,
                         Mission.handling_status != HandlingStatus.AT_HUB,
@@ -201,7 +214,7 @@ async def get_incoming_drones(
             next_leg_info = None
             
             if legs:
-                # Tìm leg đang active (IN_PROGRESS hoặc COMPLETED) ở hub hiện tại
+                # Tìm leg đang active: IN_PROGRESS hoặc COMPLETED (khi technician confirm-relay-arrival)
                 for i, leg in enumerate(legs):
                     if leg.status in [MissionLegStatus.IN_PROGRESS, MissionLegStatus.COMPLETED]:
                         current_leg_info = {
