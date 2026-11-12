@@ -228,7 +228,7 @@ async def get_transit_history(
                 Drone.model.label("model"),
                 Battery.id.label("battery_id"),
                 Battery.serial_number.label("battery_code"),
-                Battery.charge_level_pct.label("battery_percent"),
+                Mission.battery_charge_at_arrival.label("battery_percent"),
                 Mission.arrival_confirmed_at,
                 Order.destination_received_at,
             )
@@ -432,6 +432,12 @@ async def confirm_arrival(
     # Ghi nhận arrival_confirmed_at khi drone đáp hub (bình thường hay incident)
     mission.arrival_confirmed_at = now
     mission.arrival_confirmed_by = user.id
+    
+    # Lưu battery percent lúc đáp hub
+    if mission.battery_id:
+        battery = await db.get(Battery, mission.battery_id)
+        if battery and battery.charge_level_pct is not None:
+            mission.battery_charge_at_arrival = battery.charge_level_pct
 
     # ── 2. Mark tất cả MissionLeg còn lại → COMPLETED ────────────────────────
     legs_result = await db.execute(

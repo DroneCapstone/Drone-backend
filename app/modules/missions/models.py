@@ -111,6 +111,7 @@ class Mission(Base):
     arrived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     arrival_confirmed_by: Mapped[str | None] = mapped_column(String, nullable=True)
     arrival_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    battery_charge_at_arrival: Mapped[float | None] = mapped_column(Float, nullable=True)
     leg_destination_type: Mapped[str | None] = mapped_column(String(20), default="destination", nullable=True)
     checkpoints_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
 
