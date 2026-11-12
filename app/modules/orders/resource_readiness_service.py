@@ -139,25 +139,25 @@ async def evaluate_hub_resource_readiness(
     # 6. Soạn thảo thông điệp phản hồi minh bạch cho Khách hàng
     notice_parts = []
     if waiting_orders_count > 0:
-        notice_parts.append(f"Trạm gửi đang có {waiting_orders_count} đơn hàng chờ xử lý (+{queue_wait_minutes} phút)")
+        notice_parts.append(f"Origin hub currently has {waiting_orders_count} pending order(s) in queue (+{queue_wait_minutes} min)")
 
     if battery_readiness == "CHARGING":
-        notice_parts.append(f"Pin tại trạm đang sạc (hiện đạt {highest_charge_pct}%, dự kiến sẵn sàng sau {charge_wait_minutes} phút)")
+        notice_parts.append(f"Batteries at hub are charging (currently at {highest_charge_pct}%, estimated ready in {charge_wait_minutes} min)")
     elif battery_readiness == "EMPTY":
-        notice_parts.append(f"Trạm gửi đang chuẩn bị nguồn pin dự phòng (+{charge_wait_minutes} phút)")
+        notice_parts.append(f"Origin hub is preparing backup battery power (+{charge_wait_minutes} min)")
 
     if drone_readiness == "CROSS_HUB_DISPATCH_REQUIRED":
-        notice_parts.append("Trạm gửi trống máy bay tại chỗ; hệ thống sẽ tự động điều phối Drone từ trạm lân cận sang lấy hàng (+20 phút)")
+        notice_parts.append("No local drone available at origin hub; system will automatically dispatch a Drone from a nearby hub (+20 min)")
     elif drone_readiness == "BUSY_FLEET":
-        notice_parts.append("Các máy bay phù hợp đang thực hiện nhiệm vụ trước đó; đơn sẽ được xếp vào hàng chờ ưu tiên")
+        notice_parts.append("Suitable drones are currently executing prior missions; your order will be placed in the priority queue")
 
     if not notice_parts:
-        customer_notice = "Tài nguyên tại Trạm gửi sẵn sàng (có sẵn Drone và Pin đầy). Đơn hàng sẽ được xử lý ngay sau khi bàn giao."
+        customer_notice = "Resources at origin Hub are ready (available Drone and fully charged Battery). Order will be processed immediately upon drop-off."
     else:
         customer_notice = (
-            f"Thông báo điều phối tại Trạm {origin_hub.name if origin_hub else ''}: "
+            f"Dispatch notice at Hub {origin_hub.name if origin_hub else ''}: "
             + "; ".join(notice_parts)
-            + f". Tổng thời gian chờ chuẩn bị ước tính khoảng {total_extra_wait_minutes} phút (đã được tự động bù vào khung giờ giao hàng)."
+            + f". Estimated preparation wait time is ~{total_extra_wait_minutes} min (automatically included in the delivery window)."
         )
 
     return {

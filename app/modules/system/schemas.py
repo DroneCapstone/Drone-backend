@@ -236,6 +236,11 @@ class SimulatorConfigResponse(BaseModel):
     incident_severity: str
     interval_sec: int
     steps_per_leg: int
+    next_flight_incident: bool = False
+    next_flight_incident_step: Optional[int] = None
+    next_flight_incident_severity: Optional[str] = None
+    next_flight_incident_type: str = "FAILSAFE_RTH"
+    next_flight_incident_armed_at: Optional[str] = None
 
 
 class SimulatorConfigUpdate(BaseModel):
@@ -245,4 +250,18 @@ class SimulatorConfigUpdate(BaseModel):
     incident_severity: Optional[str] = None
     interval_sec: Optional[int] = None
     steps_per_leg: Optional[int] = None
+    next_flight_incident: Optional[bool] = None
+
+
+class SimulatorTriggerIncidentRequest(BaseModel):
+    """Arm a one-time incident scenario for the next flight only (auto-resets to SUCCESS afterward)."""
+    enabled: bool = True
+    severity: Optional[str] = None         # Low / Medium / High
+    trigger_step: Optional[int] = None     # Trigger step (1-based). Defaults to ~60% of the flight route
+    incident_type: Optional[str] = "FAILSAFE_RTH"  # FAILSAFE_RTH (return-to-home failsafe) or SIGNAL_LOSS (communication loss)
+
+
+class SimulatorTriggerIncidentResponse(BaseModel):
+    message: str
+    config: SimulatorConfigResponse
 

@@ -30,7 +30,7 @@ class ActiveFlightsResponse(BaseModel):
 
 
 class RelayHubBatteryOptionSchema(BaseModel):
-    """Thông tin một viên pin khả dụng tại Hub trung gian."""
+    """Details of an available battery at an intermediate relay hub."""
     id: str
     serial_number: str
     battery_model: Optional[str] = None
@@ -84,13 +84,13 @@ class RouteLegSchema(BaseModel):
 
 
 class HubBatteryStatus(BaseModel):
-    """Trạng thái pin và viên pin được chỉ định thay thế tại một Hub trung gian trong relay route."""
+    """Battery inventory status and designated swap battery at an intermediate relay hub."""
     hub_id: int
     hub_code: str
     hub_name: str
-    ready_count: int = 0        # số pin Ready (sạc 100%, tương thích, chưa gắn drone, chưa bị giữ chỗ)
+    ready_count: int = 0  # số pin Ready (sạc 100%, tương thích, chưa gắn drone, chưa bị giữ chỗ)
     compatible_models: list[str] = []
-    feasible: bool = True       # True nếu có ít nhất 1 pin Ready tương thích và đủ năng lượng (dự phòng >= 20%)
+    feasible: bool = True  # True nếu có ít nhất 1 pin Ready tương thích và đủ năng lượng (dự phòng >= 20%)
     # Chỉ định chính xác viên pin tại Hub trung gian sẽ được dùng để thay cho chặng tiếp theo
     selected_battery_id: Optional[str] = None
     selected_battery_serial: Optional[str] = None
@@ -281,7 +281,7 @@ class TelemetryDataResponse(TelemetryDataCreate):
 
 
 class HubCheckpointResponse(BaseModel):
-    """Log mỗi lần drone đi qua Hub trung gian"""
+    """Log entry each time the drone passes through an intermediate hub."""
     id: int
     mission_id: Union[int, str]
     hub_id: Optional[int]
@@ -300,7 +300,7 @@ class HubCheckpointResponse(BaseModel):
 
 
 class TelemetryIngestResponse(BaseModel):
-    """Response của POST /telemetry — bao gồm logs đã lưu và checkpoint mới tạo (nếu có)"""
+    """Response for POST /telemetry — includes saved telemetry logs and newly created checkpoints (if any)."""
     saved_count: int
     logs: list[TelemetryDataResponse]
     new_checkpoints: list[HubCheckpointResponse]
@@ -438,7 +438,7 @@ class FailsafeEvaluateResponse(BaseModel):
     wind_speed: float
     wind_warning: bool
     status: str  # SAFE | WARNING | RTH_TRIGGERED | DIVERT_TRIGGERED | EMERGENCY_LAND_TRIGGERED
-    tier: int    # 0: Bình thường | 1: RTH | 2: Divert Hub | 3: Emergency Landing
+    tier: int  # 0: Bình thường | 1: RTH | 2: Divert Hub | 3: Emergency Landing
     action: str  # CONTINUE | RETURN_TO_HOME | DIVERT_TO_HUB | EMERGENCY_LAND
     reason: str
     pnr_reached: bool
@@ -452,7 +452,7 @@ class FailsafeEvaluateResponse(BaseModel):
 class FailsafeExecuteRequest(BaseModel):
     action: str  # RETURN_TO_HOME | DIVERT_TO_HUB | EMERGENCY_LAND
     target_hub_id: Optional[int] = None
-    reason: Optional[str] = "Phát hiện suy hao pin bất thường giữa chặng"
+    reason: Optional[str] = "Abnormal mid-flight battery drain detected"
 
 class FailsafeExecuteResponse(BaseModel):
     mission_id: str

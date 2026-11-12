@@ -441,7 +441,7 @@ async def update_drone_admin_state(
         if drone.status == DroneStatus.IN_FLIGHT:
             raise HTTPException(
                 status_code=400,
-                detail="Không thể vô hiệu hóa (Deactivate) drone khi đang thực hiện chuyến bay (In flight)."
+                detail="Cannot deactivate drone while it is in flight."
             )
         drone.status = DroneStatus.RETIRED
     elif target == "ACTIVE":
@@ -551,7 +551,7 @@ async def get_drone(
     maint_schedule_status = "Overdue" if len(open_wos) > 0 else (str(sched.status).capitalize() if sched and sched.status else "Normal")
     maint_note = (
         open_wos[0].issue_description if open_wos and open_wos[0].issue_description
-        else (f"{sched.maintenance_type} (mỗi {sched.interval_days} ngày / {sched.interval_flight_hours:.0f}h bay)" if sched else None)
+        else (f"{sched.maintenance_type} (every {sched.interval_days} days / {sched.interval_flight_hours:.0f} flight hrs)" if sched else None)
     )
 
     # Missions / Flight activity từ DB thật
@@ -668,7 +668,7 @@ async def get_drone_maintenance_tab(
             "next_maintenance": next_m_str,
             "status": sched_status,
             "open_work_orders": open_cnt,
-            "maintenance_note": open_wos[0].issue_description if open_wos and open_wos[0].issue_description else (f"{sched.maintenance_type} (mỗi {sched.interval_days} ngày / {sched.interval_flight_hours:.0f}h bay)" if sched else None),
+            "maintenance_note": open_wos[0].issue_description if open_wos and open_wos[0].issue_description else (f"{sched.maintenance_type} (every {sched.interval_days} days / {sched.interval_flight_hours:.0f} flight hrs)" if sched else None),
         },
         recent_technician_records=recent_records,
     )
@@ -921,13 +921,13 @@ async def create_drone(
     if not serial_str:
         raise HTTPException(
             status_code=400,
-            detail="Bắt buộc Admin phải nhập tay serial_number cho Drone (không được để trống)."
+            detail="Admin must manually enter a serial_number for the drone (cannot be empty)."
         )
 
     # Kiểm tra serial_number đã tồn tại chưa
     existing_sn = await db.execute(select(Drone).where(Drone.serial_number == serial_str))
     if existing_sn.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail=f"Serial number '{serial_str}' đã tồn tại trong hệ thống.")
+        raise HTTPException(status_code=400, detail=f"Serial number '{serial_str}' already exists in the system.")
 
     drone_id = await generate_sequential_id(db, Drone, "DRN")
 
@@ -959,7 +959,7 @@ async def create_drone(
 
     # Ghi nhận chi phí mua sắm Drone
     try:
-        hub_info = f"tại Hub #{body.current_hub_id}" if body.current_hub_id else "vào kho tổng Admin"
+        hub_info = f"at Hub #{body.current_hub_id}" if body.current_hub_id else "into Admin central warehouse"
         await log_activity(
             db,
             action="DRONE_ACQUISITION",
@@ -967,7 +967,7 @@ async def create_drone(
             role=user.role.value,
             resource_type="drones",
             resource_id=drone.id,
-            description=f"Nhập Drone mới {drone.name} ({drone.model}) - Serial: {serial_str} {hub_info}. Chi phí: {cost:,.0f} VNĐ",
+            description=f"Registered new drone {drone.name} ({drone.model}) - Serial: {serial_str} {hub_info}. Cost: {cost:,.0f} VND",
             details={
                 "serial_number": serial_str,
                 "model": body.model,
@@ -1009,7 +1009,7 @@ async def update_drone(
         if new_sn and new_sn != drone.serial_number:
             chk = await db.execute(select(Drone).where(Drone.serial_number == new_sn))
             if chk.scalar_one_or_none():
-                raise HTTPException(status_code=400, detail=f"Serial number '{new_sn}' đã tồn tại trong hệ thống.")
+                raise HTTPException(status_code=400, detail=f"Serial number '{new_sn}' already exists in the system.")
             drone.serial_number = new_sn
 
     if body.name is not None:
@@ -1145,7 +1145,7 @@ async def create_battery(
         else:
             raise HTTPException(
                 status_code=400,
-                detail="Cần truyền capacity_wh hoặc chọn battery_model có trong catalog."
+                detail="Must provide capacity_wh or select a battery_model available in the catalog."
             )
 
     unit_cost = body.unit_cost_override or (cat.unit_cost if cat else 0.0) or 0.0
@@ -1159,14 +1159,14 @@ async def create_battery(
         if not serial_str:
             raise HTTPException(
                 status_code=400,
-                detail="Bắt buộc Admin phải nhập tay serial_number cho pin (không được để trống)."
+                detail="Admin must manually enter a serial_number for the battery (cannot be empty)."
             )
 
         existing = await db.execute(
             select(Battery).where(Battery.serial_number == serial_str)
         )
         if existing.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail=f"Serial number '{serial_str}' đã tồn tại trong hệ thống.")
+            raise HTTPException(status_code=400, detail=f"Serial number '{serial_str}' already exists in the system.")
 
         battery_id = await generate_sequential_id(db, Battery, "BAT")
         total_cost = body.acquisition_cost if (body.acquisition_cost and body.acquisition_cost > 0) else unit_cost
@@ -1188,7 +1188,7 @@ async def create_battery(
         await db.refresh(battery)
 
         try:
-            hub_info = f"tại Hub #{body.current_hub_id}" if body.current_hub_id else "vào kho tổng Admin"
+            hub_info = f"at Hub #{body.current_hub_id}" if body.current_hub_id else "into Admin central warehouse"
             await log_activity(
                 db,
                 action="BATTERY_BATCH_IMPORT",
@@ -1196,7 +1196,7 @@ async def create_battery(
                 role=user.role.value,
                 resource_type="batteries",
                 resource_id=battery.id,
-                description=f"Nhập kho 1 viên pin {battery.id} ({body.battery_model or 'N/A'}) - Serial: {serial_str} {hub_info}. Chi phí: {total_cost:,.0f} VNĐ",
+                description=f"Stocked 1 battery {battery.id} ({body.battery_model or 'N/A'}) - Serial: {serial_str} {hub_info}. Cost: {total_cost:,.0f} VND",
                 details={
                     "quantity": 1,
                     "battery_ids": [battery.id],
@@ -1220,13 +1220,13 @@ async def create_battery(
         if len(serials) != qty:
             raise HTTPException(
                 status_code=400,
-                detail=f"Nhập theo lô {qty} viên pin yêu cầu Admin nhập chính xác {qty} mã serial_numbers (hiện có {len(serials)})."
+                detail=f"Batch import of {qty} batteries requires Admin to enter exactly {qty} serial_numbers (received {len(serials)})."
             )
 
         if len(set(serials)) != len(serials):
             raise HTTPException(
                 status_code=400,
-                detail="Danh sách serial_numbers bị trùng lặp mã trong cùng một lô nhập."
+                detail="Duplicate serial_numbers found within the same import batch."
             )
 
         existing_res = await db.execute(
@@ -1236,7 +1236,7 @@ async def create_battery(
         if dup_serials:
             raise HTTPException(
                 status_code=400,
-                detail=f"Các serial number sau đã tồn tại trong hệ thống: {', '.join(dup_serials)}"
+                detail=f"The following serial numbers already exist in the system: {', '.join(dup_serials)}"
             )
 
         total_cost = body.acquisition_cost if (body.acquisition_cost and body.acquisition_cost > 0) else (unit_cost * qty)
@@ -1267,7 +1267,7 @@ async def create_battery(
             await db.refresh(b)
 
         try:
-            hub_info = f"tại Hub #{body.current_hub_id}" if body.current_hub_id else "vào kho tổng Admin"
+            hub_info = f"at Hub #{body.current_hub_id}" if body.current_hub_id else "into Admin central warehouse"
             await log_activity(
                 db,
                 action="BATTERY_BATCH_IMPORT",
@@ -1275,7 +1275,7 @@ async def create_battery(
                 role=user.role.value,
                 resource_type="batteries",
                 resource_id=f"BATCH-{battery_ids[0]}",
-                description=f"Nhập kho theo lô {qty} viên pin ({body.battery_model or 'N/A'}) {hub_info}. Chi phí: {total_cost:,.0f} VNĐ",
+                description=f"Batch imported {qty} batteries ({body.battery_model or 'N/A'}) {hub_info}. Cost: {total_cost:,.0f} VND",
                 details={
                     "quantity": qty,
                     "battery_ids": battery_ids,
@@ -1367,11 +1367,11 @@ async def supply_batteries(
     """
     hub = await db.get(Hub, body.hub_id)
     if not hub:
-        raise HTTPException(status_code=404, detail=f"Hub #{body.hub_id} không tồn tại.")
+        raise HTTPException(status_code=404, detail=f"Hub #{body.hub_id} not found.")
 
     clean_ids = [str(bid).strip() for bid in body.battery_ids if str(bid).strip()]
     if not clean_ids:
-        raise HTTPException(status_code=400, detail="Danh sách battery_ids không được rỗng.")
+        raise HTTPException(status_code=400, detail="battery_ids list cannot be empty.")
 
     res = await db.execute(select(Battery).where(Battery.id.in_(clean_ids)))
     batteries = res.scalars().all()
@@ -1380,7 +1380,7 @@ async def supply_batteries(
     if missing_ids:
         raise HTTPException(
             status_code=404,
-            detail=f"Không tìm thấy các mã pin sau: {', '.join(sorted(missing_ids))}"
+            detail=f"Battery IDs not found: {', '.join(sorted(missing_ids))}"
         )
 
     # Kiểm tra pin có đang gắn trên drone không
@@ -1388,7 +1388,7 @@ async def supply_batteries(
     if in_flight_or_mounted:
         raise HTTPException(
             status_code=400,
-            detail=f"Các pin sau đang được gắn trên Drone, không thể điều phối phân bổ: {', '.join(in_flight_or_mounted)}"
+            detail=f"The following batteries are currently mounted on a drone and cannot be dispatched: {', '.join(in_flight_or_mounted)}"
         )
 
     now_utc = datetime.now(timezone.utc)
@@ -1408,10 +1408,10 @@ async def supply_batteries(
     for tech in techs:
         db.add(Notification(
             user_id=tech.id,
-            title=f"Tiếp nhận {len(batteries)} pin mới từ Admin",
+            title=f"Receive {len(batteries)} new batteries from Admin",
             message=(
-                f"Admin đã phân bổ {len(batteries)} pin mới về Hub #{hub.id} ({hub.name}). "
-                f"Danh sách mã pin: {', '.join(b.id for b in batteries)}. Vui lòng kiểm tra và tiếp nhận."
+                f"Admin has allocated {len(batteries)} new batteries to Hub #{hub.id} ({hub.name}). "
+                f"Battery IDs: {', '.join(b.id for b in batteries)}. Please inspect and receive them."
             ),
             notifications_type=NotificationType.MAINTENANCE,
             reference_id=f"BATTERY_SUPPLY_HUB_{hub.id}",
@@ -1430,7 +1430,7 @@ async def supply_batteries(
             role=user.role.value,
             resource_type="batteries",
             resource_id=f"SUPPLY-HUB-{hub.id}",
-            description=f"Admin phân bổ {len(batteries)} viên pin về Hub #{hub.id} ({hub.name}). Đã gửi thông báo tới {len(techs)} kỹ thuật viên.",
+            description=f"Admin allocated {len(batteries)} batteries to Hub #{hub.id} ({hub.name}). Notified {len(techs)} technician(s).",
             details={
                 "hub_id": hub.id,
                 "hub_name": hub.name,
@@ -1443,7 +1443,7 @@ async def supply_batteries(
         pass
 
     return BatterySupplyResponse(
-        message=f"Đã phân bổ thành công {len(batteries)} pin về Hub #{hub.id} ({hub.name}).",
+        message=f"Successfully allocated {len(batteries)} batteries to Hub #{hub.id} ({hub.name}).",
         hub_id=hub.id,
         hub_name=hub.name or f"Hub #{hub.id}",
         supplied_count=len(batteries),
@@ -1478,7 +1478,7 @@ async def create_battery_model(
         select(BatteryModelCatalog).where(BatteryModelCatalog.name == body.name)
     )).scalar_one_or_none()
     if existing:
-        raise HTTPException(status_code=409, detail=f"Model '{body.name}' đã tồn tại.")
+        raise HTTPException(status_code=409, detail=f"Model '{body.name}' already exists.")
 
     from datetime import timezone as _tz
     cat = BatteryModelCatalog(
@@ -1506,7 +1506,7 @@ async def update_battery_model(
 ):
     cat = await db.get(BatteryModelCatalog, model_id)
     if not cat:
-        raise HTTPException(status_code=404, detail="Catalog entry không tồn tại.")
+        raise HTTPException(status_code=404, detail="Catalog entry not found.")
 
     if body.name is not None:
         cat.name = body.name

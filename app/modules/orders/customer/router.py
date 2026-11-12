@@ -54,28 +54,28 @@ def compute_delivery_status(order: Order, mission: Optional[Mission]) -> tuple[s
     Được dùng bởi dashboard/customer và tracking endpoint.
     """
     if order.status == OrderStatus.CANCELLED:
-        return "CANCELLED", "Đã hủy"
+        return "CANCELLED", "Cancelled"
     if mission is None:
         if order.status == OrderStatus.AWAITING_DROP_OFF:
-            return "AWAITING_DROP_OFF", "Chờ mang hàng đến Hub"
+            return "AWAITING_DROP_OFF", "Awaiting Hub Drop-off"
         if order.status == OrderStatus.AT_HUB:
-            return "AT_HUB", "Đã nhận tại Hub, chờ lên lịch bay"
+            return "AT_HUB", "Received at Hub, Awaiting Flight Schedule"
         if order.payment_status == PaymentStatus.PAID:
-            return "PAID", "Đã thanh toán, chờ gửi hàng"
-        return "PENDING", "Chờ xử lý"
+            return "PAID", "Paid, Awaiting Drop-off"
+        return "PENDING", "Pending"
     
     ms_str = (mission.status.value if hasattr(mission.status, "value") else str(mission.status or "")).upper()
     if mission.arrival_confirmed_at is not None or ms_str in ("MISSION_COMPLETED", "COMPLETED"):
-        return "DELIVERED", "Đã giao"
+        return "DELIVERED", "Delivered"
     if mission.arrived_at is not None:
-        return "ARRIVED_AT_HUB", "Đã tới hub đích, chờ nhận"
+        return "ARRIVED_AT_HUB", "Arrived at Destination Hub, Ready for Pickup"
     if ms_str in ("FLYING", "IN_PROGRESS", "ACTIVE_MISSION"):
-        return "IN_DELIVERY", "Đang giao"
+        return "IN_DELIVERY", "In Delivery"
     if ms_str in ("SCHEDULED", "APPROVED", "PENDING_APPROVAL"):
-        return "SCHEDULED", "Đã lên lịch"
+        return "SCHEDULED", "Scheduled"
     if ms_str in ("CANCELLED", "REJECTED", "FAILED"):
-        return "CANCELLED", "Đã hủy"
-    return "PROCESSING", "Đang xử lý"
+        return "CANCELLED", "Cancelled"
+    return "PROCESSING", "Processing"
 
 
 def calculate_delivery_cost(
@@ -285,7 +285,7 @@ async def create_order(
         order_aging_deadline = window_end - timedelta(hours=1)
     else:  # SCHEDULED
         if not req_at_naive:
-            raise HTTPException(status_code=400, detail="requested_delivery_at là bắt buộc cho chế độ SCHEDULED.")
+            raise HTTPException(status_code=400, detail="requested_delivery_at is required for SCHEDULED mode.")
         window_start = req_at_naive + extra_wait_td
         window_end   = req_at_naive + timedelta(minutes=flight_mins + 15) + extra_wait_td
         order_aging_deadline = None
@@ -331,11 +331,11 @@ async def create_order(
         # 1. Thông báo cho Customer xác nhận tạo đơn thành công kèm thời gian
         db.add(_Notif(
             user_id=str(current_user.id),
-            title=f"✅ Tạo đơn hàng #{new_order.id} thành công",
+            title=f"✅ Order #{new_order.id} Created Successfully",
             message=(
-                f"Đơn hàng #{new_order.id} ({body.package_label or 'Kiện hàng'}, {body.payload_kg} kg) "
-                f"được tạo lúc {_time_str}. Tuyến: {origin_hub.name} -> {dest_hub.name}. "
-                f"Vui lòng tiến hành thanh toán để tiếp tục."
+                f"Order #{new_order.id} ({body.package_label or 'Package'}, {body.payload_kg} kg) "
+                f"was created at {_time_str}. Route: {origin_hub.name} -> {dest_hub.name}. "
+                f"Please proceed with payment to continue."
             ),
             notifications_type=_NT.MISSION_STATUS,
             reference_id=f"ORDER_CREATED_{new_order.id}",
@@ -349,12 +349,12 @@ async def create_order(
             for _op_id in _ops:
                 db.add(_Notif(
                     user_id=_op_id,
-                    title=f"📦 Đơn hàng mới #{new_order.id}",
+                    title=f"📦 New Order #{new_order.id}",
                     message=(
-                        f"Khách hàng vừa đặt đơn #{new_order.id} lúc {_time_str} "
+                        f"Customer placed order #{new_order.id} at {_time_str} "
                         f"({_mode_str}, {body.payload_kg} kg). "
                         f"ETA: {window_end.strftime('%H:%M %d/%m') if window_end else 'N/A'}. "
-                        f"Đơn đang chờ khách thanh toán và mang hàng đến Hub."
+                        f"Order is awaiting customer payment and hub drop-off."
                     ),
                     notifications_type=_NT.MISSION_STATUS,
                     reference_id=f"NEW_ORDER_{new_order.id}",
@@ -464,18 +464,18 @@ async def delete_order(
         raise HTTPException(status_code=404, detail="Order not found")
 
     if str(order.customer_id) != str(current_user.id):
-        raise HTTPException(status_code=403, detail="Không có quyền xóa đơn hàng này")
+        raise HTTPException(status_code=403, detail="You do not have permission to delete this order")
 
     if order.payment_status == PaymentStatus.PAID:
         raise HTTPException(
             status_code=400,
-            detail="Đơn hàng đã thanh toán, không thể xóa. Liên hệ operator nếu muốn hủy."
+            detail="Paid orders cannot be deleted. Contact an operator to cancel."
         )
 
     if order.status != OrderStatus.PENDING:
         raise HTTPException(
             status_code=400,
-            detail=f"Không thể xóa đơn hàng đang ở trạng thái '{order.status.value}'. Chỉ xóa được khi PENDING."
+            detail=f"Cannot delete order in '{order.status.value}' status. Only PENDING orders can be deleted."
         )
 
     # Kiểm tra đã có Mission chưa
@@ -485,7 +485,7 @@ async def delete_order(
     if mission_result.scalars().first():
         raise HTTPException(
             status_code=400,
-            detail="Đơn hàng đã được tạo mission, không thể xóa. Liên hệ operator để hủy."
+            detail="A mission has already been created for this order, so it cannot be deleted. Contact an operator to cancel."
         )
 
     await db.delete(order)
@@ -495,7 +495,7 @@ async def delete_order(
         await db.rollback()
         raise HTTPException(
             status_code=400,
-            detail="Không thể xóa đơn hàng do còn dữ liệu liên quan. Liên hệ operator để hủy."
+            detail="Cannot delete order due to linked records. Contact an operator to cancel."
         )
 
 
@@ -558,48 +558,48 @@ async def track_delivery(
     timeline_steps = [
         TrackingTimelineStepSchema(
             step_key="ORDER_CREATED",
-            label="Tạo đơn hàng",
+            label="Order Created",
             completed=order.created_at is not None,
             timestamp=order.created_at,
-            description="Đơn hàng đã được khởi tạo trên hệ thống",
+            description="Order has been initialized in the system",
         ),
         TrackingTimelineStepSchema(
             step_key="PAYMENT_CONFIRMED",
-            label="Thanh toán thành công",
+            label="Payment Confirmed",
             completed=(order.payment_status == PaymentStatus.PAID or order.paid_at is not None),
             timestamp=order.paid_at,
-            description="Đã xác nhận thanh toán cước vận chuyển",
+            description="Shipping fee payment has been confirmed",
         ),
         TrackingTimelineStepSchema(
             step_key="PACKAGE_RECEIVED",
-            label="Tiếp nhận kiện hàng tại Hub gửi",
+            label="Package Received at Origin Hub",
             completed=(
                 order.origin_received_at is not None
                 or order.status in (OrderStatus.AT_HUB, OrderStatus.IN_DELIVERY, OrderStatus.DELIVERED_TO_HUB)
             ),
             timestamp=order.origin_received_at,
-            description="Kỹ thuật viên tại Hub gửi đã kiểm tra và nhận kiện hàng",
+            description="Origin Hub technician has inspected and received the package",
         ),
         TrackingTimelineStepSchema(
             step_key="IN_FLIGHT",
-            label="Drone cất cánh vận chuyển",
+            label="Drone Departed for Delivery",
             completed=(dep_at is not None),
             timestamp=dep_at,
-            description="Drone đang trên hành trình vận chuyển kiện hàng",
+            description="Drone is currently en route delivering the package",
         ),
         TrackingTimelineStepSchema(
             step_key="ARRIVED_AT_HUB",
-            label="Drone hạ cánh tại Hub đích",
+            label="Drone Landed at Destination Hub",
             completed=(arr_at is not None),
             timestamp=arr_at,
-            description="Drone đã hạ cánh xuống trạm đích",
+            description="Drone has landed at the destination hub",
         ),
         TrackingTimelineStepSchema(
             step_key="DELIVERED",
-            label="Hoàn tất giao hàng tại Hub",
+            label="Delivered at Hub",
             completed=(deliv_at is not None or conf_at is not None or order.status == OrderStatus.DELIVERED_TO_HUB),
             timestamp=deliv_at,
-            description="Hàng đã sẵn sàng để người nhận đến lấy tại Hub đích",
+            description="Package is ready for recipient pickup at the destination hub",
         ),
     ]
 

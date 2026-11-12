@@ -181,11 +181,11 @@ def predict_flight_energy(
 
     # Đóng gói AI Explanation
     speed_impact_desc = (
-        f"Lực cản khí động học ở tốc độ cao ({safe_speed:.1f} m/s) làm tăng tiêu thụ năng lượng thêm +{shap_speed:.1f} Wh"
+        f"Aerodynamic drag at high speed ({safe_speed:.1f} m/s) increases energy consumption by +{shap_speed:.1f} Wh"
         if shap_speed > 0
-        else "Vận tốc bay kinh tế (10.0 m/s) giúp tối ưu hóa hiệu suất năng lượng, không phát sinh hao phí lực cản"
+        else "Eco cruise speed (10.0 m/s) optimizes energy efficiency with no excess drag penalty"
     )
-    wind_impact_desc = "Gió xuôi hỗ trợ tiết kiệm pin" if shap_wind <= 0 else "Gió ngược làm tăng lực cản di chuyển"
+    wind_impact_desc = "Tailwind assists flight and saves battery" if shap_wind <= 0 else "Headwind increases aerodynamic drag"
 
     ai_explanation = {
         "flight_speed_mps": safe_speed,
@@ -195,36 +195,36 @@ def predict_flight_energy(
         "feature_contributions": [
             {
                 "feature": "speed",
-                "label": "Vận tốc bay (Flight Speed)",
+                "label": "Flight Speed",
                 "value": f"{safe_speed:.1f} m/s ({safe_speed * 3.6:.1f} km/h)",
                 "shap_contribution_wh": shap_speed,
                 "impact": speed_impact_desc
             },
             {
                 "feature": "altitude",
-                "label": "Độ cao bay (Altitude)",
+                "label": "Flight Altitude",
                 "value": f"{safe_alt:.0f} m",
                 "shap_contribution_wh": shap_alt,
-                "impact": f"Tầng bay {safe_alt:.0f}m {'tăng tiêu thụ leo cao +' + str(shap_alt) + ' Wh' if shap_alt > 0 else 'tối ưu tầng bay thấp'}"
+                "impact": f"Cruise altitude {safe_alt:.0f}m {'increases climb energy by +' + str(shap_alt) + ' Wh' if shap_alt > 0 else 'optimizes low-altitude flight'}"
             },
             {
                 "feature": "distance",
-                "label": "Cự ly hành trình (Distance)",
+                "label": "Route Distance",
                 "value": f"{dist_km:.2f} km",
                 "shap_contribution_wh": shap_dist,
-                "impact": f"Khoảng cách bay đóng góp {shap_dist:.1f} Wh vào năng lượng tiêu thụ cơ bản"
+                "impact": f"Flight distance contributes {shap_dist:.1f} Wh to baseline energy consumption"
             },
             {
                 "feature": "payload",
-                "label": "Tải trọng hàng hóa (Payload)",
+                "label": "Cargo Payload",
                 "value": f"{payload_kg:.2f} kg",
                 "shap_contribution_wh": shap_payload,
-                "impact": f"Tải trọng hàng hóa làm tăng công suất nâng động cơ thêm +{shap_payload:.1f} Wh"
+                "impact": f"Cargo payload increases motor lift power demand by +{shap_payload:.1f} Wh"
             },
             {
                 "feature": "wind",
-                "label": "Điều kiện đón gió (Wind Effect)",
-                "value": f"{wind_spd:.1f} m/s (góc {rel_angle:.0f}°)",
+                "label": "Wind Effect",
+                "value": f"{wind_spd:.1f} m/s (angle {rel_angle:.0f}°)",
                 "shap_contribution_wh": shap_wind,
                 "impact": wind_impact_desc
             }
@@ -238,13 +238,13 @@ def predict_flight_energy(
                 "energy_wh": energy_wh,
                 "speed_mps": safe_speed,
                 "speed_kmh": round(safe_speed * 3.6, 1),
-                "action": f"Bay hành trình {dist_km:.2f} km ở vận tốc {safe_speed:.1f} m/s (độ cao {safe_alt:.0f}m)",
+                "action": f"Cruise flight {dist_km:.2f} km at {safe_speed:.1f} m/s (altitude {safe_alt:.0f}m)",
             }
         ],
         "summary": (
-            f"Vận tốc bay {safe_speed:.1f} m/s ở độ cao {safe_alt:.0f}m "
-            f"{'làm tăng tiêu thụ +' + str(round(shap_speed + shap_alt, 1)) + ' Wh do lực cản không khí' if (shap_speed + shap_alt) > 0 else 'đạt điểm tối ưu năng lượng'} "
-            f"với cự ly {dist_km:.2f} km và tải trọng {payload_kg:.2f} kg."
+            f"Cruise speed {safe_speed:.1f} m/s at {safe_alt:.0f}m altitude "
+            f"{'increases energy consumption by +' + str(round(shap_speed + shap_alt, 1)) + ' Wh due to aerodynamic drag' if (shap_speed + shap_alt) > 0 else 'achieves optimal energy efficiency'} "
+            f"over {dist_km:.2f} km with a {payload_kg:.2f} kg payload."
         )
     }
 

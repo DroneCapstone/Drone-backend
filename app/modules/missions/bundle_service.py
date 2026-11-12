@@ -72,10 +72,10 @@ async def get_pre_analyze_bundle_candidates(
     clean_id = primary_order_id.strip()
     primary_order = await db.get(Order, clean_id)
     if not primary_order:
-        raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng '{primary_order_id}'")
+        raise HTTPException(status_code=404, detail=f"Order '{primary_order_id}' not found")
 
     if not primary_order.origin_hub_id or not primary_order.destination_hub_id:
-        raise HTTPException(status_code=400, detail="Đơn hàng thiếu thông tin Trạm xuất phát hoặc Trạm đích")
+        raise HTTPException(status_code=400, detail="Order is missing origin hub or destination hub information")
 
     origin_hub = await db.get(Hub, primary_order.origin_hub_id)
     dest_hub = await db.get(Hub, primary_order.destination_hub_id)
@@ -120,9 +120,9 @@ async def get_pre_analyze_bundle_candidates(
         "candidate_orders": candidates_data,
         "total_candidates": len(candidates_data),
         "drone_capacity_guidelines": [
-            {"tier": "Light", "name_prefix": "Swift", "max_payload_kg": 1.0, "note": "Phù hợp chở 1 đơn nhẹ"},
-            {"tier": "Medium", "name_prefix": "Falcon", "max_payload_kg": 5.0, "note": "Phù hợp gộp 2 - 4 đơn"},
-            {"tier": "Heavy", "name_prefix": "Eagle", "max_payload_kg": 10.0, "note": "Phù hợp gộp nhiều đơn lớn"},
+            {"tier": "Light", "name_prefix": "Swift", "max_payload_kg": 1.0, "note": "Suitable for 1 lightweight order"},
+            {"tier": "Medium", "name_prefix": "Falcon", "max_payload_kg": 5.0, "note": "Suitable for bundling 2–4 orders"},
+            {"tier": "Heavy", "name_prefix": "Eagle", "max_payload_kg": 10.0, "note": "Suitable for bundling multiple heavy orders"},
         ]
     }
 
@@ -141,7 +141,7 @@ async def validate_bundle_orders(
     """
     clean_ids = list(dict.fromkeys([str(oid).strip() for oid in order_ids if str(oid).strip()]))
     if not clean_ids:
-        raise HTTPException(status_code=400, detail="Danh sách đơn hàng gộp không được rỗng")
+        raise HTTPException(status_code=400, detail="Bundled order list cannot be empty")
 
     active_order_ids = await get_active_mission_order_ids(db)
     orders: list[Order] = []
@@ -154,16 +154,16 @@ async def validate_bundle_orders(
     for oid in clean_ids:
         o = await db.get(Order, oid)
         if not o:
-            raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng #{oid}")
+            raise HTTPException(status_code=404, detail=f"Order #{oid} not found")
 
         if strict_payment and o.payment_status != PaymentStatus.PAID:
-            raise HTTPException(status_code=400, detail=f"Đơn hàng #{oid} chưa được thanh toán (PAID)")
+            raise HTTPException(status_code=400, detail=f"Order #{oid} has not been paid (PAID)")
 
         if o.status != OrderStatus.AT_HUB:
-            raise HTTPException(status_code=400, detail=f"Đơn hàng #{oid} chưa ở trạng thái sẵn sàng tại trạm (AT_HUB)")
+            raise HTTPException(status_code=400, detail=f"Order #{oid} is not yet ready at the hub (AT_HUB)")
 
         if o.id in active_order_ids:
-            raise HTTPException(status_code=400, detail=f"Đơn hàng #{oid} hiện đã có nhiệm vụ bay đang thực hiện")
+            raise HTTPException(status_code=400, detail=f"Order #{oid} already has an active flight mission")
 
         if ref_origin is None:
             ref_origin = o.origin_hub_id
@@ -172,7 +172,7 @@ async def validate_bundle_orders(
             if o.origin_hub_id != ref_origin or o.destination_hub_id != ref_dest:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Đơn hàng #{oid} có tuyến (Hub #{o.origin_hub_id} -> #{o.destination_hub_id}) không khớp với các đơn khác trong gói (Hub #{ref_origin} -> #{ref_dest})"
+                    detail=f"Order #{oid} route (Hub #{o.origin_hub_id} -> #{o.destination_hub_id}) does not match the other orders in the bundle (Hub #{ref_origin} -> #{ref_dest})"
                 )
 
         payload = float(o.payload_kg or 0.0)
@@ -188,7 +188,7 @@ async def validate_bundle_orders(
     drone_capacity_kg = None
     remaining_capacity_kg = None
     is_valid = True
-    validation_message = "Tập đơn hàng hợp lệ để gộp chuyến bay."
+    validation_message = "Order bundle is valid for flight consolidation."
 
     if drone_id is not None:
         clean_drone_id = str(drone_id).strip()
@@ -198,7 +198,7 @@ async def validate_bundle_orders(
             drone_obj = await db.get(Drone, alt_id)
 
         if not drone_obj:
-            raise HTTPException(status_code=404, detail=f"Không tìm thấy Drone '{drone_id}'")
+            raise HTTPException(status_code=404, detail=f"Drone '{drone_id}' not found")
 
         drone_capacity_kg = float(drone_obj.payload_capacity_kg or 0.0)
         remaining_capacity_kg = round(drone_capacity_kg - total_payload_kg, 2)
@@ -206,8 +206,8 @@ async def validate_bundle_orders(
         if total_payload_kg > drone_capacity_kg:
             is_valid = False
             validation_message = (
-                f"Tổng tải trọng ({total_payload_kg} kg) vượt quá sức chở của Drone "
-                f"#{drone_obj.id} ({drone_obj.name}: {drone_capacity_kg} kg). Vui lòng chọn Drone lớn hơn hoặc bỏ bớt đơn."
+                f"Total payload ({total_payload_kg} kg) exceeds the capacity of Drone "
+                f"#{drone_obj.id} ({drone_obj.name}: {drone_capacity_kg} kg). Please select a larger drone or remove some orders."
             )
 
     return {
@@ -259,7 +259,7 @@ async def get_post_analyze_bundle_candidates(
     clean_order_id = str(primary_order_id).strip()
     primary_order = await db.get(Order, clean_order_id)
     if not primary_order:
-        raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng '{primary_order_id}'")
+        raise HTTPException(status_code=404, detail=f"Order '{primary_order_id}' not found")
 
     clean_drone_id = str(drone_id).strip()
     drone_obj = await db.get(Drone, clean_drone_id)
@@ -268,7 +268,7 @@ async def get_post_analyze_bundle_candidates(
         drone_obj = await db.get(Drone, alt_id)
 
     if not drone_obj:
-        raise HTTPException(status_code=404, detail=f"Không tìm thấy Drone '{drone_id}'")
+        raise HTTPException(status_code=404, detail=f"Drone '{drone_id}' not found")
 
     primary_payload = float(primary_order.payload_kg or 0.0)
     drone_capacity = float(drone_obj.payload_capacity_kg or 0.0)
