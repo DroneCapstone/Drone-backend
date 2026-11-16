@@ -398,13 +398,13 @@ Yêu cầu thay thế pin hoặc linh kiện từ Technician (được Admin c�
 | id | BIGSERIAL | **PK**, Non-nullable |
 | requested_by | VARCHAR | Non-nullable |
 | hub_id | INTEGER | **FK** (`hubs.id`), Non-nullable |
-| type | VARCHAR | Non-nullable (`replacement_type_enum`: BATTERY, PART) |
+| type | VARCHAR | Non-nullable (`replacement_type_enum`: BATTERY, PART; `create_type=False`) |
 | damaged_item_id | VARCHAR | Nullable |
 | part_category_id | BIGINT | **FK** (`part_categories.id`), Nullable |
 | quantity | INTEGER | Non-nullable, Default `1` |
 | reason | TEXT | Non-nullable |
 | photo_urls | JSONB | Nullable |
-| status | VARCHAR | Non-nullable (`replacement_status_enum`: AWAITING_SUPPLY, SUPPLIED, REJECTED) |
+| status | VARCHAR | Non-nullable (`replacement_status_enum`: AWAITING_SUPPLY, SUPPLIED, REJECTED; `create_type=False`) |
 | reviewed_by | VARCHAR | Nullable |
 | reviewed_at | TIMESTAMPTZ | Nullable |
 | rejection_reason | TEXT | Nullable |
