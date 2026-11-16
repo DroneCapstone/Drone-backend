@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text, cast, String, and_
+from sqlalchemy import select, text, cast, String, and_, func
 
 from app.core.timezone import get_vn_naive_datetime, get_vn_datetime
 
@@ -920,18 +920,26 @@ async def get_drone_flight_history(
     )
     
     result = await db.execute(query)
+    rows = result.fetchall()
+    # [PERF NOTE] Đếm số chặng của toàn bộ missions bằng 1 câu GROUP BY thay vì query N+1 trong vòng lặp.
+    mission_ids = [r.mission_id for r in rows if r.mission_id is not None]
+    legs_count_map: dict[str, int] = {}
+    if mission_ids:
+        lc_res = await db.execute(
+            select(MissionLeg.mission_id, func.count(MissionLeg.id))
+            .where(MissionLeg.mission_id.in_(mission_ids))
+            .group_by(MissionLeg.mission_id)
+        )
+        legs_count_map = {mid: int(cnt) for mid, cnt in lc_res.all()}
+
     flights = []
-    for row in result.fetchall():
+    for row in rows:
         duration_min = None
         if row.started_at and row.arrived_at:
             duration = row.arrived_at - row.started_at
             duration_min = int(duration.total_seconds() / 60)
-        
-        # Kiểm tra số lượng legs để xác định chuyến bay trung gian
-        legs_count_res = await db.execute(
-            select(MissionLeg).where(MissionLeg.mission_id == row.mission_id)
-        )
-        legs_count = len(legs_count_res.scalars().all())
+
+        legs_count = legs_count_map.get(row.mission_id, 0)
         is_relay_mission = legs_count > 1  # Nếu > 1 leg → là chuyến bay trung gian
         
         flights.append({
@@ -1440,10 +1448,17 @@ async def get_hub_inventory_for_work_order(
     result = await db.execute(query)
     hub_inventories = result.scalars().all()
     
+    # [PERF NOTE] Nạp toàn bộ PartCategory trong 1 query IN (...), cấm await db.get(PartCategory, ...) trong vòng lặp.
+    cat_ids = {hi.part_category_id for hi in hub_inventories if hi.part_category_id is not None}
+    part_cats_map: dict[int, PartCategory] = {}
+    if cat_ids:
+        cats_res = await db.execute(select(PartCategory).where(PartCategory.id.in_(cat_ids)))
+        part_cats_map = {pc.id: pc for pc in cats_res.scalars().all()}
+
     # Map sang HubInventoryDetailedResponse (include thông tin PartCategory)
     response = []
     for hi in hub_inventories:
-        part_cat = await db.get(PartCategory, hi.part_category_id)
+        part_cat = part_cats_map.get(hi.part_category_id)
         response.append({
             "id": hi.id,
             "hub_id": hi.hub_id,
@@ -1573,24 +1588,29 @@ async def create_work_order(
             if alert:
                 alert.work_order_id = wo.id
 
-    # Xử lý parts_replaced: cập nhật HubInventory (trừ số lượng)
+    # [PERF NOTE] Nạp HubInventory theo lô IN (...), tránh N+1 query theo từng linh kiện khi đóng work order.
     if body.parts_replaced:
+        part_cat_ids = {
+            item.get("part_category_id")
+            for item in body.parts_replaced
+            if item.get("part_category_id") is not None
+        }
+        inv_by_cat: dict[int, HubInventory] = {}
+        if part_cat_ids:
+            hub_inv_res = await db.execute(
+                select(HubInventory).where(
+                    HubInventory.hub_id == int(user.hub_id),
+                    HubInventory.part_category_id.in_(part_cat_ids),
+                )
+            )
+            inv_by_cat = {inv.part_category_id: inv for inv in hub_inv_res.scalars().all()}
+
         for part_item in body.parts_replaced:
             part_category_id = part_item.get("part_category_id")
             quantity = part_item.get("quantity", 1)
-            
             if part_category_id:
-                # Tìm HubInventory cho hub của technician
-                hub_inventory_res = await db.execute(
-                    select(HubInventory)
-                    .where(
-                        HubInventory.hub_id == int(user.hub_id),
-                        HubInventory.part_category_id == part_category_id
-                    )
-                )
-                hub_inv = hub_inventory_res.scalar_one_or_none()
+                hub_inv = inv_by_cat.get(part_category_id)
                 if hub_inv:
-                    # Trừ số lượng từ kho
                     hub_inv.quantity = max(0, hub_inv.quantity - quantity)
     
     # Lưu parts_replaced vào work order (nếu cột tồn tại trong model)

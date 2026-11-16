@@ -9,8 +9,8 @@ import math
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database.db import get_async_db
-from app.modules.system.models import Hub
-from app.modules.ai_predictions.service import predict_flight_energy, haversine_distance
+from app.modules.ai_predictions.service import haversine_distance
+from app.modules.missions.bundle_service import get_all_hubs_cached, predict_flight_energy_cached
 
 router = APIRouter(prefix="/ai", tags=["AI Predictions"])
 
@@ -46,12 +46,9 @@ async def predict_energy(request: RouteEnergyRequest, db: AsyncSession = Depends
         4. Chuyền khoảng cách và payload vào core service `predict_flight_energy` (dùng chung với Operator).
         5. Trả về danh sách gợi ý lộ trình kèm giá trị SHAP để giải thích lý do tốn pin (do gió, do tải trọng...).
     """
-    result = await db.execute(select(Hub).where(Hub.status == "ACTIVE"))
-    hubs = result.scalars().all()
-    
-    if not hubs:
-        result = await db.execute(select(Hub))
-        hubs = result.scalars().all()
+    # [PERF NOTE] Dùng get_all_hubs_cached + predict_flight_energy_cached để tránh query lại Hub và gọi model ML lặp lại.
+    all_hubs = await get_all_hubs_cached(db)
+    hubs = [h for h in all_hubs if str(h.status or "").upper() == "ACTIVE"] or all_hubs
         
     if not hubs:
         raise HTTPException(status_code=400, detail="No Hubs found in the database.")
@@ -67,7 +64,7 @@ async def predict_energy(request: RouteEnergyRequest, db: AsyncSession = Depends
         time_shift_minutes = random.randint(-60, 60)
         optimal_departure = base_time - timedelta(minutes=time_shift_minutes) - timedelta(minutes=distance * 2) 
         
-        prediction_result = predict_flight_energy(distance, request.payload_weight)
+        prediction_result = predict_flight_energy_cached(distance, request.payload_weight)
         energy_wh = prediction_result["energy_wh"]
         shap_vals = prediction_result["shap_values"]
         

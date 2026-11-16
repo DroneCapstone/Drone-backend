@@ -1008,17 +1008,33 @@ async def bulk_receive(
     for item in body.items:
         if item.quantity < 1:
             raise HTTPException(status_code=400, detail=f"Quantity for part #{item.part_category_id} must be >= 1.")
-        cat = await db.get(PartCategory, item.part_category_id)
+
+    # [PERF NOTE] Nạp batch PartCategory và HubSupply theo IN (...) trước vòng lặp để tránh 2*N roundtrip tới DB.
+    item_cat_ids = {item.part_category_id for item in body.items}
+    cats_by_id = {
+        c.id: c
+        for c in (await db.execute(select(PartCategory).where(PartCategory.id.in_(item_cat_ids)))).scalars().all()
+    }
+    supply_by_cat = {
+        inv.part_category_id: inv
+        for inv in (
+            await db.execute(
+                select(HubSupply).where(
+                    and_(
+                        HubSupply.hub_id == hub_id,
+                        HubSupply.part_category_id.in_(item_cat_ids),
+                    )
+                )
+            )
+        ).scalars().all()
+    }
+
+    for item in body.items:
+        cat = cats_by_id.get(item.part_category_id)
         if not cat:
             raise HTTPException(status_code=404, detail=f"Category #{item.part_category_id} not found.")
 
-        inv = (await db.execute(
-            select(HubSupply).where(and_(
-                HubSupply.hub_id == hub_id,
-                HubSupply.part_category_id == item.part_category_id,
-            ))
-        )).scalar_one_or_none()
-
+        inv = supply_by_cat.get(item.part_category_id)
         if inv:
             inv.quantity += item.quantity
             inv.updated_at = now
@@ -1028,6 +1044,7 @@ async def bulk_receive(
                 quantity=item.quantity, min_stock_threshold=2, updated_at=now,
             )
             db.add(inv)
+            supply_by_cat[item.part_category_id] = inv
 
         unit_cost = item.unit_cost_override or cat.unit_cost or 0
         line_cost = unit_cost * item.quantity

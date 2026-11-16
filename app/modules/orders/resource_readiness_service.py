@@ -2,8 +2,9 @@ import math
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, exists
 
+from app.modules.missions.bundle_service import get_all_hubs_cached
 from app.modules.system.models import Hub
 from app.modules.fleet.models import Drone, DroneStatus, Battery, batteries_status
 from app.modules.missions.models import Order, OrderStatus, Mission, MissionStatus
@@ -32,19 +33,23 @@ async def evaluate_hub_resource_readiness(
     - Tình trạng sạc pin tại Hub (T_charge)
     - Tình trạng máy bay tại Hub hoặc điều phối Cross-Hub (T_dispatch)
     - Phản hồi thông điệp trực quan và tự động bù thời gian vào ETA giao hàng cho Khách hàng.
+    [PERF NOTE] Dùng get_all_hubs_cached, COUNT SQL với ~exists() và chỉ select các cột cần thiết của Drone/Battery
+    để tránh kéo full ORM rows qua Supabase mỗi lần Customer Estimate / Create Order.
     """
-    origin_hub = await db.get(Hub, origin_hub_id)
-    dest_hub = await db.get(Hub, destination_hub_id)
+    hub_map = {h.id: h for h in await get_all_hubs_cached(db)}
+    origin_hub = hub_map.get(origin_hub_id)
 
-    # 1. Đánh giá tải trọng so với phi đội Drone
-    res_drones = await db.execute(select(Drone))
-    all_drones = res_drones.scalars().all()
+    # 1. Đánh giá tải trọng so với phi đội Drone (chỉ select cột cần dùng)
+    res_drones = await db.execute(
+        select(Drone.id, Drone.current_hub_id, Drone.status, Drone.payload_capacity_kg)
+    )
+    all_drones = res_drones.all()
     max_payload = max([d.payload_capacity_kg for d in all_drones] or [10.0])
 
     is_payload_supported = payload_kg <= max_payload
     suggested_tier = "Light (Swift)" if payload_kg <= 1.0 else ("Medium (Falcon)" if payload_kg <= 5.0 else "Heavy (Eagle)")
 
-    # 2. Đánh giá hàng chờ đơn tại Trạm gửi (T_queue)
+    # 2. Đánh giá hàng chờ đơn tại Trạm gửi (T_queue) bằng 1 câu SQL COUNT duy nhất
     active_mission_statuses = [
         MissionStatus.SCHEDULED,
         MissionStatus.IN_PROGRESS,
@@ -52,44 +57,45 @@ async def evaluate_hub_resource_readiness(
         MissionStatus.FLYING,
         MissionStatus.ACTIVE_MISSION,
     ]
-    res_active_missions = await db.execute(
-        select(Mission.order_id).where(
+    has_active_mission = exists(
+        select(Mission.id).where(
+            Mission.order_id == Order.id,
             Mission.status.in_(active_mission_statuses),
-            Mission.order_id.isnot(None)
         )
     )
-    busy_order_ids = set(res_active_missions.scalars().all())
-
-    res_orders = await db.execute(
-        select(Order).where(
-            Order.origin_hub_id == origin_hub_id,
-            Order.status.in_([OrderStatus.PENDING, OrderStatus.AT_HUB]),
-        )
+    waiting_orders_count = int(
+        (
+            await db.execute(
+                select(func.count(Order.id)).where(
+                    Order.origin_hub_id == origin_hub_id,
+                    Order.status.in_([OrderStatus.PENDING, OrderStatus.AT_HUB]),
+                    ~has_active_mission,
+                )
+            )
+        ).scalar_one()
+        or 0
     )
-    waiting_orders = [o for o in res_orders.scalars().all() if o.id not in busy_order_ids]
-    waiting_orders_count = len(waiting_orders)
     queue_wait_minutes = waiting_orders_count * MINUTES_PER_WAITING_ORDER
 
     # 3. Đánh giá tình trạng Pin tại Trạm gửi (T_charge)
     res_bats = await db.execute(
-        select(Battery).where(
+        select(Battery.charge_level_pct).where(
             Battery.current_hub_id == origin_hub_id,
             Battery.status == batteries_status.ACTIVE,
         )
     )
-    hub_batteries = res_bats.scalars().all()
+    bat_charges = [pct if pct is not None else 0 for pct in res_bats.scalars().all()]
 
-    # Lấy pin chưa gắn trên Drone nào hoặc gắn trên drone rảnh
-    ready_bats = [b for b in hub_batteries if (b.charge_level_pct or 0) >= MIN_BATTERY_READY_PCT]
+    ready_count = sum(1 for pct in bat_charges if pct >= MIN_BATTERY_READY_PCT)
     charge_wait_minutes = 0
     highest_charge_pct = 0
     battery_readiness = "READY"
 
-    if len(ready_bats) > 0:
+    if ready_count > 0:
         charge_wait_minutes = 0
         battery_readiness = "READY"
-    elif len(hub_batteries) > 0:
-        highest_charge_pct = max([b.charge_level_pct or 0 for b in hub_batteries] or [0])
+    elif len(bat_charges) > 0:
+        highest_charge_pct = max(bat_charges)
         needed_pct = max(0, MIN_BATTERY_READY_PCT - highest_charge_pct)
         charge_wait_minutes = math.ceil(needed_pct / CHARGING_RATE_PCT_PER_MIN)
         battery_readiness = "CHARGING"

@@ -9,7 +9,9 @@ Open-Meteo:
 - Docs: https://open-meteo.com/en/docs
 """
 
+import asyncio
 import time
+import weakref
 import httpx
 from typing import Optional
 from dataclasses import dataclass
@@ -32,8 +34,20 @@ class WeatherData:
 
 
 # In-memory cache 5 phút theo tọa độ (lat, lng) làm tròn 2 chữ số thập phân (~1.1 km)
+# [PERF NOTE] Giữ nguyên cache 300s + pooled AsyncClient + in-flight deduplication; không gọi HTTP thời tiết không cache trong vòng lặp Dijkstra/telemetry.
 _WEATHER_CACHE: dict[tuple[float, float], tuple[float, WeatherData]] = {}
 _WEATHER_CACHE_TTL_SEC = 300.0
+_WEATHER_CLIENTS_BY_LOOP: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = weakref.WeakKeyDictionary()
+_WEATHER_INFLIGHT_BY_LOOP: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[float, float], asyncio.Future]] = weakref.WeakKeyDictionary()
+
+
+def _get_weather_async_client() -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    client = _WEATHER_CLIENTS_BY_LOOP.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(timeout=3.0)
+        _WEATHER_CLIENTS_BY_LOOP[loop] = client
+    return client
 
 
 # WMO weather code → mô tả ngắn gọn
@@ -83,6 +97,18 @@ async def fetch_weather(lat: float, lng: float, use_cache: bool = True) -> Optio
         if (now_mono - cached_at) <= _WEATHER_CACHE_TTL_SEC:
             return cached_data
 
+    loop = asyncio.get_running_loop()
+    inflight_map = _WEATHER_INFLIGHT_BY_LOOP.setdefault(loop, {})
+    if use_cache and cache_key in inflight_map:
+        try:
+            return await asyncio.shield(inflight_map[cache_key])
+        except Exception:
+            return None
+
+    fut = loop.create_future() if use_cache else None
+    if fut is not None:
+        inflight_map[cache_key] = fut
+
     url = (
         f"https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lng}"
@@ -94,33 +120,42 @@ async def fetch_weather(lat: float, lng: float, use_cache: bool = True) -> Optio
     )
 
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                return None
+        client = _get_weather_async_client()
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            if fut is not None and not fut.done():
+                fut.set_result(None)
+            return None
 
-            data = resp.json().get("current", {})
-            w_code = data.get("weather_code")
-            cond_label = weather_description(int(w_code)) if w_code is not None else "Clear sky"
-            w_obj = WeatherData(
-                temperature=data.get("temperature_2m"),
-                apparent_temperature=data.get("apparent_temperature"),
-                dew_point=data.get("dew_point_2m"),
-                humidity=data.get("relative_humidity_2m"),
-                wind_speed=data.get("wind_speed_10m"),
-                wind_gust=data.get("wind_gusts_10m"),
-                wind_direction=data.get("wind_direction_10m"),
-                precipitation=data.get("precipitation"),
-                pressure=data.get("surface_pressure"),
-                cloud_cover=data.get("cloud_cover"),
-                weather_code=int(w_code) if w_code is not None else None,
-                condition_label=cond_label,
-            )
-            _WEATHER_CACHE[cache_key] = (now_mono, w_obj)
-            return w_obj
+        data = resp.json().get("current", {})
+        w_code = data.get("weather_code")
+        cond_label = weather_description(int(w_code)) if w_code is not None else "Clear sky"
+        w_obj = WeatherData(
+            temperature=data.get("temperature_2m"),
+            apparent_temperature=data.get("apparent_temperature"),
+            dew_point=data.get("dew_point_2m"),
+            humidity=data.get("relative_humidity_2m"),
+            wind_speed=data.get("wind_speed_10m"),
+            wind_gust=data.get("wind_gusts_10m"),
+            wind_direction=data.get("wind_direction_10m"),
+            precipitation=data.get("precipitation"),
+            pressure=data.get("surface_pressure"),
+            cloud_cover=data.get("cloud_cover"),
+            weather_code=int(w_code) if w_code is not None else None,
+            condition_label=cond_label,
+        )
+        _WEATHER_CACHE[cache_key] = (time.monotonic(), w_obj)
+        if fut is not None and not fut.done():
+            fut.set_result(w_obj)
+        return w_obj
 
     except Exception:
+        if fut is not None and not fut.done():
+            fut.set_result(None)
         return None
+    finally:
+        if fut is not None and inflight_map.get(cache_key) is fut:
+            inflight_map.pop(cache_key, None)
 
 
 def weather_to_override_dict(weather: Optional[WeatherData]) -> Optional[dict]:

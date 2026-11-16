@@ -40,7 +40,8 @@ from app.modules.orders.schemas import (
     ReportDroneSchema,
     ReportActualsSchema,
 )
-from app.modules.ai_predictions.service import predict_flight_energy, haversine_distance
+from app.modules.ai_predictions.service import haversine_distance
+from app.modules.missions.bundle_service import get_all_hubs_cached, predict_flight_energy_cached
 
 router = APIRouter(prefix="/customer", tags=["Orders"])
 
@@ -133,13 +134,13 @@ async def _latest_mission_for_order(db: AsyncSession, order_id: str) -> Optional
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/hubs", response_model=list[HubResponse])
 async def get_hubs(db: AsyncSession = Depends(get_async_db)):
-    """BE - GET /customer/hubs: Lấy danh sách các điểm giao nhận của hệ thống để khách hàng chọn."""
-    result = await db.execute(select(Hub).where(Hub.status == 'Active'))
-    hubs = result.scalars().all()
-    if not hubs:
-        result = await db.execute(select(Hub))
-        hubs = result.scalars().all()
-    return hubs
+    """
+    BE - GET /customer/hubs: Lấy danh sách các điểm giao nhận của hệ thống để khách hàng chọn.
+    [PERF NOTE] Dùng get_all_hubs_cached(db) thay vì query select(Hub) lặp lại trên DB remote.
+    """
+    all_hubs = await get_all_hubs_cached(db)
+    hubs = [h for h in all_hubs if str(h.status or "").lower() == "active"]
+    return hubs or all_hubs
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -154,8 +155,9 @@ async def estimate_order(
     if body.payload_kg <= 0 or body.payload_kg > 10.0:
         raise HTTPException(status_code=400, detail="Package weight must be between 0.1 kg and 10.0 kg (Size XL limit).")
 
-    origin_hub = await db.get(Hub, body.origin_hub_id)
-    dest_hub = await db.get(Hub, body.destination_hub_id)
+    hub_map = {h.id: h for h in await get_all_hubs_cached(db)}
+    origin_hub = hub_map.get(body.origin_hub_id)
+    dest_hub = hub_map.get(body.destination_hub_id)
     if not origin_hub or not dest_hub:
         raise HTTPException(status_code=404, detail="Hub not found")
 
@@ -163,7 +165,7 @@ async def estimate_order(
     lat2, lon2 = dest_hub.latitude or 0.0, dest_hub.longitude or 0.0
     dist_km = haversine_distance(lat1, lon1, lat2, lon2)
 
-    prediction = predict_flight_energy(dist_km, body.payload_kg)
+    prediction = predict_flight_energy_cached(dist_km, body.payload_kg)
     core_fee, service_fee, total_fee, fee_details = calculate_delivery_cost(
         dist_km=dist_km,
         payload_kg=body.payload_kg,
@@ -241,8 +243,9 @@ async def create_order(
     order_id = await generate_sequential_id(db, Order, "ORD")
     now = get_vn_naive_datetime()
 
-    origin_hub = await db.get(Hub, body.origin_hub_id)
-    dest_hub = await db.get(Hub, body.destination_hub_id)
+    hub_map = {h.id: h for h in await get_all_hubs_cached(db)}
+    origin_hub = hub_map.get(body.origin_hub_id)
+    dest_hub = hub_map.get(body.destination_hub_id)
     if not origin_hub or not dest_hub:
         raise HTTPException(status_code=404, detail="Hub not found")
 
@@ -647,7 +650,8 @@ async def track_delivery(
 
     hubs = {}
     if all_hub_ids:
-        hubs = {h.id: h for h in (await db.execute(select(Hub).where(Hub.id.in_(list(all_hub_ids))))).scalars().all()}
+        hub_map_all = {h.id: h for h in await get_all_hubs_cached(db)}
+        hubs = {hid: hub_map_all[hid] for hid in all_hub_ids if hid in hub_map_all}
         o_hub = hubs.get(order.origin_hub_id)
         d_hub = hubs.get(order.destination_hub_id)
         if o_hub and o_hub.latitude is not None and o_hub.longitude is not None:
@@ -798,7 +802,8 @@ async def get_mission_report(
     hub_ids = [i for i in (order.origin_hub_id, order.destination_hub_id) if i is not None]
     hubs = {}
     if hub_ids:
-        hubs = {h.id: h for h in (await db.execute(select(Hub).where(Hub.id.in_(hub_ids)))).scalars().all()}
+        hub_map_all = {h.id: h for h in await get_all_hubs_cached(db)}
+        hubs = {hid: hub_map_all[hid] for hid in hub_ids if hid in hub_map_all}
 
     def hub_schema(hub_id):
         h = hubs.get(hub_id)

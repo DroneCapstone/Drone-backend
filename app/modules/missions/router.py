@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -128,6 +129,8 @@ async def create_mission_request(user: CurrentUser = Depends(allow_operator_and_
 
 @router.get("/", response_model=list[MissionResponse])
 async def get_missions(
+    limit: Optional[int] = Query(None, ge=1, le=500, description="Giới hạn số mission trả về (mặc định trả tất cả để tương thích FE)"),
+    offset: int = Query(0, ge=0, description="Vị trí bắt đầu phân trang"),
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -136,14 +139,20 @@ async def get_missions(
     API này trả về danh sách toàn bộ nhiệm vụ được sắp xếp theo ID giảm dần,
     kèm theo chi tiết tuyến đường đã lên lịch (giống cấu trúc mission-planning/analyze).
     Yêu cầu người dùng phải đăng nhập.
+    [PERF NOTE] Hỗ trợ ?limit=&offset= khi dữ liệu lớn; mọi mapping chi tiết đi qua batch helper build_missions_response_list (cấm N+1).
     """
     from app.modules.missions.operator.router import build_missions_response_list
 
-    result = await db.execute(
+    stmt = (
         select(Mission)
         .where(Mission.status != MissionStatus.CANCELLED)
         .order_by(Mission.id.desc())
     )
+    if offset > 0:
+        stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    result = await db.execute(stmt)
     missions = result.scalars().all()
 
     return await build_missions_response_list(db, missions)
