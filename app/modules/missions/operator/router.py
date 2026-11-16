@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func
 from datetime import timedelta, datetime, timezone
-from typing import Optional, List, Union
+from typing import Any, Optional, List, Union
 import math
 import copy
+import time
 import asyncio
 
 from app.core.timezone import get_vn_naive_datetime, get_vn_datetime
@@ -37,6 +38,10 @@ from app.modules.missions.bundle_service import (
     validate_bundle_orders,
     get_post_analyze_bundle_candidates,
     resolve_effective_origin_hub_id,
+    predict_flight_energy_cached,
+    get_compatible_battery_models_map,
+    resolve_compatible_models_from_map,
+    get_all_hubs_cached,
 )
 from app.modules.fleet.models import Drone, Battery, DroneStatus, batteries_status
 from app.modules.fleet.schemas import CheckAvailabilityRequest, AvailabilityResponse, AvailableBatterySchema
@@ -44,6 +49,77 @@ from app.modules.fleet.schemas import CheckAvailabilityRequest, AvailabilityResp
 router = APIRouter(prefix="/operator/missions", tags=["Missions"])
 
 allow_operator = RoleChecker([UserRole.OPERATOR, UserRole.ADMIN])
+
+# [PERF NOTE] Bộ nhớ đệm ngắn hạn 120s giữ kết quả Route Analyze để nút Assign/Create Mission kế tiếp
+# tái sử dụng trực tiếp (hoặc đi Snapshot Fast-Path từ legs_detail) mà không chạy lại Dijkstra + thời tiết.
+_ROUTE_ANALYSIS_CACHE: dict[tuple, tuple[float, list, list]] = {}
+_ROUTE_ANALYSIS_CACHE_TTL_SEC = 120.0
+_ROUTE_ANALYSIS_CACHE_MAX = 128
+
+
+def _build_route_cache_key(
+    order_id: str,
+    drone_id: Optional[Union[str, int]],
+    battery_id: Optional[str],
+    payload_kg: float,
+    recommend_mode: Optional[str],
+    strict_battery: bool,
+) -> tuple:
+    return (
+        str(order_id or "").strip(),
+        str(drone_id).strip() if drone_id is not None else "",
+        str(battery_id).strip() if battery_id else "",
+        round(float(payload_kg or 0.0), 3),
+        str(recommend_mode or "AUTO").strip().upper(),
+        bool(strict_battery),
+    )
+
+
+def _invalidate_route_analysis_cache() -> None:
+    _ROUTE_ANALYSIS_CACHE.clear()
+
+
+def _send_mission_scheduled_email_sync(
+    to_email: str,
+    order_id: str,
+    mission_id: str,
+    frontend_url: Optional[str],
+) -> None:
+    """Run synchronous email HTTP call inside a background thread so API response never blocks."""
+    from app.core.email import send_mission_scheduled_email
+
+    try:
+        asyncio.run(
+            send_mission_scheduled_email(
+                to_email=to_email,
+                order_id=order_id,
+                mission_id=mission_id,
+                frontend_url=frontend_url,
+            )
+        )
+    except Exception as exc:
+        print(f"[EMAIL/NOTIF] Background send_mission_scheduled_email error: {exc}")
+
+
+def _schedule_mission_email_background(
+    to_email: str,
+    order_id: str,
+    mission_id: str,
+    frontend_url: Optional[str],
+) -> None:
+    async def _runner() -> None:
+        await asyncio.to_thread(
+            _send_mission_scheduled_email_sync,
+            to_email,
+            order_id,
+            mission_id,
+            frontend_url,
+        )
+
+    try:
+        asyncio.create_task(_runner())
+    except RuntimeError:
+        _send_mission_scheduled_email_sync(to_email, order_id, mission_id, frontend_url)
 
 
 '''
@@ -129,8 +205,7 @@ async def list_hubs(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Lấy danh sách toàn bộ các trung tâm điều khiển (Hub) chính."""
-    result = await db.execute(select(Hub).order_by(Hub.id))
-    hubs = result.scalars().all()
+    hubs = sorted(await get_all_hubs_cached(db), key=lambda h: h.id)
     return [{"id": h.id, "code": h.code, "name": h.name, "address": h.address, "latitude": h.latitude, "longitude": h.longitude, "status": h.status} for h in hubs]
 
 
@@ -140,10 +215,7 @@ async def list_mini_hubs(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Lấy danh sách các Hub (Mini-hubs và Hubs đã hợp nhất)."""
-    result = await db.execute(
-        select(Hub).order_by(Hub.id)
-    )
-    hubs = result.scalars().all()
+    hubs = sorted(await get_all_hubs_cached(db), key=lambda h: h.id)
     return [{"id": h.id, "name": h.name, "latitude": h.latitude, "longitude": h.longitude, "type": "Hub"} for h in hubs]
 
 
@@ -252,26 +324,48 @@ async def get_live_tracking(
         b_res = await db.execute(select(Battery).where(Battery.id.in_(battery_ids)))
         batteries_map = {b.id: b for b in b_res.scalars().all()}
 
-    # Lấy trail (50 điểm gần nhất theo thứ tự thời gian tăng dần)
-    trails_by_mid = {}
-    for mid in mission_ids:
-        t_res = await db.execute(
-            select(TelemetryLog)
-            .where(TelemetryLog.mission_id == mid)
-            .order_by(TelemetryLog.timestamp.desc())
-            .limit(50)
+    # [PERF NOTE] Lấy trail (50 điểm gần nhất) bằng 1 window query row_number() thay vì N+1 loop từng mission đang bay.
+    trails_by_mid: dict[str, list[dict]] = {mid: [] for mid in mission_ids}
+    trail_ranked_subq = (
+        select(
+            TelemetryLog.mission_id.label("mission_id"),
+            TelemetryLog.latitude.label("latitude"),
+            TelemetryLog.longitude.label("longitude"),
+            TelemetryLog.altitude.label("altitude"),
+            TelemetryLog.speed.label("speed"),
+            TelemetryLog.timestamp.label("timestamp"),
+            func.row_number()
+            .over(
+                partition_by=TelemetryLog.mission_id,
+                order_by=TelemetryLog.timestamp.desc(),
+            )
+            .label("rn"),
         )
-        recent_logs = list(reversed(t_res.scalars().all()))
-        trails_by_mid[mid] = [
+        .where(TelemetryLog.mission_id.in_(mission_ids))
+        .subquery()
+    )
+    trail_rows = await db.execute(
+        select(
+            trail_ranked_subq.c.mission_id,
+            trail_ranked_subq.c.latitude,
+            trail_ranked_subq.c.longitude,
+            trail_ranked_subq.c.altitude,
+            trail_ranked_subq.c.speed,
+            trail_ranked_subq.c.timestamp,
+        )
+        .where(trail_ranked_subq.c.rn <= 50)
+        .order_by(trail_ranked_subq.c.mission_id, trail_ranked_subq.c.timestamp.asc())
+    )
+    for r in trail_rows.all():
+        trails_by_mid.setdefault(r.mission_id, []).append(
             {
-                "latitude": t.latitude,
-                "longitude": t.longitude,
-                "altitude": t.altitude,
-                "speed": t.speed,
-                "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+                "latitude": r.latitude,
+                "longitude": r.longitude,
+                "altitude": r.altitude,
+                "speed": r.speed,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
             }
-            for t in recent_logs
-        ]
+        )
 
     # Lấy Incidents gần nhất cho các mission đang bay để phục vụ cảnh báo Failsafe
     incidents_res = await db.execute(
@@ -912,15 +1006,7 @@ async def _get_reserved_battery_info_map(
     exclude_mission_id: Optional[str] = None,
 ) -> dict[str, dict]:
     """
-    Trả về mapping thông tin chi tiết nhiệm vụ giữ chỗ cho từng viên pin:
-    battery_id -> {
-        "mission_id": str,
-        "mission_code": str,
-        "mission_status": str,
-        "drone_id": str | None,
-        "order_id": str | None,
-        "reason": str,
-    }
+    Trả về mapping thông tin chi tiết nhiệm vụ giữ chỗ cho từng viên pin (1 query duy nhất).
     """
     active_statuses = [
         MissionStatus.SCHEDULED,
@@ -931,54 +1017,52 @@ async def _get_reserved_battery_info_map(
     ]
     info_map: dict[str, dict] = {}
 
-    m_stmt = select(Mission).where(
-        Mission.status.in_(active_statuses),
-        Mission.battery_id.is_not(None),
-    )
-    if exclude_order_id:
-        m_stmt = m_stmt.where(Mission.order_id != exclude_order_id)
-    if exclude_mission_id:
-        m_stmt = m_stmt.where(Mission.id != exclude_mission_id)
-
-    m_res = await db.execute(m_stmt)
-    for m in m_res.scalars().all():
-        if m.battery_id:
-            m_status = m.status.value if hasattr(m.status, "value") else str(m.status)
-            info_map[m.battery_id] = {
-                "mission_id": m.id,
-                "mission_code": m.id,
-                "mission_status": m_status,
-                "drone_id": m.drone_id,
-                "order_id": m.order_id,
-                "reason": f"In use by Mission #{m.id} ({m_status})",
-            }
-
-    leg_stmt = (
-        select(MissionLeg, Mission)
-        .join(Mission, MissionLeg.mission_id == Mission.id)
-        .where(
-            Mission.status.in_(active_statuses),
-            MissionLeg.status.in_([MissionLegStatus.PENDING, MissionLegStatus.IN_PROGRESS]),
-            MissionLeg.battery_id.is_not(None),
+    stmt = (
+        select(
+            Mission.id,
+            Mission.status,
+            Mission.drone_id,
+            Mission.order_id,
+            Mission.battery_id,
+            MissionLeg.battery_id,
+            MissionLeg.sequence_no,
         )
+        .outerjoin(
+            MissionLeg,
+            and_(
+                MissionLeg.mission_id == Mission.id,
+                MissionLeg.status.in_([MissionLegStatus.PENDING, MissionLegStatus.IN_PROGRESS]),
+                MissionLeg.battery_id.is_not(None),
+            ),
+        )
+        .where(Mission.status.in_(active_statuses))
     )
     if exclude_order_id:
-        leg_stmt = leg_stmt.where(Mission.order_id != exclude_order_id)
+        stmt = stmt.where(Mission.order_id != exclude_order_id)
     if exclude_mission_id:
-        leg_stmt = leg_stmt.where(Mission.id != exclude_mission_id)
+        stmt = stmt.where(Mission.id != exclude_mission_id)
 
-    leg_res = await db.execute(leg_stmt)
-    for leg, m in leg_res.all():
-        if leg.battery_id:
-            m_status = m.status.value if hasattr(m.status, "value") else str(m.status)
-            seq_info = f"Leg {leg.sequence_no}" if leg.sequence_no else "Intermediate Leg"
-            info_map[leg.battery_id] = {
-                "mission_id": m.id,
-                "mission_code": m.id,
+    res = await db.execute(stmt)
+    for m_id, m_stat, m_drone_id, m_order_id, m_bat_id, leg_bat_id, leg_seq in res.all():
+        m_status = m_stat.value if hasattr(m_stat, "value") else str(m_stat)
+        if m_bat_id and m_bat_id not in info_map:
+            info_map[m_bat_id] = {
+                "mission_id": m_id,
+                "mission_code": m_id,
                 "mission_status": m_status,
-                "drone_id": m.drone_id,
-                "order_id": m.order_id,
-                "reason": f"In use by Mission #{m.id} ({seq_info} - {m_status})",
+                "drone_id": m_drone_id,
+                "order_id": m_order_id,
+                "reason": f"In use by Mission #{m_id} ({m_status})",
+            }
+        if leg_bat_id:
+            seq_info = f"Leg {leg_seq}" if leg_seq else "Intermediate Leg"
+            info_map[leg_bat_id] = {
+                "mission_id": m_id,
+                "mission_code": m_id,
+                "mission_status": m_status,
+                "drone_id": m_drone_id,
+                "order_id": m_order_id,
+                "reason": f"In use by Mission #{m_id} ({seq_info} - {m_status})",
             }
 
     return info_map
@@ -990,13 +1074,11 @@ async def _get_reserved_batteries_and_virtual_holds(
     compatible_models: Optional[list[str]] = None,
     exclude_order_id: Optional[str] = None,
     exclude_mission_id: Optional[str] = None,
+    busy_drone_ids_out: Optional[set[str]] = None,
 ) -> tuple[set[str], dict[int, int]]:
     """
-    Trả về:
-    - reserved_battery_ids: tập hợp battery_id đã được gán trực tiếp trên Mission.battery_id
-      hoặc MissionLeg.battery_id của các Mission đang active.
-    - held_count_by_hub: số lượng chặng trung gian PENDING cũ (legacy) chưa gán cụ thể battery_id
-      đang giữ chỗ ảo tại từng Relay Hub.
+    [PERF NOTE] Trả về reserved_battery_ids và held_count_by_hub (kèm busy_drone_ids_out nếu cần)
+    trong 1 query SQL duy nhất; không tách thành nhiều query Mission/MissionLeg riêng lẻ.
     """
     active_statuses = [
         MissionStatus.SCHEDULED,
@@ -1005,61 +1087,52 @@ async def _get_reserved_batteries_and_virtual_holds(
         MissionStatus.FLYING,
         MissionStatus.ACTIVE_MISSION,
     ]
+    relay_hub_set = set(relay_hub_ids) if relay_hub_ids else set()
 
-    m_stmt = select(Mission.battery_id).where(
-        Mission.status.in_(active_statuses),
-        Mission.battery_id.is_not(None),
-    )
-    if exclude_order_id:
-        m_stmt = m_stmt.where(Mission.order_id != exclude_order_id)
-    if exclude_mission_id:
-        m_stmt = m_stmt.where(Mission.id != exclude_mission_id)
-
-    reserved_result = await db.execute(m_stmt)
-    reserved_battery_ids = {row[0] for row in reserved_result.all() if row[0]}
-
-    leg_stmt = (
-        select(MissionLeg.battery_id)
-        .join(Mission, MissionLeg.mission_id == Mission.id)
-        .where(
-            Mission.status.in_(active_statuses),
-            MissionLeg.status.in_([MissionLegStatus.PENDING, MissionLegStatus.IN_PROGRESS]),
-            MissionLeg.battery_id.is_not(None),
+    stmt = (
+        select(
+            Mission.id,
+            Mission.drone_id,
+            Mission.battery_id,
+            MissionLeg.id,
+            MissionLeg.battery_id,
+            MissionLeg.sequence_no,
+            MissionLeg.status,
+            MissionLeg.from_hub_id,
+            Drone.model,
         )
+        .outerjoin(MissionLeg, MissionLeg.mission_id == Mission.id)
+        .outerjoin(Drone, Mission.drone_id == Drone.id)
+        .where(Mission.status.in_(active_statuses))
     )
     if exclude_order_id:
-        leg_stmt = leg_stmt.where(Mission.order_id != exclude_order_id)
+        stmt = stmt.where(Mission.order_id != exclude_order_id)
     if exclude_mission_id:
-        leg_stmt = leg_stmt.where(Mission.id != exclude_mission_id)
+        stmt = stmt.where(Mission.id != exclude_mission_id)
 
-    leg_reserved_res = await db.execute(leg_stmt)
-    for row in leg_reserved_res.all():
-        if row[0]:
-            reserved_battery_ids.add(row[0])
-
+    res = await db.execute(stmt)
+    reserved_battery_ids: set[str] = set()
     held_count_by_hub: dict[int, int] = {}
-    if relay_hub_ids:
-        hold_stmt = (
-            select(MissionLeg.from_hub_id, Drone.model)
-            .join(Mission, MissionLeg.mission_id == Mission.id)
-            .outerjoin(Drone, Mission.drone_id == Drone.id)
-            .where(
-                Mission.status.in_(active_statuses),
-                MissionLeg.sequence_no > 1,
-                MissionLeg.status == MissionLegStatus.PENDING,
-                MissionLeg.battery_id.is_(None),
-                MissionLeg.from_hub_id.in_(relay_hub_ids),
-            )
-        )
-        if exclude_order_id:
-            hold_stmt = hold_stmt.where(Mission.order_id != exclude_order_id)
-        if exclude_mission_id:
-            hold_stmt = hold_stmt.where(Mission.id != exclude_mission_id)
+    seen_hold_leg_ids: set[int] = set()
 
-        pending_relay_legs_res = await db.execute(hold_stmt)
-        for from_hub_id, other_drone_model in pending_relay_legs_res.all():
-            if from_hub_id is None:
-                continue
+    for _, m_drone_id, m_bat_id, leg_id, leg_bat_id, leg_seq, leg_stat, from_hub_id, other_drone_model in res.all():
+        if busy_drone_ids_out is not None and m_drone_id is not None:
+            busy_drone_ids_out.add(m_drone_id)
+        if m_bat_id:
+            reserved_battery_ids.add(m_bat_id)
+        if leg_id is None:
+            continue
+        if leg_bat_id and leg_stat in (MissionLegStatus.PENDING, MissionLegStatus.IN_PROGRESS):
+            reserved_battery_ids.add(leg_bat_id)
+        elif (
+            relay_hub_set
+            and leg_id not in seen_hold_leg_ids
+            and (leg_seq or 0) > 1
+            and leg_stat == MissionLegStatus.PENDING
+            and leg_bat_id is None
+            and from_hub_id in relay_hub_set
+        ):
+            seen_hold_leg_ids.add(leg_id)
             other_compat = DRONE_BATTERY_COMPATIBILITY.get(
                 other_drone_model or "",
                 [other_drone_model] if other_drone_model else [],
@@ -1074,6 +1147,7 @@ async def _resolve_drone_battery_capacity_wh(
     db: AsyncSession,
     drone_obj: Optional[Drone],
     all_active_batteries: list[Battery],
+    compat_models_map: Optional[dict[str, list[str]]] = None,
 ) -> tuple[list[str], float]:
     """
     Xác định danh sách model pin tương thích và dung lượng chuẩn 1 viên pin thực tế (Wh) của Drone.
@@ -1081,7 +1155,10 @@ async def _resolve_drone_battery_capacity_wh(
     """
     compatible_models: list[str] = []
     if drone_obj and drone_obj.model:
-        compatible_models = await get_compatible_battery_models(db, drone_obj.model)
+        if compat_models_map is not None:
+            compatible_models = resolve_compatible_models_from_map(compat_models_map, drone_obj.model)
+        else:
+            compatible_models = await get_compatible_battery_models(db, drone_obj.model)
 
     # 1. Ưu tiên lấy từ viên pin đang gắn trực tiếp trên drone_obj (nếu tương thích)
     if drone_obj:
@@ -1119,6 +1196,7 @@ async def _resolve_assigned_drone_battery(
     all_active_batteries: list[Battery],
     reserved_battery_ids: set[str],
     strict: bool = False,
+    compat_models_map: Optional[dict[str, list[str]]] = None,
 ) -> tuple[list[str], Optional[Battery], float, int, float, float]:
     """
     Xác định viên pin được chọn/assign cho Drone tại Hub xuất phát và năng lượng thực tế (Wh) của viên pin đó.
@@ -1126,7 +1204,7 @@ async def _resolve_assigned_drone_battery(
         (compatible_models, assigned_battery, bat_capacity_wh, bat_charge_pct, bat_energy_wh, model_default_capacity_wh)
     """
     compatible_models, model_default_cap_wh = await _resolve_drone_battery_capacity_wh(
-        db, drone_obj, all_active_batteries
+        db, drone_obj, all_active_batteries, compat_models_map=compat_models_map
     )
 
     clean_req_bat_id = (requested_battery_id or "").strip() or None
@@ -1279,7 +1357,7 @@ async def check_relay_hub_battery_availability(
         leg0_energy = float(leg0.get("energy_wh") or 0.0)
         if leg0_energy <= 0 and leg0.get("distance_km") is not None:
             leg0_energy = float(
-                predict_flight_energy(float(leg0["distance_km"]), float(leg0.get("payload_kg") or 0.0))["energy_wh"]
+                predict_flight_energy_cached(float(leg0["distance_km"]), float(leg0.get("payload_kg") or 0.0))["energy_wh"]
             )
 
         if assigned_battery is not None:
@@ -1332,7 +1410,7 @@ async def check_relay_hub_battery_availability(
             next_leg_energy = float(next_leg.get("energy_wh") or 0.0)
             if next_leg_energy <= 0 and next_leg.get("distance_km") is not None:
                 next_leg_energy = float(
-                    predict_flight_energy(float(next_leg["distance_km"]), float(next_leg.get("payload_kg") or 0.0))["energy_wh"]
+                    predict_flight_energy_cached(float(next_leg["distance_km"]), float(next_leg.get("payload_kg") or 0.0))["energy_wh"]
                 )
 
         # Lấy tất cả pin tương thích tại Relay Hub chưa bị giữ chỗ và có mức pin > 0%
@@ -1561,8 +1639,10 @@ async def compute_mission_routes_internal(
     override_payload_kg: Optional[float] = None,
     recommend_mode: Optional[str] = "AUTO",
     zone_tracker: Optional[dict] = None,
+    preloaded_context: Optional[dict] = None,
 ) -> tuple[list[RouteOptionSchema], list[dict]]:
     effective_payload = float(override_payload_kg) if override_payload_kg is not None else float(order.payload_kg or 0)
+    ctx = preloaded_context or {}
     def _set_zone(zone_name: str):
         if zone_tracker is not None:
             zone_tracker["current"] = zone_name
@@ -1572,22 +1652,26 @@ async def compute_mission_routes_internal(
             pass
 
     _set_zone("ZONE 01: Kiểm tra Order & Thông tin Hub xuất phát - đích")
-    eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
+    if "eff_origin_hub_id" in ctx:
+        eff_origin_hub_id = ctx["eff_origin_hub_id"]
+    else:
+        eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
     if not eff_origin_hub_id or not order.destination_hub_id:
         raise HTTPException(status_code=400, detail="Order is missing Origin Hub or Destination Hub information")
-    origin_hub = await db.get(Hub, eff_origin_hub_id)
-    dest_hub = await db.get(Hub, order.destination_hub_id)
-    if not origin_hub or not dest_hub:
-        raise HTTPException(status_code=400, detail="Origin Hub or Destination Hub does not exist in the system")
 
     _set_zone("ZONE 02: Nạp đồ thị mạng lưới Hubs & Kho Pin ACTIVE")
     # 1. Get all active hubs (hỗ trợ cả 'Active' và 'ACTIVE')
-    result = await db.execute(select(Hub).where(func.lower(Hub.status) == 'active'))
-    hubs = list(result.scalars().all())
-    if not hubs:
-        result = await db.execute(select(Hub))
-        hubs = list(result.scalars().all())
+    if "hubs" in ctx and ctx["hubs"] is not None:
+        hubs = list(ctx["hubs"])
+    else:
+        all_cached_hubs = await get_all_hubs_cached(db)
+        hubs = [h for h in all_cached_hubs if (h.status or "").lower() == "active"] or list(all_cached_hubs)
     hub_dict = {h.id: h for h in hubs}
+
+    origin_hub = hub_dict.get(eff_origin_hub_id) or await db.get(Hub, eff_origin_hub_id)
+    dest_hub = hub_dict.get(order.destination_hub_id) or await db.get(Hub, order.destination_hub_id)
+    if not origin_hub or not dest_hub:
+        raise HTTPException(status_code=400, detail="Origin Hub or Destination Hub does not exist in the system")
 
     # Đảm bảo origin_hub và dest_hub luôn có mặt trong hub_dict và hubs
     if origin_hub.id not in hub_dict:
@@ -1598,30 +1682,37 @@ async def compute_mission_routes_internal(
         hubs.append(dest_hub)
 
     # 2. Lấy toàn bộ pin ACTIVE (cả pin rời và pin đang gắn trên drone)
-    result = await db.execute(
-        select(Battery).where(Battery.status == batteries_status.ACTIVE).order_by(Battery.id)
-    )
-    all_active_batteries = result.scalars().all()
+    if "all_active_batteries" in ctx and ctx["all_active_batteries"] is not None:
+        all_active_batteries = ctx["all_active_batteries"]
+    else:
+        result = await db.execute(
+            select(Battery).where(Battery.status == batteries_status.ACTIVE).order_by(Battery.id)
+        )
+        all_active_batteries = result.scalars().all()
     all_batteries = [b for b in all_active_batteries if b.drone_id is None]
 
     _set_zone("ZONE 03: Kiểm tra giữ chỗ Pin (Virtual Holds)")
     # 3. Lấy danh sách pin đã bị giữ chỗ bởi các Mission/MissionLeg đang hoạt động khác
     all_hub_ids = [h.id for h in hubs]
-    reserved_battery_ids, held_count_by_hub = await _get_reserved_batteries_and_virtual_holds(
-        db=db,
-        relay_hub_ids=all_hub_ids,
-        compatible_models=[],
-        exclude_order_id=order.id,
-    )
+    if "reserved_battery_ids" in ctx and "held_count_by_hub" in ctx:
+        reserved_battery_ids = ctx["reserved_battery_ids"]
+        held_count_by_hub = ctx["held_count_by_hub"]
+    else:
+        reserved_battery_ids, held_count_by_hub = await _get_reserved_batteries_and_virtual_holds(
+            db=db,
+            relay_hub_ids=all_hub_ids,
+            compatible_models=[],
+            exclude_order_id=order.id,
+        )
 
-    _compat_models_cache: dict[str, list[str]] = {}
+    if "compat_models_map" in ctx and ctx["compat_models_map"] is not None:
+        _compat_models_map = ctx["compat_models_map"]
+    else:
+        _compat_models_map = await get_compatible_battery_models_map(db)
 
     async def _drone_has_ready_battery(d_cand):
         """Kiểm tra xem Drone tại trạm d_cand.current_hub_id có ít nhất 1 viên pin đạt 100% khả dụng không."""
-        d_model_key = d_cand.model or ""
-        if d_model_key not in _compat_models_cache:
-            _compat_models_cache[d_model_key] = await get_compatible_battery_models(db, d_cand.model)
-        c_models = _compat_models_cache[d_model_key]
+        c_models = resolve_compatible_models_from_map(_compat_models_map, d_cand.model)
         cand_bats = [
             b for b in all_active_batteries
             if (b.drone_id == d_cand.id or (b.drone_id is None and b.current_hub_id == d_cand.current_hub_id))
@@ -1636,11 +1727,12 @@ async def compute_mission_routes_internal(
     clean_drone_id = str(drone_id).strip() if drone_id is not None else None
     suggested_drone_id = clean_drone_id
     drone_obj = None
+    drones_by_id = ctx.get("drones_by_id") or {}
     if clean_drone_id:
-        drone_obj = await db.get(Drone, clean_drone_id)
+        drone_obj = drones_by_id.get(clean_drone_id) or await db.get(Drone, clean_drone_id)
         if not drone_obj and clean_drone_id.isdigit():
             alt_id = f"DRN-{int(clean_drone_id):04d}"
-            drone_obj = await db.get(Drone, alt_id)
+            drone_obj = drones_by_id.get(alt_id) or await db.get(Drone, alt_id)
             if drone_obj:
                 suggested_drone_id = drone_obj.id
 
@@ -1736,6 +1828,7 @@ async def compute_mission_routes_internal(
         all_active_batteries=all_active_batteries,
         reserved_battery_ids=reserved_battery_ids,
         strict=strict_battery,
+        compat_models_map=_compat_models_map,
     )
     max_safe_origin_energy_wh = round(origin_bat_energy_wh * 0.8, 2)
 
@@ -1831,7 +1924,7 @@ async def compute_mission_routes_internal(
                     curr_h.latitude or 0, curr_h.longitude or 0,
                     n_hub.latitude or 0, n_hub.longitude or 0
                 )
-                pred = predict_flight_energy(dist_km, payload, speed=speed, altitude=altitude)
+                pred = predict_flight_energy_cached(dist_km, payload, speed=speed, altitude=altitude)
                 energy_wh = pred["energy_wh"]
 
                 # Kiểm tra giới hạn năng lượng của viên pin ở chặng hiện tại (tối đa 80% -> dự phòng >= 20%)
@@ -1904,7 +1997,7 @@ async def compute_mission_routes_internal(
                 h1.latitude or 0, h1.longitude or 0,
                 h2.latitude or 0, h2.longitude or 0
             )
-            e = predict_flight_energy(d, payload, speed=speed, altitude=altitude)["energy_wh"]
+            e = predict_flight_energy_cached(d, payload, speed=speed, altitude=altitude)["energy_wh"]
             total_dist += d
             total_energy += e
 
@@ -1958,7 +2051,7 @@ async def compute_mission_routes_internal(
             continue
         corridor_geo_candidates.append((mid_h, d1, d2))
 
-    _seg_weather_raw_cache: dict[tuple[float, float], object] = {}
+    _seg_weather_raw_cache: dict[tuple[float, float], object] = ctx.setdefault("seg_weather_cache", {})
 
     async def _fetch_seg_weather(h1: Hub, h2: Hub):
         mlat = round(((h1.latitude or 0.0) + (h2.latitude or 0.0)) / 2.0, 4)
@@ -1999,7 +2092,7 @@ async def compute_mission_routes_internal(
     w_direct_eco = evaluate_weather_safety(w_direct_raw, altitude_m=45.0)
     w_direct_fast = evaluate_weather_safety(w_direct_raw, altitude_m=60.0)
 
-    pred_direct_eco = predict_flight_energy(
+    pred_direct_eco = predict_flight_energy_cached(
         dist_direct, payload, speed=10.0, altitude=45.0, weather_override=w_direct_override
     )
     e_direct = pred_direct_eco["energy_wh"]
@@ -2007,7 +2100,7 @@ async def compute_mission_routes_internal(
     t_eco = max(3, int(math.ceil(dist_direct * 2.2)) + 2)
 
     dist_fast = round(dist_direct * 1.04 + 0.08, 2)
-    pred_direct_fast = predict_flight_energy(
+    pred_direct_fast = predict_flight_energy_cached(
         dist_fast, payload, speed=15.0, altitude=60.0, weather_override=w_direct_override
     )
     e_fast = round(max(float(pred_direct_fast["energy_wh"]), e_direct * 1.24 + 2.5), 2)
@@ -2051,7 +2144,7 @@ async def compute_mission_routes_internal(
             )
             w_raw = await _fetch_seg_weather(h1, h2)
             w_eval = evaluate_weather_safety(w_raw, altitude_m=altitude_m)
-            pred_leg = predict_flight_energy(
+            pred_leg = predict_flight_energy_cached(
                 d_leg, payload, speed=speed_mps, altitude=altitude_m, weather_override=weather_to_override_dict(w_raw)
             )
             e_leg = pred_leg["energy_wh"]
@@ -2545,10 +2638,11 @@ async def compute_mission_routes_internal(
                     all_active_batteries=all_active_batteries,
                     reserved_battery_ids=reserved_battery_ids,
                     strict=False,
+                    compat_models_map=_compat_models_map,
                 )
                 w_sb_raw = await _fetch_seg_weather(sb_hub, origin_hub)
                 w_sb_eval = evaluate_weather_safety(w_sb_raw, altitude_m=45.0)
-                pred_disp = predict_flight_energy(
+                pred_disp = predict_flight_energy_cached(
                     d_disp_opt, 0.0, speed=10.0, altitude=45.0, weather_override=weather_to_override_dict(w_sb_raw)
                 )
                 e_disp_opt = pred_disp["energy_wh"]
@@ -2647,7 +2741,7 @@ async def compute_mission_routes_internal(
 
         if not standby_route_added:
             # Phương án dự phòng an toàn trực tiếp (khi đang điều phối từ Hub khác hoặc không có Hub trung gian / Drone lân cận)
-            pred_safe = predict_flight_energy(
+            pred_safe = predict_flight_energy_cached(
                 dist_direct, payload, speed=8.0, altitude=45.0, weather_override=w_direct_override
             )
             e_safe = round(pred_safe["energy_wh"], 2)
@@ -2705,7 +2799,7 @@ async def compute_mission_routes_internal(
         )
         w_disp_raw = await _fetch_seg_weather(drone_home_hub, origin_hub)
         w_disp_eval = evaluate_weather_safety(w_disp_raw, altitude_m=45.0)
-        e_disp = predict_flight_energy(
+        e_disp = predict_flight_energy_cached(
             d_disp, 0.0, speed=10.0, altitude=45.0, weather_override=weather_to_override_dict(w_disp_raw)
         )["energy_wh"]
         t_disp = max(1, int(round(d_disp * 2.0)))
@@ -3159,6 +3253,8 @@ async def compute_mission_routes_internal(
 
     # Luôn trả về đầy đủ cả 3 tuyến đường để Operator quan sát toàn diện và so sánh các phương án
     # (các tuyến không đủ pin vẫn được hiển thị trên bảng điều khiển kèm cờ feasible=False, is_selectable=False và lý do chi tiết)
+    if raw_data_list:
+        raw_data_list[0]["_eff_origin_hub_id"] = eff_origin_hub_id
     return routes_schemas[:3], raw_data_list[:3]
 
 
@@ -3175,9 +3271,9 @@ async def build_missions_response_list(
 
     mission_ids = [m.id for m in missions]
 
-    # 1. Lấy tất cả Hubs
-    hub_res = await db.execute(select(Hub))
-    hub_dict = {h.id: h for h in hub_res.scalars().all()}
+    # 1. Lấy tất cả Hubs (dùng cache 30s)
+    hub_list = await get_all_hubs_cached(db)
+    hub_dict = {h.id: h for h in hub_list}
 
     # 2. Lấy tất cả MissionLeg của các mission
     legs_res = await db.execute(
@@ -3205,15 +3301,33 @@ async def build_missions_response_list(
     rec_by_mission = {}
 
     # 4. Lấy danh sách Pin & Drone để tính chính xác % tiêu hao pin theo model Drone
-    bats_res = await db.execute(select(Battery))
-    all_batteries = bats_res.scalars().all()
-    battery_by_id = {b.id: b for b in all_batteries}
-
+    compat_models_map = await get_compatible_battery_models_map(db)
     drone_ids = {m.drone_id for m in missions if m.drone_id is not None}
-    drone_by_id: dict[int, Drone] = {}
+    drone_by_id: dict[str, Drone] = {}
     if drone_ids:
         drones_res = await db.execute(select(Drone).where(Drone.id.in_(drone_ids)))
         drone_by_id = {d.id: d for d in drones_res.scalars().all()}
+
+    if len(missions) <= 5:
+        needed_bat_ids: set[str] = {str(m.battery_id) for m in missions if m.battery_id}
+        for legs in legs_by_mission.values():
+            for lg in legs:
+                if lg.battery_id:
+                    needed_bat_ids.add(str(lg.battery_id))
+        bat_filters = []
+        if needed_bat_ids:
+            bat_filters.append(Battery.id.in_(list(needed_bat_ids)))
+        if drone_ids:
+            bat_filters.append(Battery.drone_id.in_(list(drone_ids)))
+        if bat_filters:
+            bats_res = await db.execute(select(Battery).where(or_(*bat_filters)))
+            all_batteries = bats_res.scalars().all()
+        else:
+            all_batteries = []
+    else:
+        bats_res = await db.execute(select(Battery))
+        all_batteries = bats_res.scalars().all()
+    battery_by_id = {b.id: b for b in all_batteries}
 
     responses: list[MissionResponse] = []
     for m in missions:
@@ -3230,7 +3344,9 @@ async def build_missions_response_list(
             130.0
         )
         if drone_obj:
-            _, drone_capacity_wh = await _resolve_drone_battery_capacity_wh(db, drone_obj, all_batteries)
+            _, drone_capacity_wh = await _resolve_drone_battery_capacity_wh(
+                db, drone_obj, all_batteries, compat_models_map=compat_models_map
+            )
 
         m_legs = legs_by_mission.get(m.id, [])
         origin_bat_id = str(m.battery_id) if m.battery_id else (
@@ -3261,7 +3377,7 @@ async def build_missions_response_list(
                     h1.latitude or 0, h1.longitude or 0,
                     h2.latitude or 0, h2.longitude or 0
                 ) if (h1 and h2) else 0.0
-                e = float(predict_flight_energy(d, payload)["energy_wh"])
+                e = float(predict_flight_energy_cached(d, payload)["energy_wh"])
                 leg_energies.append(e)
 
                 leg_bat_id = str(leg.battery_id) if leg.battery_id else (origin_bat_id if idx == 0 else None)
@@ -3377,7 +3493,7 @@ async def build_missions_response_list(
                         h2.latitude or 0, h2.longitude or 0
                     ) if (h1 and h2) else 0.0
                 )
-                e = float(predict_flight_energy(d, payload)["energy_wh"])
+                e = float(predict_flight_energy_cached(d, payload)["energy_wh"])
                 leg_energies.append(e)
                 leg_pct = int(round((e / origin_bat_cap) * 100)) if origin_bat_cap > 0 else 50
                 is_mission_done = str(m.status.value if hasattr(m.status, "value") else (m.status or "")).strip().lower() in ("completed", "mission completed")
@@ -3558,7 +3674,8 @@ async def get_eligible_batteries_for_mission_planning(
     reserved_info_map = await _get_reserved_battery_info_map(
         db, exclude_order_id=order_id.strip() if order_id else None
     )
-    compatible_models = await get_compatible_battery_models(db, drone.model)
+    compat_models_map = await get_compatible_battery_models_map(db)
+    compatible_models = resolve_compatible_models_from_map(compat_models_map, drone.model)
     default_cap = DEFAULT_DRONE_BATTERY_CAPACITY_WH.get(drone.model or "", 130.0)
 
     bats_res = await db.execute(
@@ -3720,7 +3837,7 @@ async def analyze_mission_planning(
                 raise HTTPException(status_code=400, detail=val_res["message"])
             total_bundle_payload = val_res["total_payload_kg"]
 
-        routes_schemas, _ = await compute_mission_routes_internal(
+        routes_schemas, raw_data_list = await compute_mission_routes_internal(
             db=db,
             order=order,
             drone_id=clean_drone_id,
@@ -3731,8 +3848,32 @@ async def analyze_mission_planning(
             zone_tracker=zone_tracker,
         )
 
+        # Lưu cache kết quả phân tích để bước Create/Assign Mission tái sử dụng ngay mà không chạy lại từ đầu
+        cache_payload = total_bundle_payload if total_bundle_payload is not None else float(order.payload_kg or 0)
+        cache_key = _build_route_cache_key(
+            order_id=order.id,
+            drone_id=clean_drone_id,
+            battery_id=requested_battery_id,
+            payload_kg=cache_payload,
+            recommend_mode=getattr(request, "recommend_mode", "AUTO"),
+            strict_battery=bool(requested_battery_id),
+        )
+        if len(_ROUTE_ANALYSIS_CACHE) >= _ROUTE_ANALYSIS_CACHE_MAX:
+            _ROUTE_ANALYSIS_CACHE.clear()
+        _ROUTE_ANALYSIS_CACHE[cache_key] = (
+            time.monotonic(),
+            copy.deepcopy(routes_schemas),
+            copy.deepcopy(raw_data_list),
+        )
+
         zone_tracker["current"] = "ZONE 10: Finalize MissionPlanningAnalyzeResponse"
-        eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
+        eff_origin_hub_id = (
+            raw_data_list[0].get("_eff_origin_hub_id")
+            if raw_data_list and isinstance(raw_data_list[0], dict)
+            else None
+        )
+        if eff_origin_hub_id is None:
+            eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
         first_route = routes_schemas[0] if routes_schemas else None
         is_cross = first_route.is_cross_hub if first_route else False
         route_expl = None
@@ -3792,6 +3933,443 @@ async def analyze_mission_planning(
         )
 
 
+def _get_cached_routes_for_create(
+    order_id: str,
+    drone_id: Union[str, int],
+    requested_battery_id: Optional[str],
+    total_payload_kg: float,
+    recommend_mode: str,
+    route_id: Optional[str],
+) -> Optional[tuple[list[RouteOptionSchema], list[dict]]]:
+    """Retrieve fresh route analysis snapshot cached during the Review/Analyze step."""
+    now_mono = time.monotonic()
+    candidate_keys = [
+        _build_route_cache_key(order_id, drone_id, requested_battery_id, total_payload_kg, recommend_mode, bool(requested_battery_id)),
+        _build_route_cache_key(order_id, drone_id, None, total_payload_kg, recommend_mode, False),
+        _build_route_cache_key(order_id, None, None, total_payload_kg, recommend_mode, False),
+    ]
+    for key in candidate_keys:
+        entry = _ROUTE_ANALYSIS_CACHE.get(key)
+        if not entry:
+            continue
+        cached_at, cached_schemas, cached_raw = entry
+        if (now_mono - cached_at) > _ROUTE_ANALYSIS_CACHE_TTL_SEC:
+            _ROUTE_ANALYSIS_CACHE.pop(key, None)
+            continue
+        if route_id and not any(s.routeId == route_id for s in cached_schemas):
+            continue
+        return copy.deepcopy(cached_schemas), copy.deepcopy(cached_raw)
+    return None
+
+
+async def _build_fast_routes_from_request(
+    db: AsyncSession,
+    order: Order,
+    drone: Drone,
+    request: MissionCreateRequest,
+    requested_battery_id: Optional[str],
+    total_payload_kg: float,
+    eff_origin_hub_id: Optional[int],
+    compat_models_map: dict[str, list[str]],
+    reserved_bat_ids: set[str],
+    extra_battery_ids: Optional[set[str]] = None,
+    preloaded_batteries_out: Optional[dict[str, Battery]] = None,
+) -> Optional[tuple[list[RouteOptionSchema], list[dict]]]:
+    """
+    Fast-path when FE submits the reviewed route snapshot (`legs_detail`) during Assign/Create Mission.
+    Skips re-running Dijkstra & external weather fetches while validating live DB Drone/Battery safety.
+    """
+    if not request.legs_detail:
+        return None
+
+    all_hubs = await get_all_hubs_cached(db)
+    hub_by_id = {h.id: h for h in all_hubs}
+    hub_by_code: dict[str, Any] = {}
+    for h in all_hubs:
+        if h.code:
+            hub_by_code[h.code.strip().upper()] = h
+        if h.name:
+            hub_by_code[h.name.strip().upper()] = h
+
+    legs_raw: list[dict] = []
+    legs_schemas: list[RouteLegSchema] = []
+    tot_dist_km = 0.0
+    tot_energy_wh = 0.0
+
+    for idx, leg_in in enumerate(request.legs_detail):
+        h_from = hub_by_id.get(leg_in.from_hub_id) if leg_in.from_hub_id else None
+        if not h_from and leg_in.from_hub_code:
+            h_from = hub_by_code.get(leg_in.from_hub_code.strip().upper())
+        h_to = hub_by_id.get(leg_in.to_hub_id) if leg_in.to_hub_id else None
+        if not h_to and leg_in.to_hub_code:
+            h_to = hub_by_code.get(leg_in.to_hub_code.strip().upper())
+
+        if not h_from or not h_to:
+            return None
+
+        d_km = float(leg_in.distance_km or 0.0)
+        if d_km <= 0 and h_from.latitude is not None and h_from.longitude is not None and h_to.latitude is not None and h_to.longitude is not None:
+            d_km = round(haversine_distance(h_from.latitude, h_from.longitude, h_to.latitude, h_to.longitude), 2)
+
+        is_disp = bool(leg_in.is_dispatch or (str(leg_in.leg_type or "").upper() == "DISPATCH"))
+        leg_payload = 0.0 if is_disp else (float(leg_in.payload_kg) if leg_in.payload_kg is not None else total_payload_kg)
+        e_wh = float(leg_in.energy_wh or 0.0)
+        if e_wh <= 0:
+            e_wh = float(predict_flight_energy_cached(d_km, leg_payload)["energy_wh"])
+
+        tot_dist_km += d_km
+        tot_energy_wh += e_wh
+        from_code = h_from.code or h_from.name
+        to_code = h_to.code or h_to.name
+
+        leg_dict = {
+            "from_hub_id": h_from.id,
+            "to_hub_id": h_to.id,
+            "from_hub_code": from_code,
+            "to_hub_code": to_code,
+            "distance_km": round(d_km, 2),
+            "energy_wh": round(e_wh, 2),
+            "battery_id": leg_in.battery_id,
+            "leg_type": "DISPATCH" if is_disp else (leg_in.leg_type or "DELIVERY"),
+            "is_dispatch": is_disp,
+            "payload_kg": leg_payload,
+        }
+        legs_raw.append(leg_dict)
+        legs_schemas.append(
+            RouteLegSchema(
+                from_hub_code=from_code,
+                to_hub_code=to_code,
+                distance_km=round(d_km, 2),
+                sequence_no=idx + 1,
+                from_hub_id=h_from.id,
+                to_hub_id=h_to.id,
+                from_hub_name=h_from.name,
+                to_hub_name=h_to.name,
+                from_latitude=h_from.latitude,
+                from_longitude=h_from.longitude,
+                to_latitude=h_to.latitude,
+                to_longitude=h_to.longitude,
+                energy_wh=round(e_wh, 2),
+                battery_id=leg_in.battery_id,
+                leg_type=leg_dict["leg_type"],
+                is_dispatch=is_disp,
+                payload_kg=leg_payload,
+            )
+        )
+
+    is_cross_hub = bool(legs_raw[0]["is_dispatch"] or (request.routeId and str(request.routeId).endswith("-DISPATCH")))
+    departure_hub_id = legs_raw[0]["from_hub_id"] or eff_origin_hub_id or order.origin_hub_id
+
+    # Validate Origin/Leg-1 battery live against DB (and preload requested/relay batteries in 1 query)
+    extra_ids = {str(bid).strip() for bid in (extra_battery_ids or set()) if str(bid).strip()}
+    if requested_battery_id:
+        extra_ids.add(requested_battery_id)
+
+    bat_filters = [
+        Battery.drone_id == drone.id,
+        and_(Battery.status == batteries_status.ACTIVE, Battery.current_hub_id == departure_hub_id),
+    ]
+    if extra_ids:
+        bat_filters.append(Battery.id.in_(list(extra_ids)))
+    fetched_bats = list((await db.execute(select(Battery).where(or_(*bat_filters)))).scalars().all())
+    if preloaded_batteries_out is not None:
+        for b in fetched_bats:
+            preloaded_batteries_out[b.id] = b
+
+    active_dep_bats = [
+        b for b in fetched_bats
+        if b.status == batteries_status.ACTIVE or (requested_battery_id and b.id == requested_battery_id)
+    ]
+    compat_models, assigned_bat, bat_cap, bat_charge, bat_energy, _ = await _resolve_assigned_drone_battery(
+        db=db,
+        origin_hub_id=departure_hub_id,
+        drone_obj=drone,
+        requested_battery_id=requested_battery_id,
+        all_active_batteries=active_dep_bats,
+        reserved_battery_ids=reserved_bat_ids,
+        strict=True,
+        compat_models_map=compat_models_map,
+    )
+
+    leg0_energy = float(legs_raw[0]["energy_wh"] or 0.0)
+    leg0_pct = int(round((leg0_energy / bat_cap) * 100)) if bat_cap > 0 else 100
+    max_safe_wh = round(bat_energy * 0.8, 2)
+    feasible = True
+    infeasible_reason = None
+    if assigned_bat is None:
+        feasible = False
+        infeasible_reason = f"Origin hub has no compatible battery available to assign to Drone #{drone.id}."
+    elif leg0_energy > bat_energy:
+        feasible = False
+        infeasible_reason = (
+            f"Leg 1 required energy ({leg0_energy:.1f} Wh) exceeds available energy of battery {assigned_bat.id} "
+            f"({bat_energy:.1f} Wh / {bat_cap:.1f} Wh, charge {bat_charge}%)."
+        )
+    elif leg0_energy > max_safe_wh:
+        feasible = False
+        infeasible_reason = (
+            f"Leg 1 consumes {leg0_energy:.1f} Wh (~{leg0_pct}% of battery {assigned_bat.id}), "
+            f"exceeding the 80% safe threshold ({max_safe_wh:.1f} Wh / {bat_energy:.1f} Wh, minimum 20% reserve required)."
+        )
+
+    final_dist_km = round(float(request.distance_km), 2) if request.distance_km and request.distance_km > 0 else round(tot_dist_km, 2)
+    final_energy_wh = round(float(request.predicted_energy_wh), 2) if request.predicted_energy_wh and request.predicted_energy_wh > 0 else round(tot_energy_wh, 2)
+    final_duration_min = int(request.predicted_duration_min) if request.predicted_duration_min and request.predicted_duration_min > 0 else max(3, int(math.ceil(final_dist_km * 2.2)) + len(legs_raw))
+    route_str = request.route_string or " -> ".join([legs_raw[0]["from_hub_code"]] + [l["to_hub_code"] for l in legs_raw])
+    rem_pct = max(0, bat_charge - leg0_pct)
+    risk = "LOW" if leg0_pct < 60 else ("MEDIUM" if leg0_pct <= 80 else "HIGH")
+
+    schema = RouteOptionSchema(
+        routeId=request.routeId or f"R-{order.id}-FAST-ASSIGN",
+        route_string=route_str,
+        legs_detail=legs_schemas,
+        distanceKm=final_dist_km,
+        relayHubs=[],
+        predictedDurationMin=final_duration_min,
+        predictedEnergyWh=final_energy_wh,
+        batteryConsumptionPct=leg0_pct,
+        remainingBatteryPct=rem_pct,
+        confidencePct=90 if risk == "LOW" else (85 if risk == "MEDIUM" else 75),
+        risk=risk,
+        recommended=True,
+        suggestedDroneId=drone.id,
+        assignedBatteryId=assigned_bat.id if assigned_bat else requested_battery_id,
+        assignedBatterySerial=assigned_bat.serial_number if assigned_bat else None,
+        assignedBatteryModel=assigned_bat.battery_model if assigned_bat else None,
+        assignedBatteryCapacityWh=round(bat_cap, 2) if assigned_bat else None,
+        assignedBatteryChargePct=bat_charge if assigned_bat else None,
+        assignedBatteryEnergyWh=round(bat_energy, 2) if assigned_bat else None,
+        feasible=feasible,
+        infeasible_reason=infeasible_reason,
+        is_selectable=feasible,
+        unselectable_reason=infeasible_reason,
+        is_cross_hub=is_cross_hub,
+    )
+    return [schema], [{"legs_detail": legs_raw, "route_string": route_str}]
+
+
+def _build_created_mission_response(
+    mission: Mission,
+    drone: Drone,
+    assigned_battery: Battery,
+    created_legs: list[MissionLeg],
+    hub_by_id: dict[int, Any],
+    battery_by_id: dict[str, Battery],
+    selected_schema: Optional[RouteOptionSchema],
+    ai_pred: AIPrediction,
+    all_mission_order_ids: list[str],
+) -> MissionResponse:
+    """Build MissionResponse directly from in-memory objects created during _create_mission_internal."""
+    m_dict = {c.name: getattr(mission, c.name) for c in mission.__table__.columns}
+    payload = float(mission.payload_weight or 0.0)
+    drone_cap_wh = float(
+        assigned_battery.capacity_wh
+        or DEFAULT_DRONE_BATTERY_CAPACITY_WH.get(drone.model or "", 130.0)
+    )
+    origin_cap, origin_charge, origin_energy = _compute_battery_energy_wh(assigned_battery, drone_cap_wh)
+
+    legs_detail: list[RouteLegSchema] = []
+    relay_hubs: list[str] = []
+    relay_battery_status_list: list[HubBatteryStatus] = []
+    leg_energies: list[float] = []
+    leg_consumption_pcts: list[int] = []
+
+    schema_legs = selected_schema.legs_detail if (selected_schema and selected_schema.legs_detail) else []
+    for idx, leg in enumerate(created_legs):
+        h1 = hub_by_id.get(leg.from_hub_id)
+        h2 = hub_by_id.get(leg.to_hub_id)
+        from_code = (h1.code or h1.name) if h1 else str(leg.from_hub_id)
+        to_code = (h2.code or h2.name) if h2 else str(leg.to_hub_id)
+        s_leg = schema_legs[idx] if idx < len(schema_legs) else None
+
+        d = (
+            float(s_leg.distance_km)
+            if (s_leg and s_leg.distance_km is not None)
+            else (
+                haversine_distance(
+                    h1.latitude or 0, h1.longitude or 0,
+                    h2.latitude or 0, h2.longitude or 0,
+                )
+                if (h1 and h2)
+                else 0.0
+            )
+        )
+        is_dispatch_leg = bool(
+            (s_leg and s_leg.is_dispatch)
+            or (
+                mission.origin_hub_id
+                and leg.to_hub_id == mission.origin_hub_id
+                and leg.from_hub_id != mission.origin_hub_id
+                and idx == 0
+                and len(created_legs) > 1
+            )
+        )
+        leg_payload_val = 0.0 if is_dispatch_leg else (payload if payload > 0 else None)
+        e = (
+            float(s_leg.energy_wh)
+            if (s_leg and s_leg.energy_wh is not None)
+            else float(predict_flight_energy_cached(d, 0.0 if is_dispatch_leg else payload)["energy_wh"])
+        )
+        leg_energies.append(e)
+
+        leg_bat_id = str(leg.battery_id) if leg.battery_id else (assigned_battery.id if idx == 0 else None)
+        leg_bat_obj = battery_by_id.get(leg_bat_id) if leg_bat_id else None
+        leg_cap, leg_charge, leg_energy_avail = _compute_battery_energy_wh(leg_bat_obj, drone_cap_wh)
+        leg_pct = int(round((e / leg_cap) * 100)) if leg_cap > 0 else 50
+        leg_rem_pct = max(0, leg_charge - leg_pct)
+        leg_consumption_pcts.append(leg_pct)
+
+        legs_detail.append(
+            RouteLegSchema(
+                from_hub_code=from_code,
+                to_hub_code=to_code,
+                distance_km=round(d, 2),
+                sequence_no=leg.sequence_no or (idx + 1),
+                from_hub_id=leg.from_hub_id,
+                to_hub_id=leg.to_hub_id,
+                from_hub_name=h1.name if h1 else None,
+                to_hub_name=h2.name if h2 else None,
+                from_latitude=h1.latitude if h1 else None,
+                from_longitude=h1.longitude if h1 else None,
+                to_latitude=h2.latitude if h2 else None,
+                to_longitude=h2.longitude if h2 else None,
+                status="PENDING",
+                energy_wh=round(e, 2),
+                battery_id=leg_bat_id,
+                battery_serial=leg_bat_obj.serial_number if leg_bat_obj else None,
+                battery_model=leg_bat_obj.battery_model if leg_bat_obj else None,
+                battery_capacity_wh=round(leg_cap, 2),
+                battery_charge_pct=leg_charge if leg_bat_obj else None,
+                battery_energy_wh=round(leg_energy_avail, 2),
+                battery_consumption_pct=leg_pct,
+                remaining_battery_pct=leg_rem_pct,
+                leg_type="DISPATCH" if is_dispatch_leg else "DELIVERY",
+                is_dispatch=is_dispatch_leg,
+                payload_kg=leg_payload_val,
+            )
+        )
+
+        if idx < len(created_legs) - 1:
+            hub_label = h2.name if h2 else to_code
+            next_leg_obj = created_legs[idx + 1]
+            swap_bat_id = str(next_leg_obj.battery_id) if next_leg_obj.battery_id else None
+            swap_bat_obj = battery_by_id.get(swap_bat_id) if swap_bat_id else None
+            if swap_bat_obj:
+                s_cap, s_charge, s_energy = _compute_battery_energy_wh(swap_bat_obj, drone_cap_wh)
+                relay_hubs.append(
+                    f"{hub_label} (Uses {e:.1f}Wh) - Swap battery {swap_bat_obj.id} "
+                    f"({swap_bat_obj.serial_number or swap_bat_obj.battery_model or 'Ready'}, "
+                    f"{s_energy:.0f}Wh, {s_charge}%)"
+                )
+                relay_battery_status_list.append(
+                    HubBatteryStatus(
+                        hub_id=leg.to_hub_id,
+                        hub_code=h2.code if h2 else to_code,
+                        hub_name=hub_label,
+                        ready_count=1,
+                        compatible_models=[swap_bat_obj.battery_model] if swap_bat_obj.battery_model else [],
+                        feasible=True,
+                        selected_battery_id=swap_bat_obj.id,
+                        selected_battery_serial=swap_bat_obj.serial_number,
+                        selected_battery_model=swap_bat_obj.battery_model,
+                        selected_battery_capacity_wh=round(s_cap, 2),
+                        selected_battery_charge_pct=s_charge,
+                        selected_battery_energy_wh=round(s_energy, 2),
+                        swap_battery_id=swap_bat_obj.id,
+                        swap_battery_serial=swap_bat_obj.serial_number,
+                        available_batteries=[
+                            RelayHubBatteryOptionSchema(
+                                id=swap_bat_obj.id,
+                                serial_number=swap_bat_obj.serial_number,
+                                battery_model=swap_bat_obj.battery_model,
+                                capacity_wh=round(s_cap, 2),
+                                charge_level_pct=s_charge,
+                                available_energy_wh=round(s_energy, 2),
+                                current_hub_id=swap_bat_obj.current_hub_id,
+                            )
+                        ],
+                    )
+                )
+            else:
+                relay_hubs.append(f"{hub_label} (Uses {e:.1f}Wh) - Quick battery swap (0m)")
+
+    route_codes = [legs_detail[0].from_hub_code] + [l.to_hub_code for l in legs_detail] if legs_detail else []
+    route_string = (
+        selected_schema.route_string
+        if (selected_schema and selected_schema.route_string)
+        else (" -> ".join(route_codes) if route_codes else "")
+    )
+    dist_km = round(mission.distance_m / 1000.0, 2) if mission.distance_m else round(sum(l.distance_km for l in legs_detail), 2)
+    pred_energy = round(float(ai_pred.estimated_energy_wh or sum(leg_energies)), 2)
+    pred_duration = int(ai_pred.estimated_duration_m or int(dist_km * 2))
+    batt_pct = max(leg_consumption_pcts) if leg_consumption_pcts else (int(round((pred_energy / origin_energy) * 100)) if origin_energy else 50)
+    rem_batt_pct = max(0, 100 - batt_pct)
+    risk = str(ai_pred.risk_level or "Low").upper()
+    conf_pct = 90 if risk == "LOW" else (85 if risk == "MEDIUM" else 75)
+    reason = ai_pred.recommendation_content or f"Route {route_string} selected by AI analysis ({pred_energy:.1f} Wh)."
+    route_id = (selected_schema.routeId if selected_schema else None) or f"R-{mission.order_id or mission.id}-SCH"
+
+    scheduled_route = RouteOptionSchema(
+        routeId=route_id,
+        route_string=route_string,
+        legs_detail=legs_detail,
+        distanceKm=dist_km,
+        relayHubs=relay_hubs,
+        predictedDurationMin=pred_duration,
+        predictedEnergyWh=pred_energy,
+        batteryConsumptionPct=batt_pct,
+        remainingBatteryPct=rem_batt_pct,
+        confidencePct=conf_pct,
+        risk=risk,
+        recommended=True,
+        reason=reason,
+        suggestedDroneId=mission.drone_id,
+        assignedBatteryId=assigned_battery.id,
+        assignedBatterySerial=assigned_battery.serial_number,
+        assignedBatteryModel=assigned_battery.battery_model,
+        assignedBatteryCapacityWh=round(origin_cap, 2),
+        assignedBatteryChargePct=origin_charge,
+        assignedBatteryEnergyWh=round(origin_energy, 2),
+        relay_battery_status=relay_battery_status_list,
+    )
+
+    m_dict.update({
+        "battery_id": assigned_battery.id,
+        "battery_serial": assigned_battery.serial_number,
+        "battery_model": assigned_battery.battery_model,
+        "battery_capacity_wh": round(origin_cap, 2),
+        "battery_charge_pct": origin_charge,
+        "battery_energy_wh": round(origin_energy, 2),
+        "assignedBatteryId": assigned_battery.id,
+        "assignedBatterySerial": assigned_battery.serial_number,
+        "assignedBatteryModel": assigned_battery.battery_model,
+        "assignedBatteryCapacityWh": round(origin_cap, 2),
+        "assignedBatteryChargePct": origin_charge,
+        "assignedBatteryEnergyWh": round(origin_energy, 2),
+        "relay_battery_status": relay_battery_status_list,
+        "route_path_string": route_string,
+        "routeId": route_id,
+        "route_string": route_string,
+        "legs_detail": legs_detail,
+        "distanceKm": dist_km,
+        "relayHubs": relay_hubs,
+        "predictedDurationMin": pred_duration,
+        "predictedEnergyWh": pred_energy,
+        "batteryConsumptionPct": batt_pct,
+        "remainingBatteryPct": rem_batt_pct,
+        "confidencePct": conf_pct,
+        "risk": risk,
+        "recommended": True,
+        "reason": reason,
+        "suggestedDroneId": mission.drone_id,
+        "scheduled_route": scheduled_route,
+        "routes": [scheduled_route],
+        "bundled_order_ids": all_mission_order_ids,
+        "total_orders_count": len(all_mission_order_ids),
+    })
+    return MissionResponse(**m_dict)
+
+
 async def _create_mission_internal(
     db: AsyncSession,
     user: CurrentUser,
@@ -3803,6 +4381,10 @@ async def _create_mission_internal(
     """
     Hàm lõi dùng chung cho cả tạo Mission thủ công (`POST /operator/missions`)
     và Tự động điều phối (`POST /operator/missions/auto-dispatch`).
+    [PERF NOTE] Để giữ tốc độ Assign nhanh qua Cloudflare Tunnel + Supabase:
+    1. Ưu tiên đọc từ _ROUTE_ANALYSIS_CACHE hoặc _build_fast_routes_from_request (từ legs_detail) trước khi tính lại full.
+    2. Build MissionResponse ngay trong RAM (_build_created_mission_response) sau khi commit, không gọi lại build_mission_detail_response.
+    3. Gửi email ở nền (_schedule_mission_email_background), không block response API.
     """
     clean_order_id = request.orderId.strip() if request.orderId else request.orderId
     order = await db.get(Order, clean_order_id)
@@ -3818,39 +4400,35 @@ async def _create_mission_internal(
             detail=f"Order is currently in '{order.status.value}' status. A mission can only be created once a Technician confirms package receipt at the hub (AT_HUB)."
         )
 
-    active_statuses = [
+    active_statuses = {
         MissionStatus.SCHEDULED,
         MissionStatus.IN_PROGRESS,
         MissionStatus.APPROVED,
         MissionStatus.FLYING,
         MissionStatus.ACTIVE_MISSION,
-    ]
+    }
+    active_status_list = list(active_statuses)
 
-    # Kiểm tra xem đơn hàng đã có Mission active chưa
-    existing_mission_res = await db.execute(
-        select(Mission).where(
-            Mission.order_id == order.id,
-            Mission.status.in_(active_statuses)
-        )
+    # Gộp check Order active mission, Order incident chưa thu hồi, Drone bận, và eff_origin_hub_id trong 1 query
+    rel_missions_res = await db.execute(
+        select(Mission)
+        .where(or_(Mission.order_id == order.id, Mission.drone_id == request.droneId))
+        .order_by(Mission.id.desc())
     )
-    if existing_mission_res.scalars().first():
+    rel_missions = rel_missions_res.scalars().all()
+    order_missions = [m for m in rel_missions if m.order_id == order.id]
+
+    if any(m.status in active_statuses for m in order_missions):
         raise HTTPException(
             status_code=400,
             detail="This order already has a scheduled or active mission"
         )
 
-    # Chặn nếu có Mission sự cố hoặc rớt Drone trước đó nhưng Technician chưa confirm thu hồi kiện hàng tại Hub
-    unconfirmed_incident_res = await db.execute(
-        select(Mission).where(
-            Mission.order_id == order.id,
-            Mission.status.in_([MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED]),
-            or_(
-                Mission.arrival_confirmed_at.is_(None),
-                Mission.handling_status.is_not(None),
-            )
-        )
-    )
-    if unconfirmed_incident_res.scalars().first():
+    if any(
+        m.status in (MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED)
+        and (m.arrival_confirmed_at is None or m.handling_status is not None)
+        for m in order_missions
+    ):
         raise HTTPException(
             status_code=400,
             detail="A previous flight for this order encountered an incident or disconnection, and a Technician has not yet confirmed drone/package recovery at a hub. Please wait for the Technician to confirm recovery via confirm-arrival before creating a replacement mission."
@@ -3860,19 +4438,31 @@ async def _create_mission_internal(
     if not drone:
         raise HTTPException(status_code=404, detail="Drone not found")
 
-    # Kiểm tra Drone chưa bị gán cho một Mission active khác
-    busy_drone_res = await db.execute(
-        select(Mission).where(
-            Mission.drone_id == drone.id,
-            Mission.status.in_(active_statuses)
-        )
-    )
-    busy_mission = busy_drone_res.scalars().first()
+    busy_mission = next((m for m in rel_missions if m.drone_id == drone.id and m.status in active_statuses), None)
     if busy_mission:
         raise HTTPException(
             status_code=400,
             detail=f"Drone #{drone.id} ({drone.name}) is currently assigned to mission {busy_mission.id}."
         )
+
+    # Xác định eff_origin_hub_id trực tiếp từ danh sách order_missions đã tải (tránh query lại DB)
+    eff_origin_hub_id = order.origin_hub_id
+    last_inc_mission = next(
+        (m for m in order_missions if m.status in (MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED)),
+        None,
+    )
+    if (
+        last_inc_mission
+        and last_inc_mission.destination_hub_id
+        and (order.replan_required_at is not None or last_inc_mission.arrival_confirmed_at is not None)
+    ):
+        newer_completed = any(
+            m.id > last_inc_mission.id
+            and (m.status in (MissionStatus.ARRIVAL_COMPLETED, MissionStatus.MISSION_COMPLETED) or m.status in active_statuses)
+            for m in order_missions
+        )
+        if not newer_completed and last_inc_mission.destination_hub_id != order.destination_hub_id:
+            eff_origin_hub_id = last_inc_mission.destination_hub_id
 
     # Xác định mã pin xuất phát được chọn cho Drone (từ batteryId / battery_id hoặc legs_detail[0].battery_id)
     requested_battery_id = (request.batteryId or request.battery_id or "").strip() or None
@@ -3899,19 +4489,70 @@ async def _create_mission_internal(
             if b_obj:
                 bundled_order_objs.append(b_obj)
 
-    # Tái hiện các tùy chọn tuyến đường dựa trên năng lượng của pin được gán + chỉ định pin tại các Relay Hub
+    compat_models_map = await get_compatible_battery_models_map(db)
+    reserved_bat_ids, _ = await _get_reserved_batteries_and_virtual_holds(db)
+
+    preloaded_fast_bats: dict[str, Battery] = {}
+    preloaded_drone_id: Optional[str] = None
+
+    # Tái hiện lộ trình nhanh từ cache Analyze hoặc snapshot legs_detail; chỉ tính lại toàn bộ khi fallback
     if precomputed_routes is not None:
         routes_schemas, raw_data_list = precomputed_routes
     else:
-        routes_schemas, raw_data_list = await compute_mission_routes_internal(
-            db=db,
-            order=order,
+        cached_routes = _get_cached_routes_for_create(
+            order_id=order.id,
             drone_id=request.droneId,
-            battery_id=requested_battery_id,
-            strict_battery=True,
-            override_payload_kg=total_bundle_payload,
+            requested_battery_id=requested_battery_id,
+            total_payload_kg=total_bundle_payload,
             recommend_mode=recommend_mode,
+            route_id=request.routeId,
         )
+        if cached_routes is not None:
+            routes_schemas, raw_data_list = cached_routes
+        else:
+            req_bat_ids: set[str] = set()
+            if requested_battery_id:
+                req_bat_ids.add(requested_battery_id)
+            if request.relay_battery_ids:
+                for v in request.relay_battery_ids.values():
+                    if v:
+                        req_bat_ids.add(str(v).strip())
+            if request.legs_detail:
+                for req_leg in request.legs_detail:
+                    rl_bat = getattr(req_leg, "battery_id", None)
+                    if rl_bat:
+                        req_bat_ids.add(str(rl_bat).strip())
+
+            fast_routes = await _build_fast_routes_from_request(
+                db=db,
+                order=order,
+                drone=drone,
+                request=request,
+                requested_battery_id=requested_battery_id,
+                total_payload_kg=total_bundle_payload,
+                eff_origin_hub_id=eff_origin_hub_id,
+                compat_models_map=compat_models_map,
+                reserved_bat_ids=reserved_bat_ids,
+                extra_battery_ids=req_bat_ids,
+                preloaded_batteries_out=preloaded_fast_bats,
+            )
+            if fast_routes is not None:
+                preloaded_drone_id = drone.id
+                routes_schemas, raw_data_list = fast_routes
+            else:
+                routes_schemas, raw_data_list = await compute_mission_routes_internal(
+                    db=db,
+                    order=order,
+                    drone_id=request.droneId,
+                    battery_id=requested_battery_id,
+                    strict_battery=True,
+                    override_payload_kg=total_bundle_payload,
+                    recommend_mode=recommend_mode,
+                    preloaded_context={
+                        "eff_origin_hub_id": eff_origin_hub_id,
+                        "compat_models_map": compat_models_map,
+                    },
+                )
 
     selected_schema = None
     selected_data = None
@@ -3959,30 +4600,87 @@ async def _create_mission_internal(
             drone = disp_drone
             assigned_drone_id = disp_drone.id
 
-    eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
-    battery_id = selected_schema.assignedBatteryId if selected_schema else requested_battery_id
-    assigned_battery = await db.get(Battery, battery_id) if battery_id else None
+    battery_id = requested_battery_id or (selected_schema.assignedBatteryId if selected_schema else None)
+    legs = selected_data.get("legs_detail", []) if selected_data else []
+
+    # Nạp 1 lượt tất cả Battery liên quan (pin xuất phát, pin đang gắn trên drone, và các pin relay override)
+    bat_ids_to_load: set[str] = set()
+    if battery_id:
+        bat_ids_to_load.add(battery_id)
+    if request.relay_battery_ids:
+        for v in request.relay_battery_ids.values():
+            if v:
+                bat_ids_to_load.add(str(v).strip())
+    for idx, leg_item in enumerate(legs):
+        if idx > 0 and leg_item.get("battery_id"):
+            bat_ids_to_load.add(str(leg_item["battery_id"]).strip())
+        if request.legs_detail and idx < len(request.legs_detail):
+            req_leg_bat = getattr(request.legs_detail[idx], "battery_id", None)
+            if req_leg_bat:
+                bat_ids_to_load.add(str(req_leg_bat).strip())
+
+    # Tái sử dụng Battery đã preload từ fast-path (nếu cùng drone), chỉ query bổ sung phần còn thiếu
+    if preloaded_drone_id == drone.id and preloaded_fast_bats:
+        battery_by_id = dict(preloaded_fast_bats)
+        missing_bat_ids = [bid for bid in bat_ids_to_load if bid not in battery_by_id]
+        if missing_bat_ids:
+            extra_loaded = list((await db.execute(select(Battery).where(Battery.id.in_(missing_bat_ids)))).scalars().all())
+            for b in extra_loaded:
+                battery_by_id[b.id] = b
+        loaded_bats = list(battery_by_id.values())
+    else:
+        bat_load_filters = [Battery.drone_id == drone.id]
+        if bat_ids_to_load:
+            bat_load_filters.append(Battery.id.in_(list(bat_ids_to_load)))
+        loaded_bats = list((await db.execute(select(Battery).where(or_(*bat_load_filters)))).scalars().all())
+        battery_by_id: dict[str, Battery] = {b.id: b for b in loaded_bats}
+
+    assigned_battery = battery_by_id.get(battery_id) if battery_id else None
     if not assigned_battery:
         raise HTTPException(
             status_code=400,
             detail=f"No compatible battery available at Hub #{eff_origin_hub_id or order.origin_hub_id} to assign to Drone #{drone.id} ({drone.model})."
         )
 
+    compatible_models = resolve_compatible_models_from_map(compat_models_map, drone.model)
+
+    # Kiểm tra an toàn pin xuất phát trực tiếp với dữ liệu DB thực tế (kể cả khi đi qua fast-path/cache)
+    if assigned_battery.status != batteries_status.ACTIVE or (assigned_battery.charge_level_pct or 0) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Battery {assigned_battery.id} is not ready (status: {assigned_battery.status}, charge: {assigned_battery.charge_level_pct or 0}%)."
+        )
+    if compatible_models and assigned_battery.battery_model and assigned_battery.battery_model not in compatible_models:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Battery {assigned_battery.id} ({assigned_battery.battery_model}) is incompatible with {drone.model}."
+        )
+    if assigned_battery.id in reserved_bat_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Battery {assigned_battery.id} is already reserved for another active mission."
+        )
+    if legs:
+        leg0_req_energy = float(legs[0].get("energy_wh") or 0.0)
+        _, _, origin_bat_energy_live = _compute_battery_energy_wh(assigned_battery)
+        if leg0_req_energy > origin_bat_energy_live * 0.8:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Battery {assigned_battery.id} ({origin_bat_energy_live:.1f} Wh, charge {assigned_battery.charge_level_pct}%) "
+                    f"lacks sufficient safe energy (max {origin_bat_energy_live * 0.8:.1f} Wh) for Leg 1 ({leg0_req_energy:.1f} Wh, minimum 20% reserve required)."
+                )
+            )
+
     # Gắn liên kết viên pin được chọn với Drone thực hiện nhiệm vụ
     if assigned_battery.drone_id != drone.id:
-        # Nếu drone đang gắn viên pin khác không dùng cho mission này, giải phóng liên kết cũ
-        old_drone_bats_res = await db.execute(
-            select(Battery).where(Battery.drone_id == drone.id, Battery.id != assigned_battery.id)
-        )
-        for ob in old_drone_bats_res.scalars().all():
-            ob.drone_id = None
+        for ob in loaded_bats:
+            if ob.drone_id == drone.id and ob.id != assigned_battery.id:
+                ob.drone_id = None
         assigned_battery.drone_id = drone.id
 
     if assigned_battery.charge_level_pct is not None:
         drone.battery_level_pct = assigned_battery.charge_level_pct
-
-    compatible_models = await get_compatible_battery_models(db, drone.model)
-    reserved_bat_ids, _ = await _get_reserved_batteries_and_virtual_holds(db)
 
     mission_id = await generate_sequential_id(db, Mission, "MSN")
 
@@ -4009,12 +4707,12 @@ async def _create_mission_internal(
         operator_id=user.id
     )
     db.add(mission)
-    await db.flush()
 
     # 2. Tạo các chặng bay (MissionLeg) và chỉ định chính xác viên pin cho từng chặng (kể cả Relay Hub)
-    legs = selected_data.get("legs_detail", []) if selected_data else []
     used_mission_bat_ids: set[str] = {assigned_battery.id}
     relay_swap_summary_parts: list[str] = []
+    created_legs: list[MissionLeg] = []
+    now_naive = get_vn_naive_datetime()
 
     for idx, leg_item in enumerate(legs):
         if idx == 0:
@@ -4022,7 +4720,6 @@ async def _create_mission_internal(
         else:
             relay_hub_id = leg_item.get("from_hub_id")
             relay_hub_code = leg_item.get("from_hub_code") or str(relay_hub_id)
-            # Kiểm tra xem Operator có truyền override pin thay thế tại Relay Hub không
             override_bat_id = None
             if request.relay_battery_ids:
                 override_bat_id = (
@@ -4036,7 +4733,7 @@ async def _create_mission_internal(
 
             candidate_bat_id = (override_bat_id or leg_item.get("battery_id") or "").strip() or None
             if override_bat_id:
-                relay_bat = await db.get(Battery, candidate_bat_id) if candidate_bat_id else None
+                relay_bat = battery_by_id.get(candidate_bat_id) if candidate_bat_id else None
                 if not relay_bat:
                     raise HTTPException(
                         status_code=404,
@@ -4087,10 +4784,11 @@ async def _create_mission_internal(
             to_hub_id=leg_item["to_hub_id"],
             battery_id=leg_battery_id,
             status=MissionLegStatus.PENDING,
-            created_at=get_vn_naive_datetime(),
-            updated_at=get_vn_naive_datetime()
+            created_at=now_naive,
+            updated_at=now_naive,
         )
         db.add(m_leg)
+        created_legs.append(m_leg)
 
     # 3. Lưu AI Snapshot
     rec_content = (
@@ -4117,52 +4815,57 @@ async def _create_mission_internal(
     db.add(ai_pred)
 
     # 4. Ghi nhận thời gian planning trên tất cả các đơn hàng thuộc nhiệm vụ (xóa cờ replan_required_at nếu có)
-    now_naive = get_vn_naive_datetime()
     for o_item in bundled_order_objs:
         o_item.planning_at = now_naive
         o_item.replan_required_at = None
 
+    # 5. Tạo in-app notification cho Customer trong cùng 1 transaction commit
+    from app.core.config import settings
+    from app.modules.system.models import Notification, NotificationType
+    emails_to_send: list[tuple[str, str]] = []
+    _eta = (mission.scheduled_time or now_naive).strftime("%H:%M %d/%m") if (mission.scheduled_time or now_naive) else "N/A"
+    for o_item in bundled_order_objs:
+        if o_item.customer_id:
+            db.add(Notification(
+                user_id=o_item.customer_id,
+                title=f"✈️ Order #{o_item.id} Flight Scheduled",
+                message=(
+                    f"Flight #{mission.id} has been scheduled to deliver your order #{o_item.id}. "
+                    f"Estimated ETA: {_eta}. You will be notified upon arrival."
+                ),
+                notifications_type=NotificationType.MISSION_STATUS,
+                mission_id=str(mission.id),
+                reference_id=f"MISSION_SCHEDULED_{mission.id}",
+                created_at=now_naive,
+            ))
+        if o_item.receiver_email:
+            emails_to_send.append((o_item.receiver_email, o_item.id))
+
     await db.commit()
-    await db.refresh(mission)
+    _invalidate_route_analysis_cache()
 
-    # Gửi email thông báo cho tất cả người nhận của các đơn hàng trong chuyến bay
-    try:
-        from app.core.email import send_mission_scheduled_email
-        from app.core.config import settings
-        from app.modules.system.models import Notification, NotificationType
-        from app.core.timezone import get_vn_naive_datetime as _now_vn
-        _ts = _now_vn()
-        for o_item in bundled_order_objs:
-            # In-app notification cho Customer
-            if o_item.customer_id:
-                _eta = (mission.scheduled_time or _ts).strftime("%H:%M %d/%m") if (mission.scheduled_time or _ts) else "N/A"
-                db.add(Notification(
-                    user_id=o_item.customer_id,
-                    title=f"✈️ Order #{o_item.id} Flight Scheduled",
-                    message=(
-                        f"Flight #{mission.id} has been scheduled to deliver your order #{o_item.id}. "
-                        f"Estimated ETA: {_eta}. You will be notified upon arrival."
-                    ),
-                    notifications_type=NotificationType.MISSION_STATUS,
-                    mission_id=str(mission.id),
-                    reference_id=f"MISSION_SCHEDULED_{mission.id}",
-                    created_at=_ts,
-                ))
-            if o_item.receiver_email:
-                await send_mission_scheduled_email(
-                    to_email=o_item.receiver_email,
-                    order_id=o_item.id,
-                    mission_id=mission.id,
-                    frontend_url=settings.FRONTEND_URL,
-                )
-        await db.commit()
-    except Exception as e:
-        print(f"[EMAIL/NOTIF] Lỗi gửi mission scheduled: {e}")
+    # Gửi email thông báo dưới nền (non-blocking) để API Assign/Create Mission trả về tức thì
+    for to_email, o_id in emails_to_send:
+        _schedule_mission_email_background(
+            to_email=to_email,
+            order_id=o_id,
+            mission_id=mission.id,
+            frontend_url=settings.FRONTEND_URL,
+        )
 
-    resp_mission = await build_mission_detail_response(db, mission)
-    resp_mission.bundled_order_ids = all_mission_order_ids
-    resp_mission.total_orders_count = len(all_mission_order_ids)
-    return resp_mission
+    hub_list = await get_all_hubs_cached(db)
+    hub_by_id = {h.id: h for h in hub_list}
+    return _build_created_mission_response(
+        mission=mission,
+        drone=drone,
+        assigned_battery=assigned_battery,
+        created_legs=created_legs,
+        hub_by_id=hub_by_id,
+        battery_by_id=battery_by_id,
+        selected_schema=selected_schema,
+        ai_pred=ai_pred,
+        all_mission_order_ids=all_mission_order_ids,
+    )
 
 
 @router.post("", response_model=MissionResponse)
@@ -4459,6 +5162,7 @@ async def operator_battery_swap(
         ))
 
     await db.commit()
+    _invalidate_route_analysis_cache()
 
     return BatterySwapOperatorResponse(
         mission_id=str(mission.id),
@@ -5303,6 +6007,7 @@ async def execute_mission_failsafe(
         ))
 
     await db.commit()
+    _invalidate_route_analysis_cache()
 
     return FailsafeExecuteResponse(
         mission_id=mission.id,

@@ -1,5 +1,51 @@
+import asyncio
+import weakref
 import httpx
 from app.core.config import settings
+
+# [PERF NOTE] KHÔNG dùng httpx.post (blocking I/O) trong các hàm async def gửi email!
+# Blocking I/O sẽ làm treo toàn bộ FastAPI event loop tới 10s (ảnh hưởng cả live-tracking và mọi API khác).
+# Dùng AsyncClient theo từng event loop (hỗ trợ an toàn cả main uvicorn loop lẫn worker thread chạy asyncio.run).
+_BREVO_CLIENTS_BY_LOOP: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = weakref.WeakKeyDictionary()
+
+
+def _get_brevo_async_client() -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    client = _BREVO_CLIENTS_BY_LOOP.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(timeout=10.0)
+        _BREVO_CLIENTS_BY_LOOP[loop] = client
+    return client
+
+
+async def _send_brevo_email_async(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    log_label: str,
+) -> bool:
+    """Gửi email bất đồng bộ qua Brevo API mà không làm nghẽn asyncio event loop."""
+    try:
+        client = _get_brevo_async_client()
+        response = await client.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "api-key": settings.BREVO_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
+                "to": [{"email": to_email}],
+                "subject": subject,
+                "htmlContent": html_body,
+            },
+        )
+        response.raise_for_status()
+        print(f"[EMAIL] Gửi {log_label} thành công đến {to_email}")
+        return True
+    except Exception as e:
+        print(f"[EMAIL] Lỗi gửi {log_label} email: {e}")
+        return False
 
 
 def send_reset_email(to_email: str, reset_link: str):
@@ -75,27 +121,12 @@ async def send_mission_scheduled_email(
     </div>
     """
 
-    try:
-        response = httpx.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={
-                "api-key": settings.BREVO_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
-                "to": [{"email": to_email}],
-                "subject": f"[DroneOptAI] Order {order_id} has been scheduled for flight 📅",
-                "htmlContent": html_body,
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        print(f"[EMAIL] Gửi mission scheduled thành công đến {to_email}")
-        return True
-    except Exception as e:
-        print(f"[EMAIL] Lỗi gửi mission scheduled email: {e}")
-        return False
+    return await _send_brevo_email_async(
+        to_email=to_email,
+        subject=f"[DroneOptAI] Order {order_id} has been scheduled for flight 📅",
+        html_body=html_body,
+        log_label="mission scheduled",
+    )
 
 
 async def send_delivery_email(
@@ -148,27 +179,12 @@ async def send_delivery_email(
     </div>
     """
 
-    try:
-        response = httpx.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={
-                "api-key": settings.BREVO_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
-                "to": [{"email": to_email}],
-                "subject": f"[DroneOptAI] Order {order_id} is out for delivery 🚁",
-                "htmlContent": html_body,
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        print(f"[EMAIL] Gửi thành công đến {to_email}")
-        return True
-    except Exception as e:
-        print(f"[EMAIL] Lỗi gửi email: {e}")
-        return False
+    return await _send_brevo_email_async(
+        to_email=to_email,
+        subject=f"[DroneOptAI] Order {order_id} is out for delivery 🚁",
+        html_body=html_body,
+        log_label="delivery",
+    )
 
 
 async def send_hub_arrival_email(
@@ -221,27 +237,12 @@ async def send_hub_arrival_email(
     </div>
     """
 
-    try:
-        response = httpx.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={
-                "api-key": settings.BREVO_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
-                "to": [{"email": to_email}],
-                "subject": f"[DroneOptAI] Order {order_id} has arrived at the pickup hub 📦",
-                "htmlContent": html_body,
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        print(f"[EMAIL] Gửi hub arrival thành công đến {to_email}")
-        return True
-    except Exception as e:
-        print(f"[EMAIL] Lỗi gửi hub arrival email: {e}")
-        return False
+    return await _send_brevo_email_async(
+        to_email=to_email,
+        subject=f"[DroneOptAI] Order {order_id} has arrived at the pickup hub 📦",
+        html_body=html_body,
+        log_label="hub arrival",
+    )
 
 
 async def send_refund_email(
@@ -281,27 +282,12 @@ async def send_refund_email(
     </div>
     """
 
-    try:
-        response = httpx.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={
-                "api-key": settings.BREVO_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
-                "to": [{"email": to_email}],
-                "subject": f"[DroneOptAI] Hoàn tiền đơn hàng {order_id} 💰",
-                "htmlContent": html_body,
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        print(f"[EMAIL] Gửi refund email thành công đến {to_email}")
-        return True
-    except Exception as e:
-        print(f"[EMAIL] Lỗi gửi refund email: {e}")
-        return False
+    return await _send_brevo_email_async(
+        to_email=to_email,
+        subject=f"[DroneOptAI] Hoàn tiền đơn hàng {order_id} 💰",
+        html_body=html_body,
+        log_label="refund",
+    )
 
 
 async def send_incident_notification_email(
@@ -353,24 +339,9 @@ async def send_incident_notification_email(
     </div>
     """
 
-    try:
-        response = httpx.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={
-                "api-key": settings.BREVO_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
-                "to": [{"email": to_email}],
-                "subject": f"[DroneOptAI] ⚠️ Sự cố chuyến bay — Đơn hàng {order_id}",
-                "htmlContent": html_body,
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        print(f"[EMAIL] Gửi incident notification email thành công đến {to_email} ({role_label})")
-        return True
-    except Exception as e:
-        print(f"[EMAIL] Lỗi gửi incident email: {e}")
-        return False
+    return await _send_brevo_email_async(
+        to_email=to_email,
+        subject=f"[DroneOptAI] ⚠️ Sự cố chuyến bay — Đơn hàng {order_id}",
+        html_body=html_body,
+        log_label=f"incident ({role_label})",
+    )

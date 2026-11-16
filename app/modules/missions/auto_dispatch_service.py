@@ -10,6 +10,7 @@ Quy ước ngôn ngữ:
 - Toàn bộ thông điệp trả về FE (HTTPException, SHAP labels/impacts/counterfactuals, summary): Tiếng Anh kỹ thuật tự nhiên.
 """
 
+import inspect
 from typing import Any, Awaitable, Callable, Optional
 from fastapi import HTTPException
 from sqlalchemy import and_, func, or_, select
@@ -25,6 +26,10 @@ from app.modules.fleet.models import (
 )
 from app.modules.missions.bundle_service import (
     ACTIVE_MISSION_STATUSES,
+    get_all_hubs_cached,
+    get_compatible_battery_models_map,
+    resolve_compatible_models_from_map,
+    resolve_effective_origin_from_missions,
     resolve_effective_origin_hub_id,
     validate_bundle_orders,
 )
@@ -140,8 +145,12 @@ async def _validate_order_and_bundle_for_auto_dispatch(
     db: AsyncSession,
     order_id: str,
     bundled_order_ids: Optional[list[str]],
+    order_missions_out: Optional[list[Mission]] = None,
 ) -> tuple[Order, list[str], float, float]:
-    """Kiểm tra điều kiện hợp lệ của đơn hàng chính và các đơn hàng gộp (nếu có)."""
+    """
+    Kiểm tra điều kiện hợp lệ của đơn hàng chính và các đơn hàng gộp (nếu có).
+    [PERF NOTE] Tải Mission của đơn hàng trong 1 query duy nhất để vừa check trùng/sự cố vừa tính eff_origin_hub_id.
+    """
     clean_order_id = order_id.strip() if order_id else ""
     order = await db.get(Order, clean_order_id)
     if not order:
@@ -159,29 +168,29 @@ async def _validate_order_and_bundle_for_auto_dispatch(
             ),
         )
 
-    existing_active = await db.execute(
-        select(Mission.id).where(
-            Mission.order_id == order.id,
-            Mission.status.in_(ACTIVE_MISSION_STATUSES),
-        ).limit(1)
+    order_missions = list(
+        (
+            await db.execute(
+                select(Mission)
+                .where(Mission.order_id == order.id)
+                .order_by(Mission.id.desc())
+            )
+        ).scalars().all()
     )
-    if existing_active.scalars().first():
+    if order_missions_out is not None:
+        order_missions_out.extend(order_missions)
+
+    if any(m.status in ACTIVE_MISSION_STATUSES for m in order_missions):
         raise HTTPException(
             status_code=400,
             detail="This order already has a scheduled or active mission",
         )
 
-    unconfirmed_inc = await db.execute(
-        select(Mission.id).where(
-            Mission.order_id == order.id,
-            Mission.status.in_([MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED]),
-            or_(
-                Mission.arrival_confirmed_at.is_(None),
-                Mission.handling_status.is_not(None),
-            ),
-        ).limit(1)
-    )
-    if unconfirmed_inc.scalars().first():
+    if any(
+        m.status in (MissionStatus.INCIDENT_RETURN, MissionStatus.FAILED)
+        and (m.arrival_confirmed_at is None or m.handling_status is not None)
+        for m in order_missions
+    ):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -700,19 +709,27 @@ async def _evaluate_fleet_for_order(
     get_reserved_batteries_fn: Callable[..., Awaitable[tuple[set[str], dict[int, int]]]],
     eval_all_local: bool = False,
 ) -> dict[str, Any]:
-    """Lõi dùng chung đánh giá đội Drone, Pin và Tuyến bay cho cả Recommend Wizard và Full Auto-Dispatch."""
+    """
+    Lõi dùng chung đánh giá đội Drone, Pin và Tuyến bay cho cả Recommend Wizard và Full Auto-Dispatch.
+    [PERF NOTE] Bắt buộc dùng `get_all_hubs_cached`, gộp `busy_drone_ids` vào `get_reserved_batteries_fn`,
+    và truyền `shared_route_ctx` cho `compute_routes_fn` để không lặp query DB/thời tiết cho từng drone.
+    """
+    order_missions: list[Mission] = []
     order, clean_bundle_ids, total_payload_kg, total_fee = await _validate_order_and_bundle_for_auto_dispatch(
         db=db,
         order_id=order_id,
         bundled_order_ids=bundled_order_ids,
+        order_missions_out=order_missions,
     )
 
-    eff_origin_hub_id, is_replan = await resolve_effective_origin_hub_id(db, order)
+    eff_origin_hub_id, is_replan = resolve_effective_origin_from_missions(order, order_missions)
     if not eff_origin_hub_id or not order.destination_hub_id:
         raise HTTPException(status_code=400, detail="Order is missing Origin Hub or Destination Hub information")
 
-    origin_hub = await db.get(Hub, eff_origin_hub_id)
-    dest_hub = await db.get(Hub, order.destination_hub_id)
+    all_hubs = await get_all_hubs_cached(db)
+    all_hubs_map = {h.id: h for h in all_hubs}
+    origin_hub = all_hubs_map.get(eff_origin_hub_id)
+    dest_hub = all_hubs_map.get(order.destination_hub_id)
     if not origin_hub or not dest_hub:
         raise HTTPException(status_code=400, detail="Origin Hub or Destination Hub does not exist in the system")
 
@@ -727,20 +744,32 @@ async def _evaluate_fleet_for_order(
         else ("FAST" if order_mode_raw == DeliveryMode.EXPRESS.value else "ECO")
     )
 
-    hubs_res = await db.execute(select(Hub).where(func.lower(Hub.status) == "active"))
-    active_hubs = list(hubs_res.scalars().all()) or list((await db.execute(select(Hub))).scalars().all())
+    active_hubs = [h for h in all_hubs if str(h.status or "").lower() == "active"] or list(all_hubs)
     hub_dict = {h.id: h for h in active_hubs}
     hub_dict.setdefault(origin_hub.id, origin_hub)
     hub_dict.setdefault(dest_hub.id, dest_hub)
 
-    busy_drones_res = await db.execute(
-        select(Mission.drone_id).where(
-            Mission.drone_id.is_not(None),
-            Mission.order_id != order.id,
-            Mission.status.in_(ACTIVE_MISSION_STATUSES),
+    busy_drone_ids: set[str] = set()
+    reserved_kwargs: dict[str, Any] = {
+        "db": db,
+        "relay_hub_ids": list(hub_dict.keys()),
+        "compatible_models": [],
+        "exclude_order_id": order.id,
+    }
+    supports_busy_out = "busy_drone_ids_out" in inspect.signature(get_reserved_batteries_fn).parameters
+    if supports_busy_out:
+        reserved_kwargs["busy_drone_ids_out"] = busy_drone_ids
+
+    reserved_bat_ids, held_count_by_hub = await get_reserved_batteries_fn(**reserved_kwargs)
+    if not supports_busy_out:
+        busy_drones_res = await db.execute(
+            select(Mission.drone_id).where(
+                Mission.drone_id.is_not(None),
+                Mission.order_id != order.id,
+                Mission.status.in_(ACTIVE_MISSION_STATUSES),
+            )
         )
-    )
-    busy_drone_ids = {r[0] for r in busy_drones_res.all() if r[0] is not None}
+        busy_drone_ids = {r[0] for r in busy_drones_res.all() if r[0] is not None}
 
     all_idle_drones_res = await db.execute(
         select(Drone).where(Drone.status == DroneStatus.AVAILABLE).order_by(Drone.id)
@@ -765,12 +794,6 @@ async def _evaluate_fleet_for_order(
     all_active_bats = list(
         (await db.execute(select(Battery).where(Battery.status == batteries_status.ACTIVE).order_by(Battery.id))).scalars().all()
     )
-    reserved_bat_ids, _ = await get_reserved_batteries_fn(
-        db=db,
-        relay_hub_ids=list(hub_dict.keys()),
-        compatible_models=[],
-        exclude_order_id=order.id,
-    )
 
     local_drones = [d for d in candidate_drones if d.current_hub_id == eff_origin_hub_id]
     other_drones = [d for d in candidate_drones if d.current_hub_id != eff_origin_hub_id]
@@ -783,13 +806,21 @@ async def _evaluate_fleet_for_order(
         )
     )
 
-    compat_cache: dict[str, list[str]] = {}
+    compat_cache: dict[str, list[str]] = await get_compatible_battery_models_map(db)
+    supports_preloaded_ctx = "preloaded_context" in inspect.signature(compute_routes_fn).parameters
+    shared_route_ctx: dict[str, Any] = {
+        "eff_origin_hub_id": eff_origin_hub_id,
+        "hubs": list(hub_dict.values()),
+        "all_active_batteries": all_active_bats,
+        "reserved_battery_ids": reserved_bat_ids,
+        "held_count_by_hub": held_count_by_hub,
+        "compat_models_map": compat_cache,
+        "drones_by_id": {d.id: d for d in candidate_drones},
+        "seg_weather_cache": {},
+    }
 
     async def _get_drone_elig_bats(d: Drone) -> list[Battery]:
-        d_model_key = d.model or ""
-        if d_model_key not in compat_cache:
-            compat_cache[d_model_key] = await get_compatible_battery_models(db, d.model)
-        compat_models = compat_cache[d_model_key]
+        compat_models = resolve_compatible_models_from_map(compat_cache, d.model)
         d_hub_id = d.current_hub_id or eff_origin_hub_id
         return [
             b for b in all_active_bats
@@ -814,15 +845,18 @@ async def _evaluate_fleet_for_order(
             )
         )
 
-        routes_schemas, raw_list = await compute_routes_fn(
-            db=db,
-            order=order,
-            drone_id=d.id,
-            battery_id=None,
-            strict_battery=False,
-            override_payload_kg=total_payload_kg,
-            recommend_mode=recommend_mode or "AUTO",
-        )
+        route_kwargs: dict[str, Any] = {
+            "db": db,
+            "order": order,
+            "drone_id": d.id,
+            "battery_id": None,
+            "strict_battery": False,
+            "override_payload_kg": total_payload_kg,
+            "recommend_mode": recommend_mode or "AUTO",
+        }
+        if supports_preloaded_ctx:
+            route_kwargs["preloaded_context"] = shared_route_ctx
+        routes_schemas, raw_list = await compute_routes_fn(**route_kwargs)
         feasible_pairs = [(s, raw) for s, raw in zip(routes_schemas, raw_list) if s.feasible]
         chosen_pair = (
             next(((s, raw) for s, raw in feasible_pairs if s.recommended), None)
@@ -998,15 +1032,18 @@ async def _evaluate_fleet_for_order(
     best_battery: Battery = bat_candidates[best_bat_idx]["battery"]
 
     if best_route.assignedBatteryId != best_battery.id:
-        recheck_schemas, recheck_raw = await compute_routes_fn(
-            db=db,
-            order=order,
-            drone_id=best_drone.id,
-            battery_id=best_battery.id,
-            strict_battery=True,
-            override_payload_kg=total_payload_kg,
-            recommend_mode=recommend_mode or "AUTO",
-        )
+        recheck_kwargs: dict[str, Any] = {
+            "db": db,
+            "order": order,
+            "drone_id": best_drone.id,
+            "battery_id": best_battery.id,
+            "strict_battery": True,
+            "override_payload_kg": total_payload_kg,
+            "recommend_mode": recommend_mode or "AUTO",
+        }
+        if supports_preloaded_ctx:
+            recheck_kwargs["preloaded_context"] = shared_route_ctx
+        recheck_schemas, recheck_raw = await compute_routes_fn(**recheck_kwargs)
         recheck_feasible = [s for s in recheck_schemas if s.feasible]
         if recheck_feasible:
             available_routes = recheck_schemas
