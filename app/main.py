@@ -88,8 +88,11 @@ async def run_realtime_cronjobs():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        async with async_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as e:
+        print(f"⚠️ [STARTUP DB WARNING] Không thể chạy create_all lúc khởi động (bỏ qua để giữ Server online): {e}")
         
     # Bắt đầu cronjob ngầm
     task_hourly = asyncio.create_task(run_hourly_cronjobs())
@@ -247,7 +250,7 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "app.main:app",
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=8000,
         reload=False,
         proxy_headers=True,

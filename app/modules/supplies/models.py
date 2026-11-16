@@ -203,7 +203,7 @@ class ReplacementRequest(Base):
 
     # Loại yêu cầu
     type: Mapped[ReplacementType] = mapped_column(
-        SAEnum(ReplacementType, name="replacement_type_enum", create_type=True,
+        SAEnum(ReplacementType, name="replacement_type_enum", create_type=False,
                values_callable=lambda x: [e.value for e in x]),
         nullable=False,
     )
@@ -222,7 +222,7 @@ class ReplacementRequest(Base):
 
     # Trạng thái
     status: Mapped[ReplacementStatus] = mapped_column(
-        SAEnum(ReplacementStatus, name="replacement_status_enum", create_type=True,
+        SAEnum(ReplacementStatus, name="replacement_status_enum", create_type=False,
                values_callable=lambda x: [e.value for e in x]),
         nullable=False, default=ReplacementStatus.AWAITING_SUPPLY, index=True,
     )
