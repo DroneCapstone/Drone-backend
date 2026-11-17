@@ -999,6 +999,156 @@ def _compute_battery_energy_wh(battery: Optional[Battery], default_capacity_wh: 
     return cap, charge_pct, energy_wh
 
 
+def _apply_leg_battery_step(
+    leg_energy_wh: float,
+    bat_obj: Optional[Battery],
+    fallback_cap_wh: float,
+    running_bat_state: dict[str, dict[str, Any]],
+    override_initial_energy_wh: Optional[float] = None,
+) -> tuple[float, Optional[int], float, int, int, float]:
+    """
+    Tính thông số Pin nối tiếp cho từng chặng (Leg) trong cùng 1 Mission/Route:
+    - Nếu dùng viên pin mới (chưa xuất hiện ở chặng trước): khởi tạo từ trạng thái DB thực tế.
+    - Nếu tiếp tục dùng CÙNG `battery_id` với chặng trước (bay nối tiếp không đổi pin):
+      `start_charge_pct` và `start_energy_wh` phải lấy phần CÒN LẠI sau chặng trước thay vì giữ nguyên như Leg 1.
+    Returns:
+        (cap_wh, start_charge_pct, start_energy_wh, cons_pct, rem_pct, rem_energy_wh)
+    """
+    if not bat_obj:
+        cap = float(fallback_cap_wh or 130.0)
+        cons_pct = int(round((leg_energy_wh / cap) * 100)) if cap > 0 else 100
+        rem_pct = max(0, 100 - cons_pct)
+        return cap, None, 0.0, cons_pct, rem_pct, 0.0
+
+    bat_key = str(bat_obj.id)
+    if bat_key in running_bat_state:
+        st = running_bat_state[bat_key]
+        cap = float(st["cap_wh"])
+        start_energy_wh = max(0.0, float(st["energy_wh"]))
+        start_charge_pct = max(0, min(100, int(st["charge_pct"])))
+        initial_energy_wh = float(st["initial_energy_wh"])
+    else:
+        cap, start_charge_pct, start_energy_wh = _compute_battery_energy_wh(bat_obj, fallback_cap_wh)
+        if override_initial_energy_wh is not None and override_initial_energy_wh > 0:
+            start_energy_wh = float(override_initial_energy_wh)
+            if cap > 0:
+                start_charge_pct = max(0, min(100, int(round((start_energy_wh / cap) * 100))))
+        initial_energy_wh = start_energy_wh
+
+    cons_pct = int(round((leg_energy_wh / cap) * 100)) if cap > 0 else 100
+    rem_energy_wh = max(0.0, round(start_energy_wh - leg_energy_wh, 2))
+    rem_pct = max(0, start_charge_pct - cons_pct)
+    running_bat_state[bat_key] = {
+        "cap_wh": cap,
+        "energy_wh": rem_energy_wh,
+        "charge_pct": rem_pct,
+        "initial_energy_wh": initial_energy_wh,
+    }
+    return cap, start_charge_pct, round(start_energy_wh, 2), cons_pct, rem_pct, rem_energy_wh
+
+
+def _summarize_mission_battery_pcts(
+    legs_detail: list[RouteLegSchema],
+    origin_charge_pct: Optional[int],
+    pred_energy_wh: float,
+    origin_energy_wh: float,
+) -> tuple[int, int]:
+    """
+    Tổng hợp `batteryConsumptionPct` và `remainingBatteryPct` toàn mission:
+    - Nếu bay 1 chặng hoặc nối tiếp không đổi pin (tất cả leg dùng chung 1 `battery_id`):
+      tính tổng `%` tiêu hao trên viên pin đó và phần `%` còn lại sau chặng cuối.
+    - Nếu có đổi pin ở Relay Hub (nhiều `battery_id` khác nhau):
+      `batteryConsumptionPct` là mức tiêu hao lớn nhất trong các chặng (không cộng dồn nhiều pin khác nhau),
+      và `remainingBatteryPct` là phần `%` còn lại của chặng cuối khi về đích.
+    """
+    leg_pcts = [
+        int(l.battery_consumption_pct)
+        for l in legs_detail
+        if l.battery_consumption_pct is not None
+    ]
+    unique_bat_ids = {str(l.battery_id) for l in legs_detail if l.battery_id}
+    if leg_pcts:
+        if len(legs_detail) > 1 and len(unique_bat_ids) <= 1:
+            batt_pct = sum(leg_pcts)
+        else:
+            batt_pct = max(leg_pcts)
+    else:
+        batt_pct = int(round((pred_energy_wh / origin_energy_wh) * 100)) if origin_energy_wh else 50
+
+    last_rem = legs_detail[-1].remaining_battery_pct if legs_detail else None
+    if last_rem is not None:
+        rem_batt_pct = max(0, int(last_rem))
+    else:
+        base_pct = int(origin_charge_pct) if origin_charge_pct is not None else 100
+        rem_batt_pct = max(0, base_pct - batt_pct)
+    return batt_pct, rem_batt_pct
+
+
+def _build_relay_summaries_from_legs(
+    legs_detail: list[RouteLegSchema],
+    hub_by_id: dict[int, Any],
+    battery_by_id: dict[str, Battery],
+    fallback_cap_wh: float,
+) -> tuple[list[str], list[HubBatteryStatus]]:
+    """Build `relayHubs` descriptions and `relay_battery_status` consistently from sequenced `legs_detail`."""
+    relay_hubs: list[str] = []
+    relay_battery_status_list: list[HubBatteryStatus] = []
+    for idx in range(len(legs_detail) - 1):
+        cur_leg = legs_detail[idx]
+        next_leg = legs_detail[idx + 1]
+        to_hub_id = cur_leg.to_hub_id
+        h2 = hub_by_id.get(to_hub_id) if to_hub_id is not None else None
+        to_code = (h2.code or h2.name) if h2 else (cur_leg.to_hub_code or str(to_hub_id or "?"))
+        hub_label = h2.name if h2 else (cur_leg.to_hub_name or to_code)
+        e_cur = float(cur_leg.energy_wh or 0.0)
+        swap_bat_id = next_leg.battery_id
+        swap_bat_obj = battery_by_id.get(swap_bat_id) if swap_bat_id else None
+        if swap_bat_obj:
+            s_cap = float(next_leg.battery_capacity_wh or fallback_cap_wh)
+            s_charge = int(next_leg.battery_charge_pct or 0)
+            s_energy = float(next_leg.battery_energy_wh or 0.0)
+            is_same_bat = (swap_bat_id == cur_leg.battery_id)
+            action_word = "Continue with battery" if is_same_bat else "Swap battery"
+            relay_hubs.append(
+                f"{hub_label} (Uses {e_cur:.1f}Wh) - {action_word} {swap_bat_obj.id} "
+                f"({swap_bat_obj.serial_number or swap_bat_obj.battery_model or 'Ready'}, "
+                f"{s_energy:.0f}Wh, {s_charge}%)"
+            )
+            if to_hub_id is not None:
+                relay_battery_status_list.append(
+                    HubBatteryStatus(
+                        hub_id=to_hub_id,
+                        hub_code=h2.code if h2 else to_code,
+                        hub_name=hub_label,
+                        ready_count=1,
+                        compatible_models=[swap_bat_obj.battery_model] if swap_bat_obj.battery_model else [],
+                        feasible=True,
+                        selected_battery_id=swap_bat_obj.id,
+                        selected_battery_serial=swap_bat_obj.serial_number,
+                        selected_battery_model=swap_bat_obj.battery_model,
+                        selected_battery_capacity_wh=round(s_cap, 2),
+                        selected_battery_charge_pct=s_charge,
+                        selected_battery_energy_wh=round(s_energy, 2),
+                        swap_battery_id=None if is_same_bat else swap_bat_obj.id,
+                        swap_battery_serial=None if is_same_bat else swap_bat_obj.serial_number,
+                        available_batteries=[
+                            RelayHubBatteryOptionSchema(
+                                id=swap_bat_obj.id,
+                                serial_number=swap_bat_obj.serial_number,
+                                battery_model=swap_bat_obj.battery_model,
+                                capacity_wh=round(s_cap, 2),
+                                charge_level_pct=s_charge,
+                                available_energy_wh=round(s_energy, 2),
+                                current_hub_id=swap_bat_obj.current_hub_id,
+                            )
+                        ],
+                    )
+                )
+        else:
+            relay_hubs.append(f"{hub_label} (Uses {e_cur:.1f}Wh) - Quick battery swap (0m)")
+    return relay_hubs, relay_battery_status_list
+
+
 
 async def _get_reserved_battery_info_map(
     db: AsyncSession,
@@ -1351,6 +1501,8 @@ async def check_relay_hub_battery_availability(
         origin_energy_wh = float(assigned_battery_energy_wh)
 
     max_safe_origin_wh = round(origin_energy_wh * 0.8, 2)
+    running_bat_state: dict[str, dict[str, Any]] = {}
+    leg0_energy = 0.0
 
     if legs_detail:
         leg0 = legs_detail[0]
@@ -1361,15 +1513,21 @@ async def check_relay_hub_battery_availability(
             )
 
         if assigned_battery is not None:
+            l0_cap, l0_charge, l0_wh, leg0_cons_pct, l0_rem_pct, _ = _apply_leg_battery_step(
+                leg0_energy,
+                assigned_battery,
+                drone_capacity_wh,
+                running_bat_state,
+                override_initial_energy_wh=assigned_battery_energy_wh,
+            )
             leg0["battery_id"] = assigned_battery.id
             leg0["battery_serial"] = assigned_battery.serial_number
             leg0["battery_model"] = assigned_battery.battery_model
-            leg0["battery_capacity_wh"] = round(origin_cap_wh, 2)
-            leg0["battery_charge_pct"] = origin_charge_pct
-            leg0["battery_energy_wh"] = round(origin_energy_wh, 2)
-            leg0_cons_pct = int(round((leg0_energy / origin_cap_wh) * 100)) if origin_cap_wh > 0 else 100
+            leg0["battery_capacity_wh"] = round(l0_cap, 2)
+            leg0["battery_charge_pct"] = l0_charge
+            leg0["battery_energy_wh"] = l0_wh
             leg0["battery_consumption_pct"] = leg0_cons_pct
-            leg0["remaining_battery_pct"] = max(0, origin_charge_pct - leg0_cons_pct)
+            leg0["remaining_battery_pct"] = l0_rem_pct
 
             if leg0_energy > max_safe_origin_wh:
                 infeasible_reasons.append(
@@ -1379,9 +1537,11 @@ async def check_relay_hub_battery_availability(
                     f"charge {origin_charge_pct}%, minimum 20% reserve required)"
                 )
         else:
-            leg0_cons_pct = int(round((leg0_energy / origin_cap_wh) * 100)) if origin_cap_wh > 0 else 100
+            _, _, _, leg0_cons_pct, l0_rem_pct, _ = _apply_leg_battery_step(
+                leg0_energy, None, origin_cap_wh, running_bat_state
+            )
             leg0["battery_consumption_pct"] = leg0_cons_pct
-            leg0["remaining_battery_pct"] = max(0, origin_charge_pct - leg0_cons_pct)
+            leg0["remaining_battery_pct"] = l0_rem_pct
             infeasible_reasons.append(
                 f"Origin hub has no compatible battery{model_str} available to assign to Drone"
             )
@@ -1463,7 +1623,9 @@ async def check_relay_hub_battery_availability(
         selected_bat: Optional[Battery] = available_for_this_stop[0] if available_for_this_stop else None
         if selected_bat:
             used_relay_bat_ids.add(selected_bat.id)
-            sel_cap_wh, sel_charge_pct, sel_energy_wh = _compute_battery_energy_wh(selected_bat, drone_capacity_wh)
+            sel_cap_wh, sel_charge_pct, sel_energy_wh, leg_cons_pct, leg_rem_pct, _ = _apply_leg_battery_step(
+                next_leg_energy, selected_bat, drone_capacity_wh, running_bat_state
+            )
             sel_max_safe_wh = round(sel_energy_wh * 0.8, 2)
 
             if next_leg is not None:
@@ -1472,10 +1634,9 @@ async def check_relay_hub_battery_availability(
                 next_leg["battery_model"] = selected_bat.battery_model
                 next_leg["battery_capacity_wh"] = round(sel_cap_wh, 2)
                 next_leg["battery_charge_pct"] = sel_charge_pct
-                next_leg["battery_energy_wh"] = round(sel_energy_wh, 2)
-                leg_cons_pct = int(round((next_leg_energy / sel_cap_wh) * 100)) if sel_cap_wh > 0 else 100
+                next_leg["battery_energy_wh"] = sel_energy_wh
                 next_leg["battery_consumption_pct"] = leg_cons_pct
-                next_leg["remaining_battery_pct"] = max(0, sel_charge_pct - leg_cons_pct)
+                next_leg["remaining_battery_pct"] = leg_rem_pct
 
             if next_leg is not None and next_leg_energy > sel_max_safe_wh:
                 leg_pct = int(round((next_leg_energy / sel_energy_wh) * 100)) if sel_energy_wh > 0 else 100
@@ -1501,7 +1662,7 @@ async def check_relay_hub_battery_availability(
                 selected_battery_model=selected_bat.battery_model,
                 selected_battery_capacity_wh=round(sel_cap_wh, 2),
                 selected_battery_charge_pct=sel_charge_pct,
-                selected_battery_energy_wh=round(sel_energy_wh, 2),
+                selected_battery_energy_wh=sel_energy_wh,
                 swap_battery_id=selected_bat.id,
                 swap_battery_serial=selected_bat.serial_number,
                 available_batteries=[
@@ -1517,19 +1678,31 @@ async def check_relay_hub_battery_availability(
                 ],
             ))
         else:
-            if is_cross_hub and hub_id == origin_hub_id and assigned_battery and (leg0_energy + next_leg_energy) <= max_safe_origin_wh:
+            prev_st = running_bat_state.get(str(assigned_battery.id)) if assigned_battery else None
+            cur_rem_wh = float(prev_st["energy_wh"]) if prev_st else origin_energy_wh
+            init_bat_wh = float(prev_st["initial_energy_wh"]) if prev_st else origin_energy_wh
+            can_continue_same_bat = (
+                is_cross_hub
+                and hub_id == origin_hub_id
+                and assigned_battery is not None
+                and init_bat_wh > 0
+                and (cur_rem_wh - next_leg_energy) >= (init_bat_wh * 0.2)
+            )
+            if can_continue_same_bat:
                 hub_feasible = True
+                # Tiếp tục dùng chung pin từ chặng Dispatch trước -> % và Wh đầu chặng phải giảm đi đúng phần đã tiêu hao ở Leg trước
+                cont_cap_wh, cont_charge_pct, cont_energy_wh, leg_cons_pct, leg_rem_pct, _ = _apply_leg_battery_step(
+                    next_leg_energy, assigned_battery, drone_capacity_wh, running_bat_state
+                )
                 if next_leg is not None:
                     next_leg["battery_id"] = assigned_battery.id
                     next_leg["battery_serial"] = assigned_battery.serial_number
                     next_leg["battery_model"] = assigned_battery.battery_model
-                    next_leg["battery_capacity_wh"] = round(origin_cap_wh, 2)
-                    next_leg["battery_charge_pct"] = origin_charge_pct
-                    next_leg["battery_energy_wh"] = round(origin_energy_wh, 2)
-                    tot_cons_wh = leg0_energy + next_leg_energy
-                    leg_cons_pct = int(round((tot_cons_wh / origin_energy_wh) * 100)) if origin_energy_wh > 0 else 100
+                    next_leg["battery_capacity_wh"] = round(cont_cap_wh, 2)
+                    next_leg["battery_charge_pct"] = cont_charge_pct
+                    next_leg["battery_energy_wh"] = cont_energy_wh
                     next_leg["battery_consumption_pct"] = leg_cons_pct
-                    next_leg["remaining_battery_pct"] = max(0, 100 - leg_cons_pct)
+                    next_leg["remaining_battery_pct"] = leg_rem_pct
 
                 relay_statuses.append(HubBatteryStatus(
                     hub_id=hub_id,
@@ -1541,9 +1714,9 @@ async def check_relay_hub_battery_availability(
                     selected_battery_id=assigned_battery.id,
                     selected_battery_serial=assigned_battery.serial_number,
                     selected_battery_model=assigned_battery.battery_model,
-                    selected_battery_capacity_wh=round(origin_cap_wh, 2),
-                    selected_battery_charge_pct=origin_charge_pct,
-                    selected_battery_energy_wh=round(origin_energy_wh, 2),
+                    selected_battery_capacity_wh=round(cont_cap_wh, 2),
+                    selected_battery_charge_pct=cont_charge_pct,
+                    selected_battery_energy_wh=cont_energy_wh,
                     swap_battery_id=None,
                     swap_battery_serial=None,
                     available_batteries=[],
@@ -1552,9 +1725,14 @@ async def check_relay_hub_battery_availability(
                 hub_feasible = False
                 fallback_max_safe_wh = round(drone_capacity_wh * 0.8, 2)
                 if next_leg is not None:
-                    leg_cons_pct = int(round((next_leg_energy / drone_capacity_wh) * 100)) if drone_capacity_wh > 0 else 100
+                    _, _, _, leg_cons_pct, _, _ = _apply_leg_battery_step(
+                        next_leg_energy, None, drone_capacity_wh, running_bat_state
+                    )
+                    prev_leg = legs_detail[relay_idx] if relay_idx < len(legs_detail) else None
+                    prev_rem_val = prev_leg.get("remaining_battery_pct") if prev_leg else None
+                    base_start_pct = int(prev_rem_val) if prev_rem_val is not None else 100
                     next_leg["battery_consumption_pct"] = leg_cons_pct
-                    next_leg["remaining_battery_pct"] = max(0, 100 - leg_cons_pct)
+                    next_leg["remaining_battery_pct"] = max(0, base_start_pct - leg_cons_pct)
                     if drone_capacity_wh > 0 and next_leg_energy > fallback_max_safe_wh:
                         infeasible_reasons.append(
                             f"Leg {relay_idx + 2} ({next_leg.get('from_hub_code', '?')} -> {next_leg.get('to_hub_code', '?')}) "
@@ -2976,8 +3154,17 @@ async def compute_mission_routes_internal(
             d["relayHubs"] = updated_relay_labels
 
             leg_pcts = [int(leg.get("battery_consumption_pct") or 0) for leg in legs_raw if leg.get("battery_consumption_pct") is not None]
-            batt_pct = max(leg_pcts) if leg_pcts else (int(round((float(d["predictedEnergyWh"]) / opt_bat_energy) * 100)) if opt_bat_energy > 0 else 50)
-            rem_batt_pct = max(0, 100 - batt_pct)
+            unique_bat_ids = {str(leg.get("battery_id")) for leg in legs_raw if leg.get("battery_id")}
+            if leg_pcts:
+                batt_pct = sum(leg_pcts) if (len(legs_raw) > 1 and len(unique_bat_ids) <= 1) else max(leg_pcts)
+            else:
+                batt_pct = int(round((float(d["predictedEnergyWh"]) / opt_bat_energy) * 100)) if opt_bat_energy > 0 else 50
+            last_leg_rem = legs_raw[-1].get("remaining_battery_pct") if legs_raw else None
+            if last_leg_rem is not None:
+                rem_batt_pct = max(0, int(last_leg_rem))
+            else:
+                base_start = int(opt_bat_charge) if opt_assigned_bat else 100
+                rem_batt_pct = max(0, base_start - batt_pct)
 
         risk = "LOW" if batt_pct < 60 else ("MEDIUM" if batt_pct <= 80 else "HIGH")
         route_altitude = float(d.get("flight_altitude_m") or 45.0)
@@ -3364,7 +3551,7 @@ async def build_missions_response_list(
         relay_hubs: list[str] = []
         relay_battery_status_list: list[HubBatteryStatus] = []
         leg_energies: list[float] = []
-        leg_consumption_pcts: list[int] = []
+        running_bat_state: dict[str, dict[str, Any]] = {}
 
         if m_legs:
             for idx, leg in enumerate(m_legs):
@@ -3373,35 +3560,28 @@ async def build_missions_response_list(
                 from_code = (h1.code or h1.name) if h1 else str(leg.from_hub_id)
                 to_code = (h2.code or h2.name) if h2 else str(leg.to_hub_id)
 
+                is_dispatch_leg = bool(
+                    m.origin_hub_id
+                    and leg.to_hub_id == m.origin_hub_id
+                    and leg.from_hub_id != m.origin_hub_id
+                    and idx == 0
+                    and len(m_legs) > 1
+                )
+                leg_type_val = "DISPATCH" if is_dispatch_leg else "DELIVERY"
+                leg_payload_val = 0.0 if is_dispatch_leg else (payload if payload > 0 else None)
+
                 d = haversine_distance(
                     h1.latitude or 0, h1.longitude or 0,
                     h2.latitude or 0, h2.longitude or 0
                 ) if (h1 and h2) else 0.0
-                e = float(predict_flight_energy_cached(d, payload)["energy_wh"])
+                e = float(predict_flight_energy_cached(d, 0.0 if is_dispatch_leg else payload)["energy_wh"])
                 leg_energies.append(e)
 
                 leg_bat_id = str(leg.battery_id) if leg.battery_id else (origin_bat_id if idx == 0 else None)
                 leg_bat_obj = battery_by_id.get(leg_bat_id) if leg_bat_id else None
-                leg_cap, leg_charge, leg_energy_avail = _compute_battery_energy_wh(
-                    leg_bat_obj, drone_capacity_wh
+                leg_cap, leg_charge, leg_energy_avail, leg_pct, leg_rem_pct, _ = _apply_leg_battery_step(
+                    e, leg_bat_obj, drone_capacity_wh, running_bat_state
                 )
-                leg_pct = int(round((e / leg_cap) * 100)) if leg_cap > 0 else 50
-                is_leg_done = (
-                    leg.status == MissionLegStatus.COMPLETED
-                    or str(m.status.value if hasattr(m.status, "value") else (m.status or "")).strip().lower() in ("completed", "mission completed")
-                )
-                if is_leg_done:
-                    leg_rem_pct = int(round(leg_charge))
-                else:
-                    leg_rem_pct = max(0, leg_charge - leg_pct)
-                leg_consumption_pcts.append(leg_pct)
-
-                is_dispatch_leg = False
-                if m.origin_hub_id and leg.to_hub_id == m.origin_hub_id and leg.from_hub_id != m.origin_hub_id and idx == 0 and len(m_legs) > 1:
-                    is_dispatch_leg = True
-
-                leg_type_val = "DISPATCH" if is_dispatch_leg else "DELIVERY"
-                leg_payload_val = 0.0 if is_dispatch_leg else (payload if payload > 0 else None)
 
                 legs_detail.append(
                     RouteLegSchema(
@@ -3423,8 +3603,8 @@ async def build_missions_response_list(
                         battery_serial=leg_bat_obj.serial_number if leg_bat_obj else None,
                         battery_model=leg_bat_obj.battery_model if leg_bat_obj else None,
                         battery_capacity_wh=round(leg_cap, 2),
-                        battery_charge_pct=leg_charge if leg_bat_obj else None,
-                        battery_energy_wh=round(leg_energy_avail, 2),
+                        battery_charge_pct=leg_charge,
+                        battery_energy_wh=leg_energy_avail,
                         battery_consumption_pct=leg_pct,
                         remaining_battery_pct=leg_rem_pct,
                         leg_type=leg_type_val,
@@ -3433,49 +3613,12 @@ async def build_missions_response_list(
                     )
                 )
 
-                if idx < len(m_legs) - 1:
-                    hub_label = h2.name if h2 else to_code
-                    next_leg_obj = m_legs[idx + 1]
-                    swap_bat_id = str(next_leg_obj.battery_id) if next_leg_obj.battery_id else None
-                    swap_bat_obj = battery_by_id.get(swap_bat_id) if swap_bat_id else None
-                    if swap_bat_obj:
-                        s_cap, s_charge, s_energy = _compute_battery_energy_wh(swap_bat_obj, drone_capacity_wh)
-                        relay_hubs.append(
-                            f"{hub_label} (Uses {e:.1f}Wh) - Swap battery {swap_bat_obj.id} "
-                            f"({swap_bat_obj.serial_number or swap_bat_obj.battery_model or 'Ready'}, "
-                            f"{s_energy:.0f}Wh, {s_charge}%)"
-                        )
-                        relay_battery_status_list.append(
-                            HubBatteryStatus(
-                                hub_id=leg.to_hub_id,
-                                hub_code=h2.code if h2 else to_code,
-                                hub_name=hub_label,
-                                ready_count=1,
-                                compatible_models=[swap_bat_obj.battery_model] if swap_bat_obj.battery_model else [],
-                                feasible=True,
-                                selected_battery_id=swap_bat_obj.id,
-                                selected_battery_serial=swap_bat_obj.serial_number,
-                                selected_battery_model=swap_bat_obj.battery_model,
-                                selected_battery_capacity_wh=round(s_cap, 2),
-                                selected_battery_charge_pct=s_charge,
-                                selected_battery_energy_wh=round(s_energy, 2),
-                                swap_battery_id=swap_bat_obj.id,
-                                swap_battery_serial=swap_bat_obj.serial_number,
-                                available_batteries=[
-                                    RelayHubBatteryOptionSchema(
-                                        id=swap_bat_obj.id,
-                                        serial_number=swap_bat_obj.serial_number,
-                                        battery_model=swap_bat_obj.battery_model,
-                                        capacity_wh=round(s_cap, 2),
-                                        charge_level_pct=s_charge,
-                                        available_energy_wh=round(s_energy, 2),
-                                        current_hub_id=swap_bat_obj.current_hub_id,
-                                    )
-                                ],
-                            )
-                        )
-                    else:
-                        relay_hubs.append(f"{hub_label} (Uses {e:.1f}Wh) - Quick battery swap (0m)")
+            relay_hubs, relay_battery_status_list = _build_relay_summaries_from_legs(
+                legs_detail=legs_detail,
+                hub_by_id=hub_dict,
+                battery_by_id=battery_by_id,
+                fallback_cap_wh=drone_capacity_wh,
+            )
 
             route_codes = [legs_detail[0].from_hub_code] + [l.to_hub_code for l in legs_detail]
             route_string = " -> ".join(route_codes)
@@ -3495,13 +3638,9 @@ async def build_missions_response_list(
                 )
                 e = float(predict_flight_energy_cached(d, payload)["energy_wh"])
                 leg_energies.append(e)
-                leg_pct = int(round((e / origin_bat_cap) * 100)) if origin_bat_cap > 0 else 50
-                is_mission_done = str(m.status.value if hasattr(m.status, "value") else (m.status or "")).strip().lower() in ("completed", "mission completed")
-                if is_mission_done:
-                    leg_rem_pct = int(round(origin_bat_charge))
-                else:
-                    leg_rem_pct = max(0, origin_bat_charge - leg_pct)
-                leg_consumption_pcts.append(leg_pct)
+                s_cap, s_charge, s_energy, leg_pct, leg_rem_pct, _ = _apply_leg_battery_step(
+                    e, origin_bat_obj, drone_capacity_wh, running_bat_state
+                )
                 legs_detail.append(
                     RouteLegSchema(
                         from_hub_code=from_code,
@@ -3555,12 +3694,12 @@ async def build_missions_response_list(
         else:
             pred_duration = int(dist_km * 2)
 
-        max_leg_energy_wh = max(leg_energies) if len(leg_energies) > 1 else pred_energy
-        if leg_consumption_pcts:
-            batt_pct = max(leg_consumption_pcts)
-        else:
-            batt_pct = int(round((max_leg_energy_wh / origin_bat_energy) * 100)) if origin_bat_energy else 50
-        rem_batt_pct = max(0, 100 - batt_pct)
+        batt_pct, rem_batt_pct = _summarize_mission_battery_pcts(
+            legs_detail=legs_detail,
+            origin_charge_pct=origin_bat_charge if origin_bat_obj else None,
+            pred_energy_wh=pred_energy,
+            origin_energy_wh=origin_bat_energy,
+        )
 
         if ai_pred and ai_pred.risk_level:
             risk = str(ai_pred.risk_level).upper()
@@ -4022,6 +4161,14 @@ async def _build_fast_routes_from_request(
         from_code = h_from.code or h_from.name
         to_code = h_to.code or h_to.name
 
+        req_bat_for_leg = leg_in.battery_id
+        if idx > 0 and request.relay_battery_ids:
+            req_bat_for_leg = (
+                request.relay_battery_ids.get(str(h_from.id))
+                or request.relay_battery_ids.get(str(from_code))
+                or req_bat_for_leg
+            )
+
         leg_dict = {
             "from_hub_id": h_from.id,
             "to_hub_id": h_to.id,
@@ -4029,33 +4176,14 @@ async def _build_fast_routes_from_request(
             "to_hub_code": to_code,
             "distance_km": round(d_km, 2),
             "energy_wh": round(e_wh, 2),
-            "battery_id": leg_in.battery_id,
+            "battery_id": str(req_bat_for_leg).strip() if req_bat_for_leg else None,
             "leg_type": "DISPATCH" if is_disp else (leg_in.leg_type or "DELIVERY"),
             "is_dispatch": is_disp,
             "payload_kg": leg_payload,
+            "h_from": h_from,
+            "h_to": h_to,
         }
         legs_raw.append(leg_dict)
-        legs_schemas.append(
-            RouteLegSchema(
-                from_hub_code=from_code,
-                to_hub_code=to_code,
-                distance_km=round(d_km, 2),
-                sequence_no=idx + 1,
-                from_hub_id=h_from.id,
-                to_hub_id=h_to.id,
-                from_hub_name=h_from.name,
-                to_hub_name=h_to.name,
-                from_latitude=h_from.latitude,
-                from_longitude=h_from.longitude,
-                to_latitude=h_to.latitude,
-                to_longitude=h_to.longitude,
-                energy_wh=round(e_wh, 2),
-                battery_id=leg_in.battery_id,
-                leg_type=leg_dict["leg_type"],
-                is_dispatch=is_disp,
-                payload_kg=leg_payload,
-            )
-        )
 
     is_cross_hub = bool(legs_raw[0]["is_dispatch"] or (request.routeId and str(request.routeId).endswith("-DISPATCH")))
     departure_hub_id = legs_raw[0]["from_hub_id"] or eff_origin_hub_id or order.origin_hub_id
@@ -4064,6 +4192,9 @@ async def _build_fast_routes_from_request(
     extra_ids = {str(bid).strip() for bid in (extra_battery_ids or set()) if str(bid).strip()}
     if requested_battery_id:
         extra_ids.add(requested_battery_id)
+    for lr in legs_raw:
+        if lr.get("battery_id"):
+            extra_ids.add(str(lr["battery_id"]).strip())
 
     bat_filters = [
         Battery.drone_id == drone.id,
@@ -4075,12 +4206,13 @@ async def _build_fast_routes_from_request(
     if preloaded_batteries_out is not None:
         for b in fetched_bats:
             preloaded_batteries_out[b.id] = b
+    fetched_bats_by_id = {b.id: b for b in fetched_bats}
 
     active_dep_bats = [
         b for b in fetched_bats
         if b.status == batteries_status.ACTIVE or (requested_battery_id and b.id == requested_battery_id)
     ]
-    compat_models, assigned_bat, bat_cap, bat_charge, bat_energy, _ = await _resolve_assigned_drone_battery(
+    compat_models, assigned_bat, bat_cap, bat_charge, bat_energy, model_default_cap = await _resolve_assigned_drone_battery(
         db=db,
         origin_hub_id=departure_hub_id,
         drone_obj=drone,
@@ -4091,43 +4223,117 @@ async def _build_fast_routes_from_request(
         compat_models_map=compat_models_map,
     )
 
-    leg0_energy = float(legs_raw[0]["energy_wh"] or 0.0)
-    leg0_pct = int(round((leg0_energy / bat_cap) * 100)) if bat_cap > 0 else 100
-    max_safe_wh = round(bat_energy * 0.8, 2)
     feasible = True
-    infeasible_reason = None
+    infeasible_reasons: list[str] = []
     if assigned_bat is None:
         feasible = False
-        infeasible_reason = f"Origin hub has no compatible battery available to assign to Drone #{drone.id}."
-    elif leg0_energy > bat_energy:
-        feasible = False
-        infeasible_reason = (
-            f"Leg 1 required energy ({leg0_energy:.1f} Wh) exceeds available energy of battery {assigned_bat.id} "
-            f"({bat_energy:.1f} Wh / {bat_cap:.1f} Wh, charge {bat_charge}%)."
-        )
-    elif leg0_energy > max_safe_wh:
-        feasible = False
-        infeasible_reason = (
-            f"Leg 1 consumes {leg0_energy:.1f} Wh (~{leg0_pct}% of battery {assigned_bat.id}), "
-            f"exceeding the 80% safe threshold ({max_safe_wh:.1f} Wh / {bat_energy:.1f} Wh, minimum 20% reserve required)."
+        infeasible_reasons.append(f"Origin hub has no compatible battery available to assign to Drone #{drone.id}.")
+
+    running_bat_state: dict[str, dict[str, Any]] = {}
+    for idx, leg_dict in enumerate(legs_raw):
+        e_cur = float(leg_dict["energy_wh"] or 0.0)
+        if idx == 0:
+            leg_bat_obj = assigned_bat
+            leg_bat_id = assigned_bat.id if assigned_bat else requested_battery_id
+        else:
+            leg_bat_id = leg_dict.get("battery_id")
+            leg_bat_obj = fetched_bats_by_id.get(leg_bat_id) if leg_bat_id else None
+
+        reused_prior_bat = (leg_bat_obj is not None and str(leg_bat_obj.id) in running_bat_state)
+        l_cap, l_start_pct, l_start_wh, l_cons_pct, l_rem_pct, l_rem_wh = _apply_leg_battery_step(
+            e_cur, leg_bat_obj, model_default_cap, running_bat_state
         )
 
+        if leg_bat_obj is not None:
+            init_wh = float(running_bat_state[str(leg_bat_obj.id)]["initial_energy_wh"])
+            max_safe_wh = round((init_wh if reused_prior_bat else l_start_wh) * 0.8, 2)
+            if e_cur > l_start_wh:
+                feasible = False
+                infeasible_reasons.append(
+                    f"Leg {idx + 1} required energy ({e_cur:.1f} Wh) exceeds available energy of battery {leg_bat_obj.id} "
+                    f"({l_start_wh:.1f} Wh / {l_cap:.1f} Wh, charge {l_start_pct}%)."
+                )
+            elif reused_prior_bat and l_rem_wh < round(init_wh * 0.2, 2):
+                feasible = False
+                infeasible_reasons.append(
+                    f"Leg {idx + 1} leaves only {l_rem_wh:.1f} Wh on continued battery {leg_bat_obj.id}, below the 20% safety reserve ({init_wh * 0.2:.1f} Wh)."
+                )
+            elif not reused_prior_bat and e_cur > max_safe_wh:
+                feasible = False
+                infeasible_reasons.append(
+                    f"Leg {idx + 1} consumes {e_cur:.1f} Wh (~{l_cons_pct}% of battery {leg_bat_obj.id}), "
+                    f"exceeding the 80% safe threshold ({max_safe_wh:.1f} Wh / {l_start_wh:.1f} Wh, minimum 20% reserve required)."
+                )
+
+        h_from = leg_dict.pop("h_from")
+        h_to = leg_dict.pop("h_to")
+        leg_dict["battery_id"] = leg_bat_id
+        leg_dict["battery_serial"] = leg_bat_obj.serial_number if leg_bat_obj else None
+        leg_dict["battery_model"] = leg_bat_obj.battery_model if leg_bat_obj else None
+        leg_dict["battery_capacity_wh"] = round(l_cap, 2)
+        leg_dict["battery_charge_pct"] = l_start_pct
+        leg_dict["battery_energy_wh"] = l_start_wh
+        leg_dict["battery_consumption_pct"] = l_cons_pct
+        leg_dict["remaining_battery_pct"] = l_rem_pct
+
+        legs_schemas.append(
+            RouteLegSchema(
+                from_hub_code=leg_dict["from_hub_code"],
+                to_hub_code=leg_dict["to_hub_code"],
+                distance_km=leg_dict["distance_km"],
+                sequence_no=idx + 1,
+                from_hub_id=leg_dict["from_hub_id"],
+                to_hub_id=leg_dict["to_hub_id"],
+                from_hub_name=h_from.name,
+                to_hub_name=h_to.name,
+                from_latitude=h_from.latitude,
+                from_longitude=h_from.longitude,
+                to_latitude=h_to.latitude,
+                to_longitude=h_to.longitude,
+                energy_wh=leg_dict["energy_wh"],
+                battery_id=leg_bat_id,
+                battery_serial=leg_dict["battery_serial"],
+                battery_model=leg_dict["battery_model"],
+                battery_capacity_wh=leg_dict["battery_capacity_wh"],
+                battery_charge_pct=l_start_pct,
+                battery_energy_wh=l_start_wh,
+                battery_consumption_pct=l_cons_pct,
+                remaining_battery_pct=l_rem_pct,
+                leg_type=leg_dict["leg_type"],
+                is_dispatch=leg_dict["is_dispatch"],
+                payload_kg=leg_dict["payload_kg"],
+            )
+        )
+
+    infeasible_reason = " | ".join(infeasible_reasons) if infeasible_reasons else None
     final_dist_km = round(float(request.distance_km), 2) if request.distance_km and request.distance_km > 0 else round(tot_dist_km, 2)
     final_energy_wh = round(float(request.predicted_energy_wh), 2) if request.predicted_energy_wh and request.predicted_energy_wh > 0 else round(tot_energy_wh, 2)
     final_duration_min = int(request.predicted_duration_min) if request.predicted_duration_min and request.predicted_duration_min > 0 else max(3, int(math.ceil(final_dist_km * 2.2)) + len(legs_raw))
     route_str = request.route_string or " -> ".join([legs_raw[0]["from_hub_code"]] + [l["to_hub_code"] for l in legs_raw])
-    rem_pct = max(0, bat_charge - leg0_pct)
-    risk = "LOW" if leg0_pct < 60 else ("MEDIUM" if leg0_pct <= 80 else "HIGH")
+    batt_pct, rem_pct = _summarize_mission_battery_pcts(
+        legs_detail=legs_schemas,
+        origin_charge_pct=bat_charge if assigned_bat else None,
+        pred_energy_wh=final_energy_wh,
+        origin_energy_wh=bat_energy,
+    )
+    risk = "LOW" if batt_pct < 60 else ("MEDIUM" if batt_pct <= 80 else "HIGH")
+
+    fast_relay_hubs, fast_relay_statuses = _build_relay_summaries_from_legs(
+        legs_detail=legs_schemas,
+        hub_by_id=hub_by_id,
+        battery_by_id=fetched_bats_by_id,
+        fallback_cap_wh=model_default_cap,
+    )
 
     schema = RouteOptionSchema(
         routeId=request.routeId or f"R-{order.id}-FAST-ASSIGN",
         route_string=route_str,
         legs_detail=legs_schemas,
         distanceKm=final_dist_km,
-        relayHubs=[],
+        relayHubs=fast_relay_hubs,
         predictedDurationMin=final_duration_min,
         predictedEnergyWh=final_energy_wh,
-        batteryConsumptionPct=leg0_pct,
+        batteryConsumptionPct=batt_pct,
         remainingBatteryPct=rem_pct,
         confidencePct=90 if risk == "LOW" else (85 if risk == "MEDIUM" else 75),
         risk=risk,
@@ -4139,6 +4345,7 @@ async def _build_fast_routes_from_request(
         assignedBatteryCapacityWh=round(bat_cap, 2) if assigned_bat else None,
         assignedBatteryChargePct=bat_charge if assigned_bat else None,
         assignedBatteryEnergyWh=round(bat_energy, 2) if assigned_bat else None,
+        relay_battery_status=fast_relay_statuses,
         feasible=feasible,
         infeasible_reason=infeasible_reason,
         is_selectable=feasible,
@@ -4172,7 +4379,7 @@ def _build_created_mission_response(
     relay_hubs: list[str] = []
     relay_battery_status_list: list[HubBatteryStatus] = []
     leg_energies: list[float] = []
-    leg_consumption_pcts: list[int] = []
+    running_bat_state: dict[str, dict[str, Any]] = {}
 
     schema_legs = selected_schema.legs_detail if (selected_schema and selected_schema.legs_detail) else []
     for idx, leg in enumerate(created_legs):
@@ -4214,10 +4421,9 @@ def _build_created_mission_response(
 
         leg_bat_id = str(leg.battery_id) if leg.battery_id else (assigned_battery.id if idx == 0 else None)
         leg_bat_obj = battery_by_id.get(leg_bat_id) if leg_bat_id else None
-        leg_cap, leg_charge, leg_energy_avail = _compute_battery_energy_wh(leg_bat_obj, drone_cap_wh)
-        leg_pct = int(round((e / leg_cap) * 100)) if leg_cap > 0 else 50
-        leg_rem_pct = max(0, leg_charge - leg_pct)
-        leg_consumption_pcts.append(leg_pct)
+        leg_cap, leg_charge, leg_energy_avail, leg_pct, leg_rem_pct, _ = _apply_leg_battery_step(
+            e, leg_bat_obj, drone_cap_wh, running_bat_state
+        )
 
         legs_detail.append(
             RouteLegSchema(
@@ -4239,8 +4445,8 @@ def _build_created_mission_response(
                 battery_serial=leg_bat_obj.serial_number if leg_bat_obj else None,
                 battery_model=leg_bat_obj.battery_model if leg_bat_obj else None,
                 battery_capacity_wh=round(leg_cap, 2),
-                battery_charge_pct=leg_charge if leg_bat_obj else None,
-                battery_energy_wh=round(leg_energy_avail, 2),
+                battery_charge_pct=leg_charge,
+                battery_energy_wh=leg_energy_avail,
                 battery_consumption_pct=leg_pct,
                 remaining_battery_pct=leg_rem_pct,
                 leg_type="DISPATCH" if is_dispatch_leg else "DELIVERY",
@@ -4249,49 +4455,12 @@ def _build_created_mission_response(
             )
         )
 
-        if idx < len(created_legs) - 1:
-            hub_label = h2.name if h2 else to_code
-            next_leg_obj = created_legs[idx + 1]
-            swap_bat_id = str(next_leg_obj.battery_id) if next_leg_obj.battery_id else None
-            swap_bat_obj = battery_by_id.get(swap_bat_id) if swap_bat_id else None
-            if swap_bat_obj:
-                s_cap, s_charge, s_energy = _compute_battery_energy_wh(swap_bat_obj, drone_cap_wh)
-                relay_hubs.append(
-                    f"{hub_label} (Uses {e:.1f}Wh) - Swap battery {swap_bat_obj.id} "
-                    f"({swap_bat_obj.serial_number or swap_bat_obj.battery_model or 'Ready'}, "
-                    f"{s_energy:.0f}Wh, {s_charge}%)"
-                )
-                relay_battery_status_list.append(
-                    HubBatteryStatus(
-                        hub_id=leg.to_hub_id,
-                        hub_code=h2.code if h2 else to_code,
-                        hub_name=hub_label,
-                        ready_count=1,
-                        compatible_models=[swap_bat_obj.battery_model] if swap_bat_obj.battery_model else [],
-                        feasible=True,
-                        selected_battery_id=swap_bat_obj.id,
-                        selected_battery_serial=swap_bat_obj.serial_number,
-                        selected_battery_model=swap_bat_obj.battery_model,
-                        selected_battery_capacity_wh=round(s_cap, 2),
-                        selected_battery_charge_pct=s_charge,
-                        selected_battery_energy_wh=round(s_energy, 2),
-                        swap_battery_id=swap_bat_obj.id,
-                        swap_battery_serial=swap_bat_obj.serial_number,
-                        available_batteries=[
-                            RelayHubBatteryOptionSchema(
-                                id=swap_bat_obj.id,
-                                serial_number=swap_bat_obj.serial_number,
-                                battery_model=swap_bat_obj.battery_model,
-                                capacity_wh=round(s_cap, 2),
-                                charge_level_pct=s_charge,
-                                available_energy_wh=round(s_energy, 2),
-                                current_hub_id=swap_bat_obj.current_hub_id,
-                            )
-                        ],
-                    )
-                )
-            else:
-                relay_hubs.append(f"{hub_label} (Uses {e:.1f}Wh) - Quick battery swap (0m)")
+    relay_hubs, relay_battery_status_list = _build_relay_summaries_from_legs(
+        legs_detail=legs_detail,
+        hub_by_id=hub_by_id,
+        battery_by_id=battery_by_id,
+        fallback_cap_wh=drone_cap_wh,
+    )
 
     route_codes = [legs_detail[0].from_hub_code] + [l.to_hub_code for l in legs_detail] if legs_detail else []
     route_string = (
@@ -4302,8 +4471,12 @@ def _build_created_mission_response(
     dist_km = round(mission.distance_m / 1000.0, 2) if mission.distance_m else round(sum(l.distance_km for l in legs_detail), 2)
     pred_energy = round(float(ai_pred.estimated_energy_wh or sum(leg_energies)), 2)
     pred_duration = int(ai_pred.estimated_duration_m or int(dist_km * 2))
-    batt_pct = max(leg_consumption_pcts) if leg_consumption_pcts else (int(round((pred_energy / origin_energy) * 100)) if origin_energy else 50)
-    rem_batt_pct = max(0, 100 - batt_pct)
+    batt_pct, rem_batt_pct = _summarize_mission_battery_pcts(
+        legs_detail=legs_detail,
+        origin_charge_pct=origin_charge,
+        pred_energy_wh=pred_energy,
+        origin_energy_wh=origin_energy,
+    )
     risk = str(ai_pred.risk_level or "Low").upper()
     conf_pct = 90 if risk == "LOW" else (85 if risk == "MEDIUM" else 75)
     reason = ai_pred.recommendation_content or f"Route {route_string} selected by AI analysis ({pred_energy:.1f} Wh)."
@@ -4732,7 +4905,24 @@ async def _create_mission_internal(
                     override_bat_id = str(req_leg_bat).strip() or None
 
             candidate_bat_id = (override_bat_id or leg_item.get("battery_id") or "").strip() or None
-            if override_bat_id:
+            is_dispatch_same_bat = bool(
+                candidate_bat_id
+                and candidate_bat_id == assigned_battery.id
+                and all(bool(legs[k].get("is_dispatch")) for k in range(idx))
+            )
+            if is_dispatch_same_bat:
+                _, _, origin_bat_energy_live = _compute_battery_energy_wh(assigned_battery)
+                cum_req_wh = sum(float(legs[k].get("energy_wh") or 0.0) for k in range(idx + 1))
+                if cum_req_wh > origin_bat_energy_live * 0.8:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Battery {assigned_battery.id} ({origin_bat_energy_live:.1f} Wh, charge {assigned_battery.charge_level_pct}%) "
+                            f"cannot continue through Leg {idx + 1} without swap (cumulative {cum_req_wh:.1f} Wh exceeds 80% safe threshold)."
+                        )
+                    )
+                leg_battery_id = assigned_battery.id
+            elif override_bat_id:
                 relay_bat = battery_by_id.get(candidate_bat_id) if candidate_bat_id else None
                 if not relay_bat:
                     raise HTTPException(
