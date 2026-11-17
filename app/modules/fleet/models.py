@@ -191,6 +191,7 @@ class MaintenanceAlert(Base):
     mission_id: Mapped[str | None] = mapped_column(String, nullable=True)
     incident_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     title: Mapped[str | None] = mapped_column(String, nullable=True)
+    description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     status: Mapped[str | None] = mapped_column(String, nullable=True)
     work_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     handled_by: Mapped[str | None] = mapped_column(String, nullable=True)

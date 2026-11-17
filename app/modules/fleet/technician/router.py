@@ -537,12 +537,37 @@ async def confirm_arrival(
                     issue_detail = f": {open_incident.description.strip()}"
 
                 alert_title = f"Flight incident #{mission.id} — Drone #{drone.id} requires technical inspection{issue_detail[:60]}"
+                
+                # Build full description for UI detail panel
+                description_parts = [
+                    f"Mission: {mission.id}",
+                    f"Order: {mission.order_id}",
+                    f"Drone: {drone.id} ({drone.name})" if drone else f"Drone: {mission.drone_id}",
+                ]
+                
+                if body and body.issue_description:
+                    description_parts.append(f"Issue reported: {body.issue_description.strip()}")
+                
+                if open_incident:
+                    description_parts.append(f"Incident: {open_incident.description}")
+                    if open_incident.severity:
+                        description_parts.append(f"Severity: {open_incident.severity.value}")
+                
+                if body and body.drone_status:
+                    description_parts.append(f"Drone status: {body.drone_status}")
+                
+                if body and body.battery_faulty:
+                    description_parts.append("Battery faulty - requires replacement")
+                
+                full_description = "\n".join(description_parts)
+                
                 new_alert = MaintenanceAlert(
                     drone_id=drone.id,
                     mission_id=str(mission.id),
                     incident_id=open_incident.id if open_incident else None,
                     source="Incident" if is_incident_flight else "Inspection",
                     title=alert_title,
+                    description=full_description,
                     status="Pending",
                     created_at=now,
                 )

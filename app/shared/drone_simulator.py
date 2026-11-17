@@ -414,6 +414,15 @@ async def _trigger_disconnect_crash(
                 incident_id=inc.id,
                 mission_id=str(mission_id),
                 title=f"Signal lost — Potential drone crash at ({incident_lat:.5f}, {incident_lng:.5f})",
+                description=(
+                    f"Mission: {mission_id}\n"
+                    f"Order: {mission.order_id}\n"
+                    f"Drone: {mission.drone_id}\n"
+                    f"Incident Type: DISCONNECT_CRASH\n"
+                    f"Location: GPS ({incident_lat:.5f}, {incident_lng:.5f})\n"
+                    f"Recovery Hub: {recovery_hub.name}\n"
+                    f"Details: Complete telemetry signal loss / suspected drone crash. Field recovery assigned."
+                ),
                 status="Pending",
                 created_at=now_naive,
             )
