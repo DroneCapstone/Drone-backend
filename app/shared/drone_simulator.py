@@ -838,6 +838,7 @@ async def simulate_mission_flight(mission_id: str) -> None:
         )
 
     signal_loss_triggered = False  # ← Track nếu SIGNAL_LOSS đã trigger
+    signal_loss_duration = 0  # ← Đếm bao nhiêu điểm mất kết nối (tạm thời)
 
     for idx, (lat, lng) in enumerate(waypoints):
         await asyncio.sleep(simulator_config.interval_sec)
@@ -880,9 +881,10 @@ async def simulate_mission_flight(mission_id: str) -> None:
                     )
                     return
                 if trigger_type == "SIGNAL_LOSS":
-                    # Mất kết nối: drone vẫn bay tiếp nhưng telemetry dừng
-                    print(f"[SIMULATOR] 📡 Mất tín hiệu cho Mission {mission_id} — drone vẫn bay tiếp, telemetry dừng.")
+                    # Mất kết nối tạm thời: drone vẫn bay tiếp nhưng telemetry dừng khoảng 20 điểm (~60s)
+                    print(f"[SIMULATOR] 📡 Mất tín hiệu cho Mission {mission_id} — drone vẫn bay tiếp, telemetry dừng (duration: ~20 points).")
                     signal_loss_triggered = True
+                    signal_loss_duration = 20  # ← Mất 20 điểm rồi có lại
                     continue  # ← Bỏ qua ghi telemetry lần này, bay tiếp
 
                 # FAILSAFE_RTH hoặc incident khác
@@ -921,6 +923,8 @@ async def simulate_mission_flight(mission_id: str) -> None:
 
                 # ── Nếu SIGNAL_LOSS đã trigger, chỉ update pin, không ghi telemetry ──
                 if signal_loss_triggered:
+                    signal_loss_duration -= 1  # ← Đếm ngược
+                    
                     # Update pin nhưng không ghi log
                     if active_battery_id:
                         bat = await db.get(Battery, active_battery_id)
@@ -931,12 +935,24 @@ async def simulate_mission_flight(mission_id: str) -> None:
                         if dr:
                             dr.battery_level_pct = new_charge_pct
                     await db.commit()
-                    print(
-                        f"[SIMULATOR] [{idx+1:>3}/{total_points}] "
-                        f"({lat:.6f}, {lng:.6f}) "
-                        f"[NO TELEMETRY] pin={new_charge_pct}% (signal lost)"
-                    )
-                    continue
+                    
+                    if signal_loss_duration > 0:
+                        # Vẫn mất kết nối
+                        print(
+                            f"[SIMULATOR] [{idx+1:>3}/{total_points}] "
+                            f"({lat:.6f}, {lng:.6f}) "
+                            f"[NO TELEMETRY] pin={new_charge_pct}% (signal lost, {signal_loss_duration} points remaining)"
+                        )
+                        continue
+                    else:
+                        # Kết nối phục hồi
+                        print(
+                            f"[SIMULATOR] [{idx+1:>3}/{total_points}] "
+                            f"({lat:.6f}, {lng:.6f}) "
+                            f"📡 SIGNAL RECOVERED — telemetry restored, pin={new_charge_pct}%"
+                        )
+                        signal_loss_triggered = False  # ← Kết nối bình thường lại
+                        # Tiếp tục ghi telemetry bình thường ở dưới
 
                 # Fetch weather theo tọa độ điểm này
                 from app.shared.weather import fetch_weather
