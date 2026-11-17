@@ -146,6 +146,7 @@ class MaintenanceAlertResponse(BaseModel):
     drone_id: Optional[str] = None
     source: Optional[str] = None
     title: Optional[str] = None
+    description: Optional[str] = None
     status: Optional[str] = None
     work_order_id: Optional[int] = None
     handled_by: Optional[str] = None
