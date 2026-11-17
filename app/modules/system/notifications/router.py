@@ -152,6 +152,23 @@ async def mark_all_as_read(
 
 # ── DELETE one ──────────────────────────────────────────────────────
 
+# ── DELETE all read (phải đặt TRƯỚC /{notification_id} để tránh 422) ──
+
+@router.delete("/clear-read", summary="Delete all read notifications")
+async def clear_read_notifications(
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await db.execute(
+        delete(Notification)
+        .where(Notification.user_id == user.id, Notification.is_read == True)
+    )
+    await db.commit()
+    return {"message": f"Deleted {result.rowcount} read notifications."}
+
+
+# ── DELETE one ──────────────────────────────────────────────────────
+
 @router.delete("/{notification_id}", status_code=204,
                summary="Delete a notification")
 async def delete_notification(
@@ -166,18 +183,3 @@ async def delete_notification(
         raise HTTPException(status_code=403, detail="Not your notification")
     await db.delete(notif)
     await db.commit()
-
-
-# ── DELETE all read ─────────────────────────────────────────────────
-
-@router.delete("/clear-read", summary="Delete all read notifications")
-async def clear_read_notifications(
-    user: CurrentUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_db),
-):
-    result = await db.execute(
-        delete(Notification)
-        .where(Notification.user_id == user.id, Notification.is_read == True)
-    )
-    await db.commit()
-    return {"message": f"Deleted {result.rowcount} read notifications."}
