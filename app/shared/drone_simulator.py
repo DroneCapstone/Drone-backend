@@ -837,6 +837,8 @@ async def simulate_mission_flight(mission_id: str) -> None:
             f"type={armed_incident['incident_type']}, severity={armed_incident['severity']}, step={armed_incident['trigger_idx'] + 1}/{total_points}"
         )
 
+    signal_loss_triggered = False  # ← Track nếu SIGNAL_LOSS đã trigger
+
     for idx, (lat, lng) in enumerate(waypoints):
         await asyncio.sleep(simulator_config.interval_sec)
 
@@ -851,6 +853,56 @@ async def simulate_mission_flight(mission_id: str) -> None:
         current_battery_pct = max(1.0, initial_battery_pct - consumed_pct)
         new_charge_pct = int(round(current_battery_pct))
         energy_wh = round(((idx + 1) / total_points) * planned_leg_energy_wh, 3)
+
+        # ── Kiểm tra incident trước khi ghi telemetry ───
+        triggered_now = False
+        trigger_sev = simulator_config.incident_severity
+        trigger_type = "FAILSAFE_RTH"
+
+        if not signal_loss_triggered:  # Chỉ kiểm tra incident 1 lần
+            if armed_incident and idx >= armed_incident["trigger_idx"]:
+                triggered_now = True
+                trigger_sev = armed_incident["severity"]
+                trigger_type = armed_incident["incident_type"]
+            elif simulator_config.incident_enabled and idx >= simulator_config.incident_min_step:
+                if random.random() < simulator_config.incident_probability:
+                    triggered_now = True
+
+            if triggered_now:
+                print(f"[SIMULATOR] ⚠️ INCIDENT ({trigger_type}) xảy ra tại điểm {idx+1}/{total_points} ({lat:.6f}, {lng:.6f})")
+                if trigger_type == "DISCONNECT_CRASH":
+                    await _trigger_disconnect_crash(
+                        mission_id=mission_id,
+                        incident_lat=lat,
+                        incident_lng=lng,
+                        from_hub=from_hub,
+                        severity=trigger_sev,
+                    )
+                    return
+                if trigger_type == "SIGNAL_LOSS":
+                    # Mất kết nối: drone vẫn bay tiếp nhưng telemetry dừng
+                    print(f"[SIMULATOR] 📡 Mất tín hiệu cho Mission {mission_id} — drone vẫn bay tiếp, telemetry dừng.")
+                    signal_loss_triggered = True
+                    continue  # ← Bỏ qua ghi telemetry lần này, bay tiếp
+
+                # FAILSAFE_RTH hoặc incident khác
+                async with AsyncSessionLocal() as db_hub:
+                    target_hub = await _find_nearest_active_hub(db_hub, lat, lng, fallback_hub=from_hub)
+
+                await _trigger_incident(
+                    mission_id=mission_id,
+                    incident_lat=lat,
+                    incident_lng=lng,
+                    return_hub=target_hub,
+                    from_hub=from_hub,
+                    severity=trigger_sev,
+                )
+                # Bay tới Hub gần nhất (target_hub)
+                target_lat = target_hub.latitude if target_hub.latitude is not None else from_hub.latitude
+                target_lng = target_hub.longitude if target_hub.longitude is not None else from_hub.longitude
+                return_waypoints = _interpolate(lat, lng, target_lat, target_lng, max(5, (total_points - idx)))
+                await _fly_incident_return(mission_id, return_waypoints, target_hub, active_battery_id, active_drone_id, battery_capacity_wh, current_battery_pct)
+                return
 
         async with AsyncSessionLocal() as db:
             try:
@@ -867,11 +919,30 @@ async def simulate_mission_flight(mission_id: str) -> None:
                     print(f"[SIMULATOR] Mission {mission_id} không còn FLYING ({mission.status}), dừng simulator.")
                     return
 
+                # ── Nếu SIGNAL_LOSS đã trigger, chỉ update pin, không ghi telemetry ──
+                if signal_loss_triggered:
+                    # Update pin nhưng không ghi log
+                    if active_battery_id:
+                        bat = await db.get(Battery, active_battery_id)
+                        if bat:
+                            bat.charge_level_pct = new_charge_pct
+                    if active_drone_id:
+                        dr = await db.get(Drone, active_drone_id)
+                        if dr:
+                            dr.battery_level_pct = new_charge_pct
+                    await db.commit()
+                    print(
+                        f"[SIMULATOR] [{idx+1:>3}/{total_points}] "
+                        f"({lat:.6f}, {lng:.6f}) "
+                        f"[NO TELEMETRY] pin={new_charge_pct}% (signal lost)"
+                    )
+                    continue
+
                 # Fetch weather theo tọa độ điểm này
                 from app.shared.weather import fetch_weather
                 weather = await fetch_weather(lat, lng)
 
-                # Ghi nhận Telemetry Log
+                # Ghi nhận Telemetry Log (chỉ khi không mất kết nối)
                 log = TelemetryLog(
                     mission_id=mission_id,
                     timestamp=get_vn_naive_datetime(),
@@ -917,54 +988,6 @@ async def simulate_mission_flight(mission_id: str) -> None:
 
             except Exception as e:
                 print(f"[SIMULATOR] Lỗi insert TelemetryLog & cập nhật pin điểm {idx+1}: {e}")
-
-        # ── Kiểm tra incident sau mỗi điểm ───────────────────────────────────
-        triggered_now = False
-        trigger_sev = simulator_config.incident_severity
-        trigger_type = "FAILSAFE_RTH"
-
-        if armed_incident and idx >= armed_incident["trigger_idx"]:
-            triggered_now = True
-            trigger_sev = armed_incident["severity"]
-            trigger_type = armed_incident["incident_type"]
-        elif simulator_config.incident_enabled and idx >= simulator_config.incident_min_step:
-            if random.random() < simulator_config.incident_probability:
-                triggered_now = True
-
-        if triggered_now:
-            print(f"[SIMULATOR] ⚠️ INCIDENT ({trigger_type}) xảy ra tại điểm {idx+1}/{total_points} ({lat:.6f}, {lng:.6f})")
-            if trigger_type == "DISCONNECT_CRASH":
-                await _trigger_disconnect_crash(
-                    mission_id=mission_id,
-                    incident_lat=lat,
-                    incident_lng=lng,
-                    from_hub=from_hub,
-                    severity=trigger_sev,
-                )
-                return
-            if trigger_type == "SIGNAL_LOSS":
-                # Ngừng phát telemetry giữa chặng để Worker run_telemetry_signal_loss_watcher tự phát hiện mất tín hiệu >10s
-                print(f"[SIMULATOR] 📡 Ngừng phát telemetry cho Mission {mission_id} (SIGNAL_LOSS).")
-                return
-
-            # Xác định Hub active gần tọa độ gặp sự cố nhất (chuyển hướng thay vì quay lại điểm đầu nếu gần Hub khác hơn)
-            async with AsyncSessionLocal() as db_hub:
-                target_hub = await _find_nearest_active_hub(db_hub, lat, lng, fallback_hub=from_hub)
-
-            await _trigger_incident(
-                mission_id=mission_id,
-                incident_lat=lat,
-                incident_lng=lng,
-                return_hub=target_hub,
-                from_hub=from_hub,
-                severity=trigger_sev,
-            )
-            # Bay tới Hub gần nhất (target_hub)
-            target_lat = target_hub.latitude if target_hub.latitude is not None else from_hub.latitude
-            target_lng = target_hub.longitude if target_hub.longitude is not None else from_hub.longitude
-            return_waypoints = _interpolate(lat, lng, target_lat, target_lng, max(5, (total_points - idx)))
-            await _fly_incident_return(mission_id, return_waypoints, target_hub, active_battery_id, active_drone_id, battery_capacity_wh, current_battery_pct)
-            return
 
     # ── Hết điểm → drone đã đến hub đích của leg này ─────────────────────────
     async with AsyncSessionLocal() as db:
