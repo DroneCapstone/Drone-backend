@@ -4986,6 +4986,7 @@ class SimulatorConfigRequest(BaseModel):
     incident_severity:    Optional[str]   = None  # Low / Medium / High
     interval_sec:         Optional[int]   = None  # Giây giữa mỗi điểm telemetry
     steps_per_leg:        Optional[int]   = None  # Số điểm nội suy mỗi chặng
+    speed_multiplier:     Optional[float] = None  # 1.0 = realtime, 2.0 = 2x tốc độ, 5.0 = 5x tốc độ
     next_flight_incident: Optional[bool]  = None
 
 
@@ -5011,6 +5012,7 @@ async def update_simulator_config(
             incident_severity=body.incident_severity,
             interval_sec=body.interval_sec,
             steps_per_leg=body.steps_per_leg,
+            speed_multiplier=body.speed_multiplier,
             next_flight_incident=body.next_flight_incident,
         )
     except ValueError as e:
