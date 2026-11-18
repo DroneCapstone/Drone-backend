@@ -310,6 +310,7 @@ async def create_order(
         status=OrderStatus.PENDING,
         delivery_fee=total_fee,
         sender_phone=body.sender_phone,
+        sender_email=body.sender_email,
         receiver_name=body.receiver_name,
         receiver_phone=body.receiver_phone,
         receiver_email=body.receiver_email,
