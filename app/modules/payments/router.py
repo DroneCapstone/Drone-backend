@@ -23,7 +23,7 @@ from sqlalchemy import select
 from datetime import datetime, timezone
 from pydantic import BaseModel
 from typing import Optional
-from app.core.timezone import get_vn_naive_datetime
+from app.core.timezone import get_vn_naive_datetime, to_vn_datetime
 
 from app.database.db import get_async_db
 from app.shared.dependencies import RoleChecker, CurrentUser
@@ -274,7 +274,7 @@ async def get_payment_status(
     return PaymentStatusResponse(
         order_id=order_id,
         payment_status=order.payment_status or PaymentStatus.UNPAID,
-        paid_at=order.paid_at,
+        paid_at=to_vn_datetime(order.paid_at),   # trả về với timezone VN (+07:00)
         payment_transaction_id=order.payment_transaction_id,
         amount=order.delivery_fee,
     )
