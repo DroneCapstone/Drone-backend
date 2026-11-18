@@ -331,6 +331,7 @@ class LiveTrackingDrone(BaseModel):
     mission_id: str
     drone_id: Optional[Union[str, int]]
     status: MissionStatus
+    handling_status: Optional[str] = None  # HandlingStatus: INCOMING, AT_HUB, READY, CANNOT_CONTINUE
     latest_lat: Optional[float]
     latest_lng: Optional[float]
     latest_altitude: Optional[float]

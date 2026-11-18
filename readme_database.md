@@ -155,6 +155,7 @@ Số lượng linh kiện / vật tư tại từng Hub. Không có kho trung tâ
 | mission_id | VARCHAR | Nullable |
 | incident_id | INTEGER | Nullable |
 | title | VARCHAR | Nullable |
+| description | VARCHAR(1000) | Nullable (Chi tiết đầy đủ cho UI: Mission/Order ID, Incident details, Issue description) |
 | status | VARCHAR | Nullable |
 | work_order_id | INTEGER | Nullable |
 | handled_by | VARCHAR | Nullable |
@@ -213,6 +214,7 @@ Số lượng linh kiện / vật tư tại từng Hub. Không có kho trung tâ
 | arrived_at | TIMESTAMP | Nullable |
 | arrival_confirmed_by | VARCHAR | Nullable |
 | arrival_confirmed_at | TIMESTAMP | Nullable |
+| battery_charge_at_arrival | FLOAT | Nullable (Mức pin % lúc drone hạ cánh hub) |
 | leg_destination_type | VARCHAR(20) | Nullable, Default `'destination'` |
 | checkpoints_json | JSONB | Nullable (Hợp nhất từ mission_hub_checkpoints) |
 
