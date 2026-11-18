@@ -36,28 +36,46 @@ CREATE INDEX IF NOT EXISTS idx_bmc_name ON battery_model_catalog(name);
 # 3 model pin DJI tương thích với 3 dòng drone hiện có
 SEED = [
     (
-        "DJI TB30",
+        "DJI-BAT-77W",
         '["DJI Mavic 3"]',
         77.0,
         2500000,
-        "Pin chính hãng DJI Intelligent Flight Battery TB30 cho Mavic 3. "
-        "Dung lượng 5000mAh / 77Wh. Thời gian bay ~46 phút (không tải).",
+        "DJI Intelligent Flight Battery (TB30) for Mavic 3. ~46 min flight time (no payload).",
     ),
     (
-        "DJI TB60",
+        "DJI-BAT-273W",
         '["DJI Matrice 300"]',
         273.1,
         5500000,
-        "Pin DJI TB60 cho Matrice 300 RTK. "
-        "Dung lượng 5935mAh / 273.1Wh. Hệ thống dual-battery, thời gian bay ~55 phút.",
+        "DJI TB60 battery for Matrice 300 RTK. Dual-battery system, ~55 min flight.",
     ),
     (
-        "DJI TB65",
+        "DJI-BAT-476W",
         '["DJI FlyCart 30"]',
         476.0,
         8500000,
-        "Pin DJI TB65 cho FlyCart 30. "
-        "Thiết kế cho tải nặng đến 30kg. Dung lượng 28000mAh / 476Wh.",
+        "DJI TB65 battery for FlyCart 30 heavy-lift. Up to 30kg payload.",
+    ),
+    (
+        "DJI-BAT-130W",
+        '["DJI Matrice 300"]',
+        130.0,
+        5800000,
+        "DJI TB48D battery. Compatible with Matrice series.",
+    ),
+    (
+        "AUR-BAT-444W",
+        '["Aurelia X6 Pro"]',
+        444.0,
+        14500000,
+        "Aurelia UltraPower battery for X6 Pro hexacopter.",
+    ),
+    (
+        "DJI-BAT-980W",
+        '["DJI Matrice 350 RTK"]',
+        980.0,
+        36000000,
+        "DJI DB2000 intelligent flight battery for Matrice 350 RTK.",
     ),
 ]
 
