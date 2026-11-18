@@ -429,6 +429,7 @@ async def get_live_tracking(
                 mission_id=mission.id,
                 drone_id=mission.drone_id,
                 status=mission.status,
+                handling_status=mission.handling_status.value if mission.handling_status and hasattr(mission.handling_status, "value") else (str(mission.handling_status) if mission.handling_status else None),
                 latest_lat=log.latitude if log else None,
                 latest_lng=log.longitude if log else None,
                 latest_altitude=log.altitude if log else None,
