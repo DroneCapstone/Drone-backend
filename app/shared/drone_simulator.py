@@ -62,6 +62,7 @@ class _SimulatorConfig:
         self.incident_severity    = INCIDENT_SEVERITY
         self.interval_sec         = INTERVAL_SEC
         self.steps_per_leg        = STEPS_PER_LEG
+        self.speed_multiplier     = 1.0  # ← Tốc độ mô phỏng: 1.0 = realtime, 2.0 = 2x tốc độ, 5.0 = 5x tốc độ
         # One-shot trigger: nếu True, duy nhất chuyến bay kế tiếp gặp incident rồi tự reset về False
         self.next_flight_incident          = False
         self.next_flight_incident_step     = None
@@ -143,6 +144,7 @@ class _SimulatorConfig:
             "incident_severity":             self.incident_severity,
             "interval_sec":                  self.interval_sec,
             "steps_per_leg":                 self.steps_per_leg,
+            "speed_multiplier":              self.speed_multiplier,
             "next_flight_incident":          self.next_flight_incident,
             "next_flight_incident_step":     self.next_flight_incident_step,
             "next_flight_incident_severity": self.next_flight_incident_severity,
@@ -162,6 +164,7 @@ def apply_simulator_config_update(
     incident_severity: Optional[str] = None,
     interval_sec: Optional[int] = None,
     steps_per_leg: Optional[int] = None,
+    speed_multiplier: Optional[float] = None,
     next_flight_incident: Optional[bool] = None,
 ) -> dict:
     """Cập nhật tập trung cấu hình Simulator kèm kiểm tra giá trị hợp lệ."""
@@ -188,6 +191,11 @@ def apply_simulator_config_update(
         if steps_per_leg < 5:
             raise ValueError("steps_per_leg must be >= 5")
         simulator_config.steps_per_leg = steps_per_leg
+    if speed_multiplier is not None:
+        multiplier = float(speed_multiplier)
+        if multiplier < 0.1 or multiplier > 100.0:
+            raise ValueError("speed_multiplier must be between 0.1 and 100.0")
+        simulator_config.speed_multiplier = multiplier
     if next_flight_incident is not None:
         simulator_config.arm_next_flight_incident(enabled=next_flight_incident)
     return simulator_config.to_dict()
@@ -602,7 +610,9 @@ async def _fly_incident_return(
     energy_wh = 0.0
 
     for idx, (lat, lng) in enumerate(waypoints):
-        await asyncio.sleep(simulator_config.interval_sec)
+        # ── Áp dụng speed_multiplier vào interval_sec ──
+        effective_interval = simulator_config.interval_sec / simulator_config.speed_multiplier
+        await asyncio.sleep(effective_interval)
 
         altitude    = round(40.0 + math.sin(idx * 0.3) * 3, 2)
         speed       = round(8.0 + math.cos(idx * 0.2) * 2, 2)
@@ -817,7 +827,7 @@ async def simulate_mission_flight(mission_id: str) -> None:
             print(
                 f"[SIMULATOR] Mission {mission_id} | Leg {leg.sequence_no}: "
                 f"{from_hub.name} → {to_hub.name} | "
-                f"{dist_m/1000:.2f} km | {len(waypoints)} điểm | interval={INTERVAL_SEC}s | "
+                f"{dist_m/1000:.2f} km | {len(waypoints)} điểm | interval={INTERVAL_SEC}s (speed_multiplier={simulator_config.speed_multiplier}) | "
                 f"Battery start: {initial_battery_pct:.1f}% (cap: {battery_capacity_wh}Wh, planned_leg_energy: {planned_leg_energy_wh:.1f}Wh)"
             )
 
@@ -841,11 +851,29 @@ async def simulate_mission_flight(mission_id: str) -> None:
     signal_loss_duration = 0  # ← Đếm bao nhiêu điểm mất kết nối (tạm thời)
 
     for idx, (lat, lng) in enumerate(waypoints):
-        await asyncio.sleep(simulator_config.interval_sec)
+        # ── Áp dụng speed_multiplier vào interval_sec ──
+        effective_interval = simulator_config.interval_sec / simulator_config.speed_multiplier
+        await asyncio.sleep(effective_interval)
 
-        # Giả lập sensor values chuẩn hóa
-        altitude     = round(CRUISE_ALTITUDE + math.sin(idx * 0.3) * 3, 2)
-        speed        = round(CRUISE_SPEED + math.cos(idx * 0.2) * 1.5, 2)
+        # ── Dấu hiệu gần hub: Giảm tốc độ & độ cao từ từ (lần 10% cuối) ──
+        progress = (idx + 1) / total_points  # 0.0 → 1.0
+        approaching_hub = progress >= 0.9  # Lần 10% cuối là gần hub
+        
+        if approaching_hub:
+            # Giảm tốc từ CRUISE_SPEED → 2 m/s (chuẩn bị hạ cánh)
+            descent_factor = (progress - 0.9) / 0.1  # 0.0 → 1.0 khi từ 90% → 100%
+            target_speed = CRUISE_SPEED * (1 - descent_factor * 0.8) + 2 * descent_factor  # Giảm từ cruise → 2 m/s
+            
+            # Giảm độ cao từ CRUISE_ALTITUDE → 5m (hạ cánh)
+            target_altitude = CRUISE_ALTITUDE * (1 - descent_factor * 0.9) + 5 * descent_factor  # Giảm → 5m
+            
+            altitude = round(target_altitude, 2)
+            speed = round(target_speed, 2)
+        else:
+            # Giả lập sensor values chuẩn hóa lúc bay bình thường
+            altitude     = round(CRUISE_ALTITUDE + math.sin(idx * 0.3) * 3, 2)
+            speed        = round(CRUISE_SPEED + math.cos(idx * 0.2) * 1.5, 2)
+        
         battery_volt = round(max(18.0, battery_volt - 0.04), 2)
         wind_speed   = round(2.0 + math.sin(idx * 0.5) * 1.5 + random.uniform(-0.2, 0.2), 2)
 
