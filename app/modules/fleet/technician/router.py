@@ -942,7 +942,6 @@ async def get_drone_flight_history(
             Mission.arrived_at,
             Mission.battery_id,
             OrderModel.id.label("order_id"),
-            OrderModel.order_code,
         )
         .outerjoin(OrderModel, Mission.order_id == OrderModel.id)
         .where(
@@ -980,7 +979,6 @@ async def get_drone_flight_history(
         flights.append({
             "mission_id": row.mission_id,
             "order_id": row.order_id,
-            "order_code": row.order_code,
             "started_at": row.start_time,
             "arrived_at": row.arrived_at,
             "duration_minutes": duration_min,
