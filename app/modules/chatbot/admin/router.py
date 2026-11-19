@@ -37,11 +37,10 @@ allow_admin = RoleChecker([UserRole.ADMIN])
 async def admin_chat(
     body: ChatMessageRequest,
     user: CurrentUser = Depends(allow_admin),
-    db: AsyncSession = Depends(get_async_db)
 ):
     try:
         return await execute_agent_chat(
-            db=db,
+            db=None,
             message=body.message,
             history=body.history,
             system_instruction=ADMIN_SYSTEM_INSTRUCTION,

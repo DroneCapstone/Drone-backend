@@ -1,5 +1,5 @@
 import enum
-from sqlalchemy import BigInteger, Float, String, DateTime, Integer, Boolean, Enum as SAEnum, ForeignKey, JSON
+from sqlalchemy import BigInteger, Float, String, DateTime, Integer, Boolean, Enum as SAEnum, ForeignKey, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
 from typing import Optional
@@ -91,6 +91,12 @@ class IncidentSeverity(str, enum.Enum):
 
 class Mission(Base):
     __tablename__ = "missions"
+    __table_args__ = (
+        Index("idx_missions_order_id_desc", "order_id", "id"),
+        Index("idx_missions_status", "status"),
+        Index("idx_missions_drone_id", "drone_id"),
+        Index("idx_missions_origin_hub", "origin_hub_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
     order_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -119,6 +125,10 @@ class Mission(Base):
 
 class TelemetryLog(Base):
     __tablename__ = "telemetry_logs"
+    __table_args__ = (
+        Index("idx_telemetry_logs_mission_ts", "mission_id", "timestamp"),
+        Index("idx_telemetry_logs_mission_id_desc", "mission_id", "id"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     mission_id: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -146,6 +156,9 @@ class TelemetryLog(Base):
 
 class Incident(Base):
     __tablename__ = "incidents"
+    __table_args__ = (
+        Index("idx_incidents_mission_status", "mission_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     mission_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -164,6 +177,12 @@ class Incident(Base):
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        Index("idx_orders_customer_created", "customer_id", "created_at"),
+        Index("idx_orders_status_created", "status", "created_at"),
+        Index("idx_orders_origin_hub_status", "origin_hub_id", "status"),
+        Index("idx_orders_payment_status", "payment_status"),
+    )
 
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
     customer_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -219,6 +238,10 @@ class Order(Base):
 
 class MissionLeg(Base):
     __tablename__ = "mission_legs"
+    __table_args__ = (
+        Index("idx_mission_legs_mission_seq", "mission_id", "sequence_no"),
+        Index("idx_mission_legs_to_hub_status", "to_hub_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     mission_id: Mapped[str | None] = mapped_column(String(50), nullable=True)

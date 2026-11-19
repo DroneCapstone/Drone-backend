@@ -189,12 +189,9 @@ async def create_parts_request(
             created_at=now,
         ))
 
-    await db.commit()
-    await db.refresh(req)
-    out = PartsRequestOut.model_validate(req)
-    out.part_name = cat.name
+    await db.flush()
 
-    # Notify Admin khi có đề xuất mới chờ duyệt
+    # Notify Admin khi có đề xuất mới chờ duyệt (trong cùng 1 transaction)
     if not has_stock:
         try:
             from app.modules.system.models import Notification, NotificationType
@@ -218,10 +215,12 @@ async def create_parts_request(
                         reference_id=f"PARTS_REQUEST_{req.id}",
                         created_at=now,
                     ))
-                await db.commit()
         except Exception as _e:
             print(f"[NOTIF] Parts request notify error: {_e}")
 
+    await db.commit()
+    out = PartsRequestOut.model_validate(req)
+    out.part_name = cat.name
     return out
 
 
@@ -625,10 +624,9 @@ async def create_replacement_request(
         created_at=now,
     )
     db.add(req)
-    await db.commit()
-    await db.refresh(req)
+    await db.flush()
 
-    # Notify Admin
+    # Notify Admin (trong cùng 1 transaction)
     try:
         from app.modules.system.models import Notification, NotificationType
         from app.modules.auth.models import User as _User, ROLE_NAME_TO_ID as _ROLE_MAP
@@ -651,7 +649,6 @@ async def create_replacement_request(
                     reference_id=f"REPLACEMENT_{req.id}",
                     created_at=now,
                 ))
-            await db.commit()
     except Exception:
         pass
 
@@ -659,6 +656,8 @@ async def create_replacement_request(
     if req.part_category_id:
         cat = await db.get(PartCategory, req.part_category_id)
         part_name = cat.name if cat else None
+
+    await db.commit()
 
     return ReplacementRequestOut(
         request_id=req.id, type=req.type.value, damaged_item_id=req.damaged_item_id,

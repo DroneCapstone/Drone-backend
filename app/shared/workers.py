@@ -125,98 +125,110 @@ async def run_telemetry_signal_loss_watcher(db: AsyncSession):
         )
     )
     flying_missions = flying_missions_result.scalars().all()
-    
+
     if not flying_missions:
         return
-        
-    recipient_ids = await get_operator_and_admin_ids(db)
-    
-    for mission in flying_missions:
-        # Lấy log gần nhất
-        log_result = await db.execute(
-            select(TelemetryLog)
-            .where(TelemetryLog.mission_id == mission.id)
-            .order_by(TelemetryLog.timestamp.desc())
-            .limit(1)
-        )
-        latest_log = log_result.scalar_one_or_none()
-        
-        # Nếu có log mà log gần nhất quá 10s so với hiện tại
-        if latest_log and latest_log.timestamp < threshold_time:
-            # Kiểm tra xem đã có cảnh báo Incident mất tín hiệu cho mission này mà chưa xử lý không
-            existing_alert_result = await db.execute(
-                select(MaintenanceAlert).where(
-                    and_(
-                        MaintenanceAlert.mission_id == str(mission.id),
-                        MaintenanceAlert.source == "Incident",
-                        MaintenanceAlert.title.in_([
-                            "Telemetry signal lost (>10s)",
-                            "Signal lost for over 3s",
-                            "Mất tín hiệu quá 3s",
-                        ]),
-                        MaintenanceAlert.status.in_(["Pending", "PENDING"]),
-                    )
-                )
-            )
-            existing_alert = existing_alert_result.scalar_one_or_none()
-            
-            if not existing_alert:
-                existing_inc_res = await db.execute(
-                    select(Incident).where(
-                        and_(
-                            Incident.mission_id == str(mission.id),
-                            Incident.status.in_([IncidentStatus.OPEN, IncidentStatus.INVESTIGATING]),
-                        )
-                    ).limit(1)
-                )
-                inc = existing_inc_res.scalars().first()
-                if not inc:
-                    inc = Incident(
-                        mission_id=str(mission.id),
-                        drone_id=str(mission.drone_id) if mission.drone_id else None,
-                        reporter_id=mission.operator_id,
-                        severity=IncidentSeverity.HIGH,
-                        description=(
-                            f"🚨 [SIGNAL LOSS] Telemetry signal lost for Mission #{mission.id} "
-                            f"(Drone #{mission.drone_id}) since {latest_log.timestamp} at "
-                            f"({latest_log.latitude:.5f}, {latest_log.longitude:.5f})."
-                        ),
-                        status=IncidentStatus.OPEN,
-                        reported_at=now_tz,
-                        requires_technical_inspection=True,
-                    )
-                    db.add(inc)
-                    await db.flush()
 
-                alert = MaintenanceAlert(
-                    drone_id=mission.drone_id,
-                    source="Incident",
-                    incident_id=inc.id,
-                    mission_id=str(mission.id),
-                    title="Telemetry signal lost (>10s)",
-                    status="Pending",
-                    created_at=now
+    # Batch-fetch log telemetry mới nhất cho tất cả flying_missions trong 1 câu SQL (diệt N+1)
+    flying_mids = [m.id for m in flying_missions]
+    latest_logs_res = await db.execute(
+        select(TelemetryLog)
+        .distinct(TelemetryLog.mission_id)
+        .where(TelemetryLog.mission_id.in_(flying_mids))
+        .order_by(TelemetryLog.mission_id, TelemetryLog.timestamp.desc())
+    )
+    latest_log_by_mid = {lg.mission_id: lg for lg in latest_logs_res.scalars().all()}
+
+    stale_missions = [
+        (m, latest_log_by_mid[m.id])
+        for m in flying_missions
+        if m.id in latest_log_by_mid and latest_log_by_mid[m.id].timestamp < threshold_time
+    ]
+    if not stale_missions:
+        return
+
+    stale_mids = [str(m.id) for m, _ in stale_missions]
+    existing_alert_mids = set((await db.execute(
+        select(MaintenanceAlert.mission_id).where(
+            and_(
+                MaintenanceAlert.mission_id.in_(stale_mids),
+                MaintenanceAlert.source == "Incident",
+                MaintenanceAlert.title.in_([
+                    "Telemetry signal lost (>10s)",
+                    "Signal lost for over 3s",
+                    "Mất tín hiệu quá 3s",
+                ]),
+                MaintenanceAlert.status.in_(["Pending", "PENDING"]),
+            )
+        )
+    )).scalars().all())
+
+    missions_to_alert = [(m, lg) for m, lg in stale_missions if str(m.id) not in existing_alert_mids]
+    if not missions_to_alert:
+        return
+
+    recipient_ids = await get_operator_and_admin_ids(db)
+    dirty = False
+
+    for mission, latest_log in missions_to_alert:
+        existing_inc_res = await db.execute(
+            select(Incident).where(
+                and_(
+                    Incident.mission_id == str(mission.id),
+                    Incident.status.in_([IncidentStatus.OPEN, IncidentStatus.INVESTIGATING]),
                 )
-                db.add(alert)
-                await db.flush() # Để lấy alert.id
-                
-                # Thông báo khẩn tới toàn bộ Operator & Admin
-                for uid in recipient_ids:
-                    db.add(Notification(
-                        user_id=uid,
-                        title="⚠️ Drone Signal Loss Alert",
-                        message=(
-                            f"Mission #{mission.id} (Drone #{mission.drone_id}) has lost telemetry signal "
-                            f"for over 10 seconds! Last contact: {latest_log.timestamp}."
-                        ),
-                        notifications_type=NotificationType.SYSTEM_ALERT,
-                        mission_id=str(mission.id),
-                        drone_id=str(mission.drone_id) if mission.drone_id else None,
-                        reference_id=str(inc.id),
-                        created_at=now_tz
-                    ))
-    
-    await db.commit()
+            ).limit(1)
+        )
+        inc = existing_inc_res.scalars().first()
+        if not inc:
+            inc = Incident(
+                mission_id=str(mission.id),
+                drone_id=str(mission.drone_id) if mission.drone_id else None,
+                reporter_id=mission.operator_id,
+                severity=IncidentSeverity.HIGH,
+                description=(
+                    f"🚨 [SIGNAL LOSS] Telemetry signal lost for Mission #{mission.id} "
+                    f"(Drone #{mission.drone_id}) since {latest_log.timestamp} at "
+                    f"({latest_log.latitude:.5f}, {latest_log.longitude:.5f})."
+                ),
+                status=IncidentStatus.OPEN,
+                reported_at=now_tz,
+                requires_technical_inspection=True,
+            )
+            db.add(inc)
+            await db.flush()
+
+        alert = MaintenanceAlert(
+            drone_id=mission.drone_id,
+            source="Incident",
+            incident_id=inc.id,
+            mission_id=str(mission.id),
+            title="Telemetry signal lost (>10s)",
+            status="Pending",
+            created_at=now
+        )
+        db.add(alert)
+        await db.flush()
+        dirty = True
+
+        # Thông báo khẩn tới toàn bộ Operator & Admin
+        for uid in recipient_ids:
+            db.add(Notification(
+                user_id=uid,
+                title="⚠️ Drone Signal Loss Alert",
+                message=(
+                    f"Mission #{mission.id} (Drone #{mission.drone_id}) has lost telemetry signal "
+                    f"for over 10 seconds! Last contact: {latest_log.timestamp}."
+                ),
+                notifications_type=NotificationType.SYSTEM_ALERT,
+                mission_id=str(mission.id),
+                drone_id=str(mission.drone_id) if mission.drone_id else None,
+                reference_id=str(inc.id),
+                created_at=now_tz
+            ))
+
+    if dirty:
+        await db.commit()
 
 
 async def run_battery_charging_simulation(db: AsyncSession):

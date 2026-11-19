@@ -11,6 +11,7 @@ GHI CHÚ CHO LẬP TRÌNH VIÊN (DEVELOPER NOTES):
 
 import json
 import os
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
@@ -30,6 +31,7 @@ KNOWLEDGE_FILE_PATH = os.path.join(
 )
 
 
+@lru_cache(maxsize=1)
 def _load_knowledge() -> Dict[str, Any]:
     with open(KNOWLEDGE_FILE_PATH, "r", encoding="utf-8") as f:
         return json.load(f)

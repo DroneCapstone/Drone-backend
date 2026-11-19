@@ -79,6 +79,13 @@ def _invalidate_route_analysis_cache() -> None:
     _ROUTE_ANALYSIS_CACHE.clear()
 
 
+from app.modules.missions.bundle_service import (
+    register_route_cache_invalidator as _register_route_cache_invalidator,
+    invalidate_route_analysis_cache as _invalidate_route_cache_global,
+)
+_register_route_cache_invalidator(_invalidate_route_analysis_cache)
+
+
 def _send_mission_scheduled_email_sync(
     to_email: str,
     order_id: str,
@@ -267,28 +274,6 @@ async def get_live_tracking(
         return LiveTrackingResponse(active_count=0, drones=[])
 
     mission_ids = [m.id for m in flying_missions]
-
-    latest_log_subq = (
-        select(
-            TelemetryLog.mission_id,
-            func.max(TelemetryLog.id).label("max_id"),
-        )
-        .where(TelemetryLog.mission_id.in_(mission_ids))
-        .group_by(TelemetryLog.mission_id)
-        .subquery()
-    )
-
-    latest_logs_result = await db.execute(
-        select(TelemetryLog).join(
-            latest_log_subq,
-            and_(
-                TelemetryLog.mission_id == latest_log_subq.c.mission_id,
-                TelemetryLog.id == latest_log_subq.c.max_id,
-            ),
-        )
-    )
-    latest_logs = {log.mission_id: log for log in latest_logs_result.scalars().all()}
-
     cp_counts = {m.id: len(m.checkpoints_json or []) for m in flying_missions}
 
     # Lấy thông tin Legs cho các mission đang bay
@@ -299,18 +284,10 @@ async def get_live_tracking(
     )
     all_legs = legs_result.scalars().all()
     legs_by_mid = {}
-    hub_ids_to_fetch = set()
     for l in all_legs:
         legs_by_mid.setdefault(l.mission_id, []).append(l)
-        if l.from_hub_id:
-            hub_ids_to_fetch.add(l.from_hub_id)
-        if l.to_hub_id:
-            hub_ids_to_fetch.add(l.to_hub_id)
 
-    hubs_map = {}
-    if hub_ids_to_fetch:
-        hubs_res = await db.execute(select(Hub).where(Hub.id.in_(list(hub_ids_to_fetch))))
-        hubs_map = {h.id: h for h in hubs_res.scalars().all()}
+    hubs_map = {h.id: h for h in await get_all_hubs_cached(db)}
 
     # Lấy drone & battery để lấy % pin
     drone_ids = [m.drone_id for m in flying_missions if m.drone_id]
@@ -324,7 +301,8 @@ async def get_live_tracking(
         b_res = await db.execute(select(Battery).where(Battery.id.in_(battery_ids)))
         batteries_map = {b.id: b for b in b_res.scalars().all()}
 
-    # [PERF NOTE] Lấy trail (50 điểm gần nhất) bằng 1 window query row_number() thay vì N+1 loop từng mission đang bay.
+    # [PERF NOTE] Gộp latest_logs và trail (50 điểm gần nhất) thành 1 window query row_number() duy nhất.
+    latest_logs: dict[str, Any] = {}
     trails_by_mid: dict[str, list[dict]] = {mid: [] for mid in mission_ids}
     trail_ranked_subq = (
         select(
@@ -333,11 +311,22 @@ async def get_live_tracking(
             TelemetryLog.longitude.label("longitude"),
             TelemetryLog.altitude.label("altitude"),
             TelemetryLog.speed.label("speed"),
+            TelemetryLog.battery_voltage.label("battery_voltage"),
+            TelemetryLog.energy_consumed_wh.label("energy_consumed_wh"),
+            TelemetryLog.wind_speed.label("wind_speed"),
+            TelemetryLog.weather_temperature.label("weather_temperature"),
+            TelemetryLog.weather_humidity.label("weather_humidity"),
+            TelemetryLog.weather_wind_speed.label("weather_wind_speed"),
+            TelemetryLog.weather_wind_gust.label("weather_wind_gust"),
+            TelemetryLog.weather_wind_direction.label("weather_wind_direction"),
+            TelemetryLog.weather_precipitation.label("weather_precipitation"),
+            TelemetryLog.weather_pressure.label("weather_pressure"),
+            TelemetryLog.weather_cloud_cover.label("weather_cloud_cover"),
             TelemetryLog.timestamp.label("timestamp"),
             func.row_number()
             .over(
                 partition_by=TelemetryLog.mission_id,
-                order_by=TelemetryLog.timestamp.desc(),
+                order_by=(TelemetryLog.timestamp.desc(), TelemetryLog.id.desc()),
             )
             .label("rn"),
         )
@@ -345,18 +334,13 @@ async def get_live_tracking(
         .subquery()
     )
     trail_rows = await db.execute(
-        select(
-            trail_ranked_subq.c.mission_id,
-            trail_ranked_subq.c.latitude,
-            trail_ranked_subq.c.longitude,
-            trail_ranked_subq.c.altitude,
-            trail_ranked_subq.c.speed,
-            trail_ranked_subq.c.timestamp,
-        )
+        select(trail_ranked_subq)
         .where(trail_ranked_subq.c.rn <= 50)
-        .order_by(trail_ranked_subq.c.mission_id, trail_ranked_subq.c.timestamp.asc())
+        .order_by(trail_ranked_subq.c.mission_id, trail_ranked_subq.c.timestamp.asc(), trail_ranked_subq.c.rn.desc())
     )
     for r in trail_rows.all():
+        if r.rn == 1:
+            latest_logs[r.mission_id] = r
         trails_by_mid.setdefault(r.mission_id, []).append(
             {
                 "latitude": r.latitude,
@@ -823,15 +807,26 @@ async def collect_telemetry(
         except Exception as email_err:
             print(f"[ORDER] Lỗi khi cập nhật order status IN_DELIVERY: {email_err}")
 
-    # ── 2. Fetch weather + Lưu telemetry logs ─────────────────────────────────
+    # ── 2. Fetch weather song song (dedup theo tọa độ) + Lưu telemetry logs ───
     from app.shared.weather import fetch_weather
+
+    unique_coords = {
+        (round(float(d.latitude), 2), round(float(d.longitude), 2))
+        for d in telemetry_data
+    }
+    weather_results = await asyncio.gather(
+        *(fetch_weather(lat, lng) for lat, lng in unique_coords),
+        return_exceptions=True,
+    )
+    weather_by_coord = {
+        coord: (None if isinstance(res, Exception) else res)
+        for coord, res in zip(unique_coords, weather_results)
+    }
 
     logs_to_insert: list[TelemetryLog] = []
     for data in telemetry_data:
         naive_timestamp = data.timestamp.replace(tzinfo=None) if data.timestamp.tzinfo else data.timestamp
-
-        # Fetch weather theo tọa độ điểm này (timeout 3s, không throw nếu lỗi)
-        weather = await fetch_weather(data.latitude, data.longitude)
+        weather = weather_by_coord.get((round(float(data.latitude), 2), round(float(data.longitude), 2)))
 
         log_entry = TelemetryLog(
             mission_id=actual_mission_id,
@@ -859,11 +854,11 @@ async def collect_telemetry(
         logs_to_insert.append(log_entry)
         db.add(log_entry)
 
-    # ── 3. Tải hubs để detect proximity ────────────────────────────
-    hubs_result = await db.execute(
-        select(Hub).where(and_(Hub.latitude.isnot(None), Hub.longitude.isnot(None)))
-    )
-    all_hubs = hubs_result.scalars().all()
+    # ── 3. Tải hubs từ cache để detect proximity ─────────────────────────────
+    all_hubs = [
+        h for h in await get_all_hubs_cached(db)
+        if h.latitude is not None and h.longitude is not None
+    ]
 
     # ── 4. Detect hub proximity cho từng điểm telemetry ────────────────────────
     HUB_PROXIMITY_RADIUS_M = 200.0   # Bán kính tính từ tâm hub (m)
@@ -927,18 +922,16 @@ async def collect_telemetry(
     if new_checkpoints:
         mission.checkpoints_json = current_checkpoints
 
-    # ── 6. Commit tất cả ────────────────────────────────────────────────────────
+    # ── 6. Flush lấy ID batch rồi Commit tất cả (bỏ N+1 db.refresh) ────────────
+    await db.flush()
+    mission_status_val = mission.status
     await db.commit()
-
-    for log in logs_to_insert:
-        await db.refresh(log)
-    await db.refresh(mission)
 
     return TelemetryIngestResponse(
         saved_count=len(logs_to_insert),
         logs=logs_to_insert,
         new_checkpoints=new_checkpoints,
-        mission_status=mission.status,
+        mission_status=mission_status_val,
     )
 
 
@@ -4688,10 +4681,12 @@ async def _create_mission_internal(
             raise HTTPException(status_code=400, detail=val_res["message"])
         total_bundle_payload = val_res["total_payload_kg"]
         total_delivery_fee = val_res["total_delivery_fee"]
-        for bid in bundled_ids:
-            b_obj = await db.get(Order, bid)
-            if b_obj:
-                bundled_order_objs.append(b_obj)
+        if bundled_ids:
+            b_res = await db.execute(select(Order).where(Order.id.in_(bundled_ids)))
+            b_by_id = {b.id: b for b in b_res.scalars().all()}
+            for bid in bundled_ids:
+                if bid in b_by_id:
+                    bundled_order_objs.append(b_by_id[bid])
 
     compat_models_map = await get_compatible_battery_models_map(db)
     reserved_bat_ids, _ = await _get_reserved_batteries_and_virtual_holds(db)

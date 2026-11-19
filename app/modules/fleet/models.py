@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from sqlalchemy import BigInteger, Integer, Float, String, Text, DateTime, Boolean, ForeignKey, Enum as SAEnum, JSON
+from sqlalchemy import BigInteger, Integer, Float, String, Text, DateTime, Boolean, ForeignKey, Enum as SAEnum, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database.db import Base
 
@@ -115,6 +115,9 @@ class WorkOrderStatus(str, enum.Enum):
 # ==================== MODELS ====================
 class Drone(Base):
     __tablename__ = "drones"
+    __table_args__ = (
+        Index("idx_drones_status_hub", "operational_status", "current_hub_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -132,6 +135,10 @@ class Drone(Base):
 
 class Battery(Base):
     __tablename__ = "batteries"
+    __table_args__ = (
+        Index("idx_batteries_hub_status", "current_hub_id", "status"),
+        Index("idx_batteries_drone_id", "drone_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
     drone_id: Mapped[str | None] = mapped_column(String(50), ForeignKey("drones.id"), nullable=True)
@@ -152,6 +159,10 @@ class Battery(Base):
 
 class WorkOrder(Base):
     __tablename__ = "work_orders"
+    __table_args__ = (
+        Index("idx_work_orders_drone_status", "drone_id", "status"),
+        Index("idx_work_orders_tech_status", "technician_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     drone_id: Mapped[str | None] = mapped_column(String(50), ForeignKey("drones.id"), nullable=True)
@@ -183,6 +194,10 @@ class WorkOrder(Base):
 
 class MaintenanceAlert(Base):
     __tablename__ = "maintenance_alerts"
+    __table_args__ = (
+        Index("idx_maint_alerts_drone_status", "drone_id", "status"),
+        Index("idx_maint_alerts_mission_id", "mission_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     drone_id: Mapped[str | None] = mapped_column(String(50), nullable=True)

@@ -431,3 +431,18 @@ Yêu cầu thay thế pin hoặc linh kiện từ Technician (được Admin c�
   - `app/shared/database/migrate_logs_schema.py`: Tách `audit_logs` thành `activity_logs` (user actions) và `system_logs` (cron/background events).
   - `app/shared/database/migrate_battery_catalog.py`: Thêm bảng `battery_model_catalog` (seed 3 model pin chuẩn: `TB48D` 130Wh, `Aurelia UltraPower` 444Wh, `DJI DB2000` 980Wh).
   - `app/shared/database/migrate_replacement_requests.py`: Thêm bảng `replacement_requests` và đồng bộ `orders.refund_status` (Chuẩn hóa **22 bảng chính thức**, không còn cột `orders.sender_email`).
+
+### 3. Performance Indexes (Done-Backend-v8)
+- Đã tạo 25 non-blocking indexes (`CREATE INDEX CONCURRENTLY IF NOT EXISTS`) trên các bảng nóng và đồng bộ vào SQLAlchemy models:
+  - `telemetry_logs`: `idx_telemetry_logs_mission_ts (mission_id, timestamp DESC)`, `idx_telemetry_logs_mission_id_desc (mission_id, id DESC)`
+  - `notifications`: `idx_notifications_user_created (user_id, created_at DESC)`, `idx_notifications_user_unread (user_id) WHERE is_read = false`, `idx_notifications_ref_created (reference_id, created_at DESC)`
+  - `missions`: `idx_missions_order_id_desc (order_id, id DESC)`, `idx_missions_status (status)`, `idx_missions_drone_id (drone_id)`, `idx_missions_origin_hub (origin_hub_id)`
+  - `mission_legs`: `idx_mission_legs_mission_seq (mission_id, sequence_no)`, `idx_mission_legs_to_hub_status (to_hub_id, status)`
+  - `orders`: `idx_orders_customer_created (customer_id, created_at DESC)`, `idx_orders_status_created (status, created_at DESC)`, `idx_orders_origin_hub_status (origin_hub_id, status)`, `idx_orders_payment_status (payment_status)`
+  - `ai_predictions`: `idx_ai_predictions_mission_id_desc (mission_id, id DESC)`
+  - `batteries`: `idx_batteries_hub_status (current_hub_id, status)`, `idx_batteries_drone_id (drone_id)`
+  - `drones`: `idx_drones_status_hub (operational_status, current_hub_id)`
+  - `work_orders`: `idx_work_orders_drone_status (drone_id, status)`, `idx_work_orders_tech_status (technician_id, status)`
+  - `maintenance_alerts`: `idx_maint_alerts_drone_status (drone_id, status)`, `idx_maint_alerts_mission_id (mission_id)`
+  - `incidents`: `idx_incidents_mission_status (mission_id, status)`
+  - `accounts`: `idx_accounts_role_id (role_id)`

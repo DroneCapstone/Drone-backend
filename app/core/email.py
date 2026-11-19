@@ -48,28 +48,19 @@ async def _send_brevo_email_async(
         return False
 
 
-def send_reset_email(to_email: str, reset_link: str):
+async def send_reset_email(to_email: str, reset_link: str) -> bool:
     body = f"""
     <h3>Reset Your DroneOptAI Password</h3>
     <p>Click the link below to reset your password (expires in 15 minutes):</p>
     <a href="{reset_link}">{reset_link}</a>
     <p>If you did not request this, please ignore this email.</p>
     """
-    response = httpx.post(
-        "https://api.brevo.com/v3/smtp/email",
-        headers={
-            "api-key": settings.BREVO_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={
-            "sender": {"name": "DroneOptAI", "email": settings.EMAIL_FROM},
-            "to": [{"email": to_email}],
-            "subject": "Reset Your DroneOptAI Password",
-            "htmlContent": body,
-        },
-        timeout=10,
+    return await _send_brevo_email_async(
+        to_email=to_email,
+        subject="Reset Your DroneOptAI Password",
+        html_body=body,
+        log_label="reset_password",
     )
-    response.raise_for_status()
 
 
 async def send_mission_scheduled_email(

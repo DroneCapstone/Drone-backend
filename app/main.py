@@ -81,10 +81,21 @@ async def run_realtime_cronjobs():
     """Vòng lặp chạy ngầm mỗi 3s cho realtime monitoring.
     FDE-193: mỗi worker nhận session độc lập qua run_with_retry.
     FDE-194: retry với max_retries=2 và backoff=1s (realtime cần nhanh hơn).
+    [PERF NOTE] Tắt log_on_success cho vòng lặp 3s để tránh ghi 57,600 dòng system_logs/ngày; lỗi vẫn ghi đầy đủ.
+    run_approval_deadline_watcher chạy mỗi 15s (5 ticks) thay vì mỗi 3s.
     """
+    tick = 0
     while True:
-        await run_with_retry(run_approval_deadline_watcher,    "approval_deadline",    max_retries=2, base_backoff=1.0)
-        await run_with_retry(run_telemetry_signal_loss_watcher, "telemetry_signal_loss", max_retries=2, base_backoff=1.0)
+        if tick % 5 == 0:
+            await run_with_retry(
+                run_approval_deadline_watcher, "approval_deadline",
+                max_retries=2, base_backoff=1.0, log_on_success=False,
+            )
+        await run_with_retry(
+            run_telemetry_signal_loss_watcher, "telemetry_signal_loss",
+            max_retries=2, base_backoff=1.0, log_on_success=False,
+        )
+        tick = (tick + 1) % 5
         await asyncio.sleep(3)
 
 async def _warmup_caches_background():

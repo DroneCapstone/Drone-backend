@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 
 from app.core.timezone import get_vn_datetime, get_vn_naive_datetime
 from app.database.db import AsyncSessionLocal
@@ -623,14 +623,14 @@ async def _fly_incident_return(
         current_battery_pct = max(1.0, current_battery_pct - pct_consumed)
         new_charge_pct = int(round(current_battery_pct))
 
+        from app.shared.weather import fetch_weather
+        weather = await fetch_weather(lat, lng)
+
         async with AsyncSessionLocal() as db:
             try:
-                mission = await db.get(Mission, mission_id)
-                if not mission:
+                m_exists = (await db.execute(select(Mission.id).where(Mission.id == mission_id))).scalar_one_or_none()
+                if not m_exists:
                     return
-
-                from app.shared.weather import fetch_weather
-                weather = await fetch_weather(lat, lng)
 
                 log = TelemetryLog(
                     mission_id=mission_id,
@@ -655,13 +655,13 @@ async def _fly_incident_return(
                 db.add(log)
 
                 if active_battery_id:
-                    bat = await db.get(Battery, active_battery_id)
-                    if bat:
-                        bat.charge_level_pct = new_charge_pct
+                    await db.execute(
+                        update(Battery).where(Battery.id == active_battery_id).values(charge_level_pct=new_charge_pct)
+                    )
                 if active_drone_id:
-                    dr = await db.get(Drone, active_drone_id)
-                    if dr:
-                        dr.battery_level_pct = new_charge_pct
+                    await db.execute(
+                        update(Drone).where(Drone.id == active_drone_id).values(battery_level_pct=new_charge_pct)
+                    )
 
                 await db.commit()
                 print(f"[SIMULATOR] [RETURN {idx+1:>3}/{total}] ({lat:.6f}, {lng:.6f}) pin={new_charge_pct}%")
@@ -934,34 +934,43 @@ async def simulate_mission_flight(mission_id: str) -> None:
                 await _fly_incident_return(mission_id, return_waypoints, target_hub, active_battery_id, active_drone_id, battery_capacity_wh, current_battery_pct)
                 return
 
+        # Fetch weather TRƯỚC khi mở DB session để không giữ DB connection trong lúc chờ Open-Meteo
+        weather = None
+        if not signal_loss_triggered or signal_loss_duration <= 1:
+            from app.shared.weather import fetch_weather
+            weather = await fetch_weather(lat, lng)
+
         async with AsyncSessionLocal() as db:
             try:
-                # Kiểm tra mission còn FLYING không (có thể bị cancel hoặc kích hoạt failsafe incident)
-                mission = await db.get(Mission, mission_id)
-                if not mission:
+                # Kiểm tra mission còn FLYING không (chỉ lấy 2 cột cần thiết)
+                m_row = (await db.execute(
+                    select(Mission.status, Mission.arrived_at).where(Mission.id == mission_id)
+                )).first()
+                if not m_row:
                     return
-                if mission.status == MissionStatus.INCIDENT_RETURN and mission.arrived_at is None:
+                m_status, m_arrived_at = m_row
+                if m_status == MissionStatus.INCIDENT_RETURN and m_arrived_at is None:
                     print(f"[SIMULATOR] Mission {mission_id} đã kích hoạt INCIDENT_RETURN, bắt đầu bay quay về trạm.")
                     return_waypoints = _interpolate(lat, lng, from_hub.latitude, from_hub.longitude, max(5, (total_points - idx)))
                     await _fly_incident_return(mission_id, return_waypoints, from_hub, active_battery_id, active_drone_id, battery_capacity_wh, current_battery_pct)
                     return
-                elif mission.status != MissionStatus.FLYING:
-                    print(f"[SIMULATOR] Mission {mission_id} không còn FLYING ({mission.status}), dừng simulator.")
+                elif m_status != MissionStatus.FLYING:
+                    print(f"[SIMULATOR] Mission {mission_id} không còn FLYING ({m_status}), dừng simulator.")
                     return
 
                 # ── Nếu SIGNAL_LOSS đã trigger, chỉ update pin, không ghi telemetry ──
                 if signal_loss_triggered:
                     signal_loss_duration -= 1  # ← Đếm ngược
                     
-                    # Update pin nhưng không ghi log
+                    # Direct UPDATE không cần db.get() trước
                     if active_battery_id:
-                        bat = await db.get(Battery, active_battery_id)
-                        if bat:
-                            bat.charge_level_pct = new_charge_pct
+                        await db.execute(
+                            update(Battery).where(Battery.id == active_battery_id).values(charge_level_pct=new_charge_pct)
+                        )
                     if active_drone_id:
-                        dr = await db.get(Drone, active_drone_id)
-                        if dr:
-                            dr.battery_level_pct = new_charge_pct
+                        await db.execute(
+                            update(Drone).where(Drone.id == active_drone_id).values(battery_level_pct=new_charge_pct)
+                        )
                     await db.commit()
                     
                     if signal_loss_duration > 0:
@@ -981,10 +990,6 @@ async def simulate_mission_flight(mission_id: str) -> None:
                         )
                         signal_loss_triggered = False  # ← Kết nối bình thường lại
                         # Tiếp tục ghi telemetry bình thường ở dưới
-
-                # Fetch weather theo tọa độ điểm này
-                from app.shared.weather import fetch_weather
-                weather = await fetch_weather(lat, lng)
 
                 # Ghi nhận Telemetry Log (chỉ khi không mất kết nối)
                 log = TelemetryLog(
@@ -1011,15 +1016,15 @@ async def simulate_mission_flight(mission_id: str) -> None:
                 )
                 db.add(log)
 
-                # Cập nhật mức pin trực tiếp vào Database (batteries và drones)
+                # Cập nhật mức pin trực tiếp vào Database (direct UPDATE bỏ 2 SELECT thừa)
                 if active_battery_id:
-                    bat = await db.get(Battery, active_battery_id)
-                    if bat:
-                        bat.charge_level_pct = new_charge_pct
+                    await db.execute(
+                        update(Battery).where(Battery.id == active_battery_id).values(charge_level_pct=new_charge_pct)
+                    )
                 if active_drone_id:
-                    dr = await db.get(Drone, active_drone_id)
-                    if dr:
-                        dr.battery_level_pct = new_charge_pct
+                    await db.execute(
+                        update(Drone).where(Drone.id == active_drone_id).values(battery_level_pct=new_charge_pct)
+                    )
 
                 await db.commit()
 

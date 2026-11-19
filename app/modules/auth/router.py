@@ -1,12 +1,29 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.database.db import get_async_db
+from app.database.db import get_async_db, AsyncSessionLocal
 from app.modules.auth import service
 from app.modules.auth.schemas import LoginRequest, RegisterRequest, TokenResponse, UserResponse, ForgotPasswordRequest, ResetPasswordRequest
 from app.modules.system.service import log_activity
+
+
+async def _log_login_activity_bg(user_id: str, user_email: str, role_value: str) -> None:
+    try:
+        async with AsyncSessionLocal() as bg_db:
+            await log_activity(
+                bg_db,
+                action="LOGIN",
+                user_id=user_id,
+                user_email=user_email,
+                role=role_value,
+                resource_type="users",
+                resource_id=user_id,
+                description=f"Logged in successfully: {user_email}",
+            )
+    except Exception:
+        pass
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -65,22 +82,24 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_async_d
 # ── Login (email + password) ──────────────────────────────────────────────────
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_async_db)):
+async def login(
+    body: LoginRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_async_db),
+):
     """
     Đăng nhập bằng email và mật khẩu.
     Kiểm tra thông tin đăng nhập, nếu hợp lệ sẽ trả về access token và refresh token.
     """
     user = await service.get_user_by_email(db, body.email)
-    if not user or not user.hashed_password or not service.verify_password(body.password, user.hashed_password):
+    if not user or not user.hashed_password or not await service.verify_password_async(body.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(
             status_code=403, 
             detail="This account has been deleted or suspended. Please contact an administrator for assistance."
         )
-    await log_activity(db, action="LOGIN", user_id=user.id, user_email=user.email,
-                       role=user.role.value, resource_type="users", resource_id=user.id,
-                       description=f"Logged in successfully: {user.email}")
+    background_tasks.add_task(_log_login_activity_bg, user.id, user.email, user.role.value)
     return TokenResponse(
         access_token=service.create_access_token(user.id, user.role.value),
         refresh_token=service.create_refresh_token(user.id),
@@ -92,7 +111,11 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_async_db)):
 # ── Forgot / Reset Password ──────────────────────────────────────────────────
 
 @router.post("/forgot-password")
-async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depends(get_async_db)):
+async def forgot_password(
+    body: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_async_db),
+):
     """
     Yêu cầu đặt lại mật khẩu.
     Tạo token đặt lại mật khẩu và gửi liên kết đặt lại qua email của người dùng.
@@ -101,7 +124,7 @@ async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depend
     token = await service.create_reset_token(db, body.email)
     if token:
         reset_link = f"{settings.FRONTEND_URL}/reset-password?token={token}"
-        send_reset_email(body.email, reset_link)
+        background_tasks.add_task(send_reset_email, body.email, reset_link)
     return {"message": "If this email exists, a reset link has been sent."}
 
 

@@ -37,11 +37,10 @@ allow_technician = RoleChecker([UserRole.TECHNICIAN, UserRole.ADMIN])
 async def technician_chat(
     body: ChatMessageRequest,
     user: CurrentUser = Depends(allow_technician),
-    db: AsyncSession = Depends(get_async_db)
 ):
     try:
         return await execute_agent_chat(
-            db=db,
+            db=None,
             message=body.message,
             history=body.history,
             system_instruction=TECHNICIAN_SYSTEM_INSTRUCTION,

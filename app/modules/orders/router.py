@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func
 from datetime import datetime, timezone, timedelta
@@ -1037,6 +1037,7 @@ async def get_eligible_batteries_for_order(
 @router.post("/{order_id}/cancel", summary="Huỷ đơn hàng")
 async def cancel_order(
     order_id: str,
+    background_tasks: BackgroundTasks,
     body: Optional[OrderCancelRequest] = None,
     user: CurrentUser = Depends(allow_operator),
     db: AsyncSession = Depends(get_async_db),
@@ -1095,21 +1096,21 @@ async def cancel_order(
     order.cancelled_at = now
     order.updated_at = now
     await db.commit()
+    from app.modules.missions.bundle_service import invalidate_route_analysis_cache
+    invalidate_route_analysis_cache()
 
-    # Gửi email thông báo huỷ
-    try:
+    # Gửi email thông báo huỷ ở nền sau khi commit
+    if order.receiver_email:
         from app.core.email import send_delivery_email
-        if order.receiver_email:
-            await send_delivery_email(
-                to_email=order.receiver_email,
-                order_id=order_id,
-                mission_code=None,
-                frontend_url=settings.FRONTEND_URL,
-            )
-        else:
-            print(f"[EMAIL] Order {order_id} không có receiver_email, bỏ qua")
-    except Exception as e:
-        print(f"[EMAIL] Lỗi gửi email huỷ order: {e}")
+        background_tasks.add_task(
+            send_delivery_email,
+            to_email=order.receiver_email,
+            order_id=order_id,
+            mission_code=None,
+            frontend_url=settings.FRONTEND_URL,
+        )
+    else:
+        print(f"[EMAIL] Order {order_id} không có receiver_email, bỏ qua")
 
     return {"message": "Order cancelled", "order_id": order_id, "status": "CANCELLED"}
 

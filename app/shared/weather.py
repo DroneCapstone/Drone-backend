@@ -35,10 +35,18 @@ class WeatherData:
 
 # In-memory cache 5 phút theo tọa độ (lat, lng) làm tròn 2 chữ số thập phân (~1.1 km)
 # [PERF NOTE] Giữ nguyên cache 300s + pooled AsyncClient + in-flight deduplication; không gọi HTTP thời tiết không cache trong vòng lặp Dijkstra/telemetry.
-_WEATHER_CACHE: dict[tuple[float, float], tuple[float, WeatherData]] = {}
+_WEATHER_CACHE: dict[tuple[float, float], tuple[float, Optional[WeatherData]]] = {}
 _WEATHER_CACHE_TTL_SEC = 300.0
+_WEATHER_NEG_CACHE_TTL_SEC = 20.0
+_WEATHER_CACHE_MAX = 512
 _WEATHER_CLIENTS_BY_LOOP: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = weakref.WeakKeyDictionary()
 _WEATHER_INFLIGHT_BY_LOOP: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[float, float], asyncio.Future]] = weakref.WeakKeyDictionary()
+
+
+def _set_weather_cache(cache_key: tuple[float, float], value: Optional[WeatherData]) -> None:
+    if len(_WEATHER_CACHE) >= _WEATHER_CACHE_MAX:
+        _WEATHER_CACHE.clear()
+    _WEATHER_CACHE[cache_key] = (time.monotonic(), value)
 
 
 def _get_weather_async_client() -> httpx.AsyncClient:
@@ -94,7 +102,8 @@ async def fetch_weather(lat: float, lng: float, use_cache: bool = True) -> Optio
 
     if use_cache and cache_key in _WEATHER_CACHE:
         cached_at, cached_data = _WEATHER_CACHE[cache_key]
-        if (now_mono - cached_at) <= _WEATHER_CACHE_TTL_SEC:
+        ttl = _WEATHER_CACHE_TTL_SEC if cached_data is not None else _WEATHER_NEG_CACHE_TTL_SEC
+        if (now_mono - cached_at) <= ttl:
             return cached_data
 
     loop = asyncio.get_running_loop()
@@ -123,6 +132,8 @@ async def fetch_weather(lat: float, lng: float, use_cache: bool = True) -> Optio
         client = _get_weather_async_client()
         resp = await client.get(url)
         if resp.status_code != 200:
+            if use_cache:
+                _set_weather_cache(cache_key, None)
             if fut is not None and not fut.done():
                 fut.set_result(None)
             return None
@@ -144,12 +155,14 @@ async def fetch_weather(lat: float, lng: float, use_cache: bool = True) -> Optio
             weather_code=int(w_code) if w_code is not None else None,
             condition_label=cond_label,
         )
-        _WEATHER_CACHE[cache_key] = (time.monotonic(), w_obj)
+        _set_weather_cache(cache_key, w_obj)
         if fut is not None and not fut.done():
             fut.set_result(w_obj)
         return w_obj
 
     except Exception:
+        if use_cache:
+            _set_weather_cache(cache_key, None)
         if fut is not None and not fut.done():
             fut.set_result(None)
         return None
