@@ -365,30 +365,8 @@ async def create_order(
                     created_at=_vn_now,
                 ))
 
-        # 3. Thông báo cho Technician tại Hub gốc (origin_hub)
-        # Technician là người sẽ nhận hàng khi khách mang đến Hub
-        _tech_role_id = _ROLE_MAP.get(_Role.TECHNICIAN)
-        if _tech_role_id and new_order.origin_hub_id:
-            _techs = (await db.execute(
-                select(_User.id).where(
-                    _User.role_id == _tech_role_id,
-                    _User.hub_id == new_order.origin_hub_id,
-                    _User.is_active == True,
-                )
-            )).scalars().all()
-            for _tech_id in _techs:
-                db.add(_Notif(
-                    user_id=_tech_id,
-                    title=f"📬 New order incoming — {origin_hub.name}",
-                    message=(
-                        f"Order #{new_order.id} ({_mode_str}, {body.payload_kg} kg) created at {_time_str}. "
-                        f"Customer will drop off the package at your Hub. "
-                        f"Please prepare to receive and verify the package."
-                    ),
-                    notifications_type=_NT.MISSION_STATUS,
-                    reference_id=f"NEW_ORDER_{new_order.id}",
-                    created_at=_vn_now,
-                ))
+        # 3. Technician at origin hub does NOT need a new-order notification.
+        # They will be notified when a Mission is actually scheduled for their hub.
         await db.commit()
     except Exception as _e:
         print(f"[NOTIFY] Lỗi gửi thông báo đơn mới: {_e}")

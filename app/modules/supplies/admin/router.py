@@ -547,25 +547,8 @@ async def approve_request(
                  f"{cat.name if cat else '?'} for drone {req.drone_id or 'N/A'}",
             created_at=now,
         ))
-        await db.commit()
-
-        # Notify Technician: đề xuất được duyệt
-        try:
-            from app.modules.system.models import Notification, NotificationType
-            db.add(Notification(
-                user_id=req.requested_by,
-                title=f"✅ Request #{request_id} Approved",
-                message=(
-                    f"Your request to use {req.quantity_needed}x {cat.name if cat else 'parts'} "
-                    f"has been approved by Admin. Please proceed with the repair and confirm completion."
-                ),
-                notifications_type=NotificationType.MAINTENANCE,
-                reference_id=f"PARTS_REQUEST_{request_id}",
-                created_at=now,
-            ))
-            await db.commit()
-        except Exception:
-            pass
+        # NOTE: Parts request approval — no in-app notification to Tech.
+        # Tech is notified via maintenance alerts and mission scheduling events.
 
         return {"message": "Approved; parts have been deducted from hub stock.",
                 "request_id": request_id, "status": PartsRequestStatus.APPROVED.value,
@@ -600,24 +583,7 @@ async def reject_request(
     req.admin_note = body.admin_note or "Rejected by Admin."
     await db.commit()
 
-    # Notify Technician: bị từ chối
-    try:
-        from app.modules.system.models import Notification, NotificationType
-        db.add(Notification(
-            user_id=req.requested_by,
-            title=f"❌ Request #{request_id} Rejected",
-            message=(
-                f"Your parts request has been rejected by Admin. "
-                f"Reason: {req.admin_note}"
-            ),
-            notifications_type=NotificationType.MAINTENANCE,
-            reference_id=f"PARTS_REQUEST_{request_id}",
-            created_at=now,
-        ))
-        await db.commit()
-    except Exception:
-        pass
-
+    # NOTE: No in-app notification for reject — Tech sees status change in app.
     return {"message": "Parts request rejected.", "request_id": request_id}
 
 
@@ -1289,24 +1255,8 @@ async def confirm_supply(
 
     await db.commit()
 
-    # Notify Technician
-    try:
-        from app.modules.system.models import Notification, NotificationType
-        type_label = "pin" if req.type == ReplacementType.BATTERY else "linh kiện"
-        db.add(Notification(
-            user_id=req.requested_by,
-            title=f"✅ Yêu cầu #{request_id} — {type_label} đã được cấp phát",
-            message=(
-                f"Admin đã cấp phát {req.quantity}x {type_label} cho yêu cầu của bạn. "
-                f"Item ID: {req.supplied_item_id}."
-            ),
-            notifications_type=NotificationType.MAINTENANCE,
-            reference_id=f"REPLACEMENT_{req.id}",
-            created_at=now,
-        ))
-        await db.commit()
-    except Exception:
-        pass
+    # NOTE: Replacement supply/reject — no in-app notification.
+    # Tech is notified via maintenance alerts and mission scheduling events.
 
     return {
         "message": f"Đã cấp phát thành công.",
@@ -1341,22 +1291,7 @@ async def reject_replacement_request(
     req.rejection_reason = body.rejection_reason
     await db.commit()
 
-    # Notify Technician
-    try:
-        from app.modules.system.models import Notification, NotificationType
-        type_label = "pin" if req.type == ReplacementType.BATTERY else "linh kiện"
-        db.add(Notification(
-            user_id=req.requested_by,
-            title=f"❌ Yêu cầu #{request_id} bị từ chối",
-            message=f"Yêu cầu thay {type_label} của bạn đã bị từ chối. Lý do: {body.rejection_reason}",
-            notifications_type=NotificationType.MAINTENANCE,
-            reference_id=f"REPLACEMENT_{req.id}",
-            created_at=now,
-        ))
-        await db.commit()
-    except Exception:
-        pass
-
+    # NOTE: No in-app notification for replacement reject.
     return {
         "message": "Đã từ chối yêu cầu.",
         "request_id": request_id,

@@ -728,20 +728,7 @@ async def run_deadline_alert_watcher(db: AsyncSession):
                 reference_id=ref_id,
                 created_at=now,
             ))
-
-        # ── Notify Technicians (chuẩn bị drone + pin) ────────────────────────
-        for tech_id in technician_ids:
-            db.add(Notification(
-                user_id=tech_id,
-                title=f"{icon} Prepare Drone — Order #{order.id} due in {slack_str}",
-                message=(
-                    f"Order #{order.id} ({d_mode}) is about to be scheduled for flight. "
-                    f"Please ensure drones and batteries at the Hub are ready. "
-                    f"ETA: {eta_str}."
-                ),
-                notifications_type=NotificationType.MISSION_STATUS,
-                reference_id=ref_id,
-                created_at=now,
-            ))
+        # NOTE: Deadline alert is Operator-only — Technician notifications
+        # are sent when a Mission is actually scheduled or drone arrives.
 
     await db.commit()

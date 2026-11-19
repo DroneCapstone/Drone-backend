@@ -778,6 +778,37 @@ async def confirm_arrival(
                             mission_id=str(mission.id),
                             created_at=now,
                         ))
+
+                    # ── Notify Technicians at receiving hub: drone arrived ─────────
+                    try:
+                        from app.modules.system.models import Notification as _ANotif, NotificationType as _ANT
+                        from app.modules.auth.models import User as _AUser, ROLE_NAME_TO_ID as _AROLE_MAP
+                        from app.shared.roles import UserRole as _ARole
+                        _a_tech_role_id = _AROLE_MAP.get(_ARole.TECHNICIAN)
+                        if receiving_hub_id and _a_tech_role_id:
+                            _a_hub_name = hub_name or f"Hub #{receiving_hub_id}"
+                            _a_tech_res = await db.execute(
+                                select(_AUser.id).where(
+                                    _AUser.role_id == _a_tech_role_id,
+                                    _AUser.hub_id == str(receiving_hub_id),
+                                )
+                            )
+                            for _atid in _a_tech_res.scalars().all():
+                                db.add(_ANotif(
+                                    user_id=_atid,
+                                    title=f"🛬 Drone Arrived at {_a_hub_name} — Ready for Inspection",
+                                    message=(
+                                        f"Drone #{mission.drone_id} has landed at {_a_hub_name} "
+                                        f"(Mission #{mission.id}). Please proceed with post-flight inspection."
+                                    ),
+                                    notifications_type=_ANT.MAINTENANCE,
+                                    reference_id=f"DRONE_ARRIVED_TECH_{mission.id}",
+                                    mission_id=str(mission.id),
+                                    drone_id=str(mission.drone_id) if mission.drone_id else None,
+                                    created_at=now,
+                                ))
+                    except Exception as _ae:
+                        print(f"[ARRIVAL] Failed to notify hub technicians: {_ae}")
     except Exception as e:
         print(f"[ORDER_CONFIRM] Lỗi cập nhật đơn hàng: {e}")
 

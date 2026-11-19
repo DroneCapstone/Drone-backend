@@ -667,6 +667,36 @@ async def create_incident(
                 reference_id=str(incident.id),
                 created_at=now,
             ))
+
+        # Notify Technicians at the drone's current hub
+        if body.drone_id:
+            from app.modules.fleet.models import Drone as _Drone
+            from app.modules.auth.models import User as _IUser, ROLE_NAME_TO_ID as _IROLE_MAP
+            from app.shared.roles import UserRole as _IRole
+            _inc_drone = await db.get(_Drone, body.drone_id)
+            _inc_hub_id = _inc_drone.current_hub_id if _inc_drone else None
+            _itech_role_id = _IROLE_MAP.get(_IRole.TECHNICIAN)
+            if _inc_hub_id and _itech_role_id:
+                _itech_res = await db.execute(
+                    select(_IUser.id).where(
+                        _IUser.role_id == _itech_role_id,
+                        _IUser.hub_id == str(_inc_hub_id),
+                    )
+                )
+                for _itid in _itech_res.scalars().all():
+                    db.add(Notification(
+                        user_id=_itid,
+                        title=f"🚨 Incident — Drone #{body.drone_id} Requires Inspection",
+                        message=(
+                            f"Incident #{incident.id} ({sev_label}) reported for Drone #{body.drone_id}"
+                            f"{f' on Mission #{body.mission_id}' if body.mission_id else ''}: {body.description}"
+                        ),
+                        notifications_type=NotificationType.MAINTENANCE,
+                        mission_id=str(body.mission_id) if body.mission_id else None,
+                        drone_id=str(body.drone_id) if body.drone_id else None,
+                        reference_id=str(incident.id),
+                        created_at=now,
+                    ))
     except Exception as e:
         print(f"[INCIDENT] Lỗi gửi notification khi tạo incident: {e}")
 
@@ -5032,6 +5062,36 @@ async def _create_mission_internal(
         if o_item.receiver_email:
             emails_to_send.append((o_item.receiver_email, o_item.id))
 
+    # 6. Notify Technicians at origin hub: new mission assigned
+    try:
+        from app.modules.auth.models import User as _TUser, ROLE_NAME_TO_ID as _ROLE_MAP
+        from app.shared.roles import UserRole as _TRole
+        _tech_role_id = _ROLE_MAP.get(_TRole.TECHNICIAN)
+        if mission.origin_hub_id and _tech_role_id:
+            _origin_hub = await db.get(Hub, mission.origin_hub_id)
+            _origin_hub_name = _origin_hub.name if _origin_hub else f"Hub #{mission.origin_hub_id}"
+            _tech_res = await db.execute(
+                select(_TUser.id).where(
+                    _TUser.role_id == _tech_role_id,
+                    _TUser.hub_id == str(mission.origin_hub_id),
+                )
+            )
+            for _tid in _tech_res.scalars().all():
+                db.add(Notification(
+                    user_id=_tid,
+                    title=f"✈️ New Mission Scheduled — {_origin_hub_name}",
+                    message=(
+                        f"Mission #{mission.id} has been scheduled. "
+                        f"Please prepare drone and batteries at your hub."
+                    ),
+                    notifications_type=NotificationType.MISSION_STATUS,
+                    mission_id=str(mission.id),
+                    reference_id=f"MISSION_SCHEDULED_TECH_{mission.id}",
+                    created_at=now_naive,
+                ))
+    except Exception as _e:
+        print(f"[MISSION] Failed to notify hub technicians: {_e}")
+
     await db.commit()
     _invalidate_route_analysis_cache()
 
@@ -5335,7 +5395,10 @@ async def operator_battery_swap(
     from app.shared.roles import UserRole as _Role
     tech_role_id = _ROLE_MAP.get(_Role.TECHNICIAN)
     tech_result = await db.execute(
-        select(_User.id).where(_User.role_id == tech_role_id)
+        select(_User.id).where(
+            _User.role_id == tech_role_id,
+            _User.hub_id == str(hub_id),
+        )
     )
     technician_ids = tech_result.scalars().all()
 
