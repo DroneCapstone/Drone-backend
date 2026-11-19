@@ -299,10 +299,12 @@ async def get_transit_history(
                 Mission.battery_charge_at_arrival.label("battery_percent"),
                 Mission.arrival_confirmed_at,
                 Order.destination_received_at,
+                Hub.name.label("origin_hub_name"),  # ← Thêm tên hub gốc
             )
             .outerjoin(Drone, Mission.drone_id == Drone.id)
             .outerjoin(Battery, Mission.battery_id == Battery.id)
             .outerjoin(Order, Mission.order_id == Order.id)
+            .outerjoin(Hub, Mission.origin_hub_id == Hub.id)  # ← Join Hub gốc
             .where(
                 or_(
                     Mission.status.in_([
@@ -357,7 +359,13 @@ async def get_transit_history(
                 battery_percent,
                 arrival_confirmed_at,
                 destination_received_at,
+                origin_hub_name,
             ) = row
+            
+            # Lấy tên hub đích từ DB
+            dest_hub = await db.get(Hub, dest_hub_id) if dest_hub_id else None
+            dest_hub_name = dest_hub.name if dest_hub else None
+            
             status_val = m_status.value if hasattr(m_status, "value") else m_status
             handling_val = m_handling.value if hasattr(m_handling, "value") else m_handling
             response.append({
@@ -366,7 +374,9 @@ async def get_transit_history(
                 "mission_code": str(m_id),
                 "order_id": order_id,
                 "origin_hub_id": origin_hub_id,
+                "origin_hub_name": origin_hub_name,  # ← Thêm tên hub gốc
                 "destination_hub_id": dest_hub_id,
+                "destination_hub_name": dest_hub_name,  # ← Thêm tên hub đích
                 "arrived_at": arrived_at.isoformat() if arrived_at else None,
                 "end_time": end_time.isoformat() if end_time else None,
                 "drone_id": drone_id,
@@ -983,11 +993,10 @@ async def get_drone_flight_history(
         select(
             Mission.id.label("mission_id"),
             Mission.status.label("mission_status"),
-            Mission.started_at,
+            Mission.start_time,
             Mission.arrived_at,
             Mission.battery_id,
             OrderModel.id.label("order_id"),
-            OrderModel.order_code,
         )
         .outerjoin(OrderModel, Mission.order_id == OrderModel.id)
         .where(
@@ -1015,8 +1024,8 @@ async def get_drone_flight_history(
     flights = []
     for row in rows:
         duration_min = None
-        if row.started_at and row.arrived_at:
-            duration = row.arrived_at - row.started_at
+        if row.start_time and row.arrived_at:
+            duration = row.arrived_at - row.start_time
             duration_min = int(duration.total_seconds() / 60)
 
         legs_count = legs_count_map.get(row.mission_id, 0)
@@ -1025,8 +1034,7 @@ async def get_drone_flight_history(
         flights.append({
             "mission_id": row.mission_id,
             "order_id": row.order_id,
-            "order_code": row.order_code,
-            "started_at": row.started_at,
+            "started_at": row.start_time,
             "arrived_at": row.arrived_at,
             "duration_minutes": duration_min,
             "battery_id": row.battery_id,
