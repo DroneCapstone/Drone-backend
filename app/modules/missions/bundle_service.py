@@ -36,10 +36,27 @@ class _CachedHub:
     status: Optional[str]
 
 
+_ROUTE_INVALIDATION_CALLBACKS: list = []
+
+
+def register_route_cache_invalidator(fn) -> None:
+    if fn not in _ROUTE_INVALIDATION_CALLBACKS:
+        _ROUTE_INVALIDATION_CALLBACKS.append(fn)
+
+
+def invalidate_route_analysis_cache() -> None:
+    for fn in _ROUTE_INVALIDATION_CALLBACKS:
+        try:
+            fn()
+        except Exception:
+            pass
+
+
 def invalidate_planning_metadata_caches() -> None:
     global _COMPAT_MODELS_CACHE, _HUBS_CACHE
     _COMPAT_MODELS_CACHE = None
     _HUBS_CACHE = None
+    invalidate_route_analysis_cache()
 
 
 async def get_all_hubs_cached(db: AsyncSession) -> list[_CachedHub]:

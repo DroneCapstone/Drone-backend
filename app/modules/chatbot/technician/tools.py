@@ -4,7 +4,7 @@ Tools dành cho Technician Chatbot.
 
 from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 try:
     from google.genai import types
@@ -16,23 +16,27 @@ from app.modules.fleet.models import Drone, DroneStatus, Battery, WorkOrder, Wor
 
 async def tool_get_fleet_status(db: AsyncSession, **kwargs) -> Dict[str, Any]:
     """Lấy tổng quan tình trạng đội Drone."""
-    result = await db.execute(select(Drone))
-    drones = result.scalars().all()
+    counts_rows = (await db.execute(
+        select(Drone.status, func.count(Drone.id)).group_by(Drone.status)
+    )).all()
+    counts = {st: int(cnt) for st, cnt in counts_rows}
+    total = sum(counts.values())
+    available = counts.get(DroneStatus.AVAILABLE, 0)
+    in_flight = counts.get(DroneStatus.IN_FLIGHT, 0)
+    maintenance = counts.get(DroneStatus.MAINTENANCE, 0)
 
-    total = len(drones)
-    available = sum(1 for d in drones if d.status == DroneStatus.AVAILABLE)
-    in_flight = sum(1 for d in drones if d.status == DroneStatus.IN_FLIGHT)
-    maintenance = sum(1 for d in drones if d.status == DroneStatus.MAINTENANCE)
-
+    sample_rows = (await db.execute(
+        select(Drone.id, Drone.name, Drone.model, Drone.status, Drone.battery_level_pct).limit(10)
+    )).all()
     drone_summary = [
         {
-            "id": d.id,
-            "name": d.name,
-            "model": d.model,
-            "status": d.status.value if d.status else "UNKNOWN",
-            "battery_pct": d.battery_level_pct
+            "id": r.id,
+            "name": r.name,
+            "model": r.model,
+            "status": r.status.value if r.status else "UNKNOWN",
+            "battery_pct": r.battery_level_pct
         }
-        for d in drones[:10]
+        for r in sample_rows
     ]
 
     return {
@@ -47,8 +51,11 @@ async def tool_get_fleet_status(db: AsyncSession, **kwargs) -> Dict[str, Any]:
 
 async def tool_get_battery_status(db: AsyncSession, **kwargs) -> Dict[str, Any]:
     """Kiểm tra tình trạng pin (đặc biệt là pin yếu cần sạc)."""
-    result = await db.execute(select(Battery))
-    batteries = result.scalars().all()
+    total_batteries = int((await db.execute(select(func.count(Battery.id)))).scalar() or 0)
+    low_rows = (await db.execute(
+        select(Battery.id, Battery.serial_number, Battery.charge_level_pct, Battery.current_hub_id, Battery.drone_id)
+        .where(Battery.charge_level_pct.isnot(None), Battery.charge_level_pct < 30)
+    )).all()
 
     low_batteries = [
         {
@@ -58,13 +65,12 @@ async def tool_get_battery_status(db: AsyncSession, **kwargs) -> Dict[str, Any]:
             "hub_id": b.current_hub_id,
             "drone_id": b.drone_id
         }
-        for b in batteries
-        if b.charge_level_pct is not None and b.charge_level_pct < 30
+        for b in low_rows
     ]
 
     return {
         "success": True,
-        "total_batteries": len(batteries),
+        "total_batteries": total_batteries,
         "low_battery_count": len(low_batteries),
         "low_batteries_needing_charge": low_batteries
     }

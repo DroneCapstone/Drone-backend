@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import uuid
@@ -318,10 +318,8 @@ async def create_order(
         updated_at=now
     )
     db.add(new_order)
-    await db.commit()
-    await db.refresh(new_order)
 
-    # ── Notify Customer & tất cả Operators về đơn hàng mới ──────────────────
+    # ── Notify Customer & tất cả Operators trong cùng 1 transaction (bỏ commit thứ 2 & refresh thừa) ──
     try:
         from app.modules.auth.models import User as _User, ROLE_NAME_TO_ID as _ROLE_MAP
         from app.modules.system.models import Notification as _Notif, NotificationType as _NT
@@ -332,7 +330,6 @@ async def create_order(
         _vn_now = _get_vn_dt()
         _time_str = _vn_now.strftime("%H:%M:%S %d/%m/%Y")
 
-        # 1. Thông báo cho Customer xác nhận tạo đơn thành công kèm thời gian
         db.add(_Notif(
             user_id=str(current_user.id),
             title=f"✅ Order #{new_order.id} Created Successfully",
@@ -346,7 +343,6 @@ async def create_order(
             created_at=_vn_now,
         ))
 
-        # 2. Thông báo cho Operators
         _op_role_id = _ROLE_MAP.get(_Role.OPERATOR)
         if _op_role_id:
             _ops = (await db.execute(select(_User.id).where(_User.role_id == _op_role_id))).scalars().all()
@@ -364,12 +360,10 @@ async def create_order(
                     reference_id=f"NEW_ORDER_{new_order.id}",
                     created_at=_vn_now,
                 ))
-
-        # 3. Technician at origin hub does NOT need a new-order notification.
-        # They will be notified when a Mission is actually scheduled for their hub.
-        await db.commit()
     except Exception as _e:
         print(f"[NOTIFY] Lỗi gửi thông báo đơn mới: {_e}")
+
+    await db.commit()
 
     return OrderCreateResponse(
         id=new_order.id,
@@ -664,13 +658,39 @@ async def track_delivery(
             resp.destination = RoutePointSchema(latitude=d_hub.latitude, longitude=d_hub.longitude, name=d_hub.name)
 
     if mission:
-        # 1. Drone Location & Battery
-        latest = (await db.execute(
-            select(TelemetryLog)
+        # 1 & 2 & 4. Gộp 3 lần quét telemetry_logs (latest, path_logs, trail) thành 1 câu SQL nhẹ (chỉ 6 cột)
+        path_rows = (await db.execute(
+            select(
+                TelemetryLog.latitude,
+                TelemetryLog.longitude,
+                TelemetryLog.altitude,
+                TelemetryLog.speed,
+                TelemetryLog.battery_voltage,
+                TelemetryLog.timestamp,
+            )
             .where(TelemetryLog.mission_id == mission.id)
-            .order_by(TelemetryLog.timestamp.desc())
-            .limit(1)
-        )).scalar_one_or_none()
+            .order_by(TelemetryLog.timestamp.asc())
+            .limit(MAX_PATH_POINTS)
+        )).all()
+
+        if len(path_rows) >= MAX_PATH_POINTS:
+            trail_rows = list(reversed((await db.execute(
+                select(
+                    TelemetryLog.latitude,
+                    TelemetryLog.longitude,
+                    TelemetryLog.altitude,
+                    TelemetryLog.speed,
+                    TelemetryLog.battery_voltage,
+                    TelemetryLog.timestamp,
+                )
+                .where(TelemetryLog.mission_id == mission.id)
+                .order_by(TelemetryLog.timestamp.desc())
+                .limit(50)
+            )).all()))
+        else:
+            trail_rows = path_rows[-50:]
+
+        latest = trail_rows[-1] if trail_rows else None
 
         bat_pct = None
         if mission.drone_id:
@@ -691,14 +711,7 @@ async def track_delivery(
                 last_updated=latest.timestamp,
             )
 
-        # 2. Travelled path & Checkpoints
-        path_logs = (await db.execute(
-            select(TelemetryLog.latitude, TelemetryLog.longitude)
-            .where(TelemetryLog.mission_id == mission.id)
-            .order_by(TelemetryLog.timestamp.asc())
-            .limit(MAX_PATH_POINTS)
-        )).all()
-        resp.travelled_path = [RoutePointSchema(latitude=lat, longitude=lng) for lat, lng in path_logs]
+        resp.travelled_path = [RoutePointSchema(latitude=r.latitude, longitude=r.longitude) for r in path_rows]
         resp.checkpoints_passed = len(mission.checkpoints_json or [])
 
         # 3. Legs & Current Leg
@@ -757,14 +770,7 @@ async def track_delivery(
             )
         resp.legs = legs_list
 
-        # 4. Trail: 50 điểm telemetry gần nhất (sắp xếp tăng dần theo thời gian)
-        trail_res = await db.execute(
-            select(TelemetryLog)
-            .where(TelemetryLog.mission_id == mission.id)
-            .order_by(TelemetryLog.timestamp.desc())
-            .limit(50)
-        )
-        recent_telemetry = list(reversed(trail_res.scalars().all()))
+        # 4. Trail: 50 điểm telemetry gần nhất (đã tách sẵn từ path_rows/trail_rows)
         resp.trail = [
             TrailPointSchema(
                 latitude=t.latitude,
@@ -773,7 +779,7 @@ async def track_delivery(
                 speed=t.speed,
                 timestamp=t.timestamp,
             )
-            for t in recent_telemetry
+            for t in trail_rows
         ]
 
     return resp
@@ -858,13 +864,12 @@ async def get_mission_report(
             if drone:
                 drone_schema = ReportDroneSchema(id=drone.id, name=drone.name, model=drone.model)
 
-        logs = (await db.execute(
-            select(TelemetryLog.energy_consumed_wh, TelemetryLog.timestamp)
+        tel_agg = (await db.execute(
+            select(func.max(TelemetryLog.energy_consumed_wh), func.count(TelemetryLog.id))
             .where(TelemetryLog.mission_id == mission.id)
-            .order_by(TelemetryLog.timestamp.asc())
-        )).all()
-        energies = [e for e, _ in logs if e is not None]
-        actual_energy = max(energies) if energies else None
+        )).one()
+        actual_energy = tel_agg[0]
+        tel_points = int(tel_agg[1] or 0)
         start_ts = mission.departed_at or mission.start_time
         end_ts = mission.arrival_confirmed_at or mission.end_time or mission.arrived_at
         actual_duration = None
@@ -873,7 +878,7 @@ async def get_mission_report(
         actuals = ReportActualsSchema(
             actual_duration_min=actual_duration,
             actual_energy_wh=actual_energy,
-            telemetry_points=len(logs),
+            telemetry_points=tel_points,
         )
 
     return MissionReportResponse(
