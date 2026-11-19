@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "b05f1a10-2131-4042-b35b-8d5c59d4ddbf",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "D:\\Code github\\Drone-backend\\.archify\\sequence-user-registration-20261112-010000\\candidate.json",
+  "output": "D:\\Code github\\Drone-backend\\.archify\\sequence-user-registration-20261112-010000\\user-registration.html",
+  "specification": {
+    "sha256": "7d5aceb9354ba657771a2d89b8c1c8061c905dc4870de5380d55583025902de9",
+    "bytes": 7392
+  },
+  "artifact": {
+    "sha256": "a85d72049e50a2b1ce7e7055078474d9012cd52a96d114f13f61b04eb50e7143",
+    "bytes": 849755
+  }
+}

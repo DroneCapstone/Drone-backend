@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "sequence",
+  "quality": "showcase",
+  "specification": {
+    "path": "D:\\Code github\\Drone-backend\\.archify\\sequence-admin-user-mgmt-20261112-060000\\candidate.json",
+    "sha256": "62e37a299a9e5f4939c7ac8ebea452a5982b2a3d63e4e7d036ca3b114f192124",
+    "bytes": 7840
+  },
+  "artifact": {
+    "path": "D:\\Code github\\Drone-backend\\.archify\\sequence-admin-user-mgmt-20261112-060000\\admin-user-mgmt.html",
+    "sha256": "55e765580bba0e76eb118ec559b4408a24c236a66e26808958d77c27110018de",
+    "bytes": 858440
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "D:\\Code github\\Drone-backend\\.archify\\sequence-admin-user-mgmt-20261112-060000\\admin-user-mgmt.finalize.json",
+    "summaryReceipt": "D:\\Code github\\Drone-backend\\.archify\\sequence-admin-user-mgmt-20261112-060000\\admin-user-mgmt.finalize-summary.json",
+    "browserCheckReceipt": "D:\\Code github\\Drone-backend\\.archify\\sequence-admin-user-mgmt-20261112-060000\\admin-user-mgmt.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-14T02:40:57.820Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 4370,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}

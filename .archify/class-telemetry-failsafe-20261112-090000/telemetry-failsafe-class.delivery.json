@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "89eb5d47-ebca-42a8-94fb-3f18f51cad41",
+  "status": "current",
+  "command": "deliver",
+  "type": "class",
+  "input": "D:\\Code github\\Drone-backend\\.archify\\class-telemetry-failsafe-20261112-090000\\candidate.json",
+  "output": "D:\\Code github\\Drone-backend\\.archify\\class-telemetry-failsafe-20261112-090000\\telemetry-failsafe-class.html",
+  "specification": {
+    "sha256": "4c25bae71fe21c954fdcb778f49504c8386b9862ba7c50f319538b9a10a5ecc7",
+    "bytes": 7864
+  },
+  "artifact": {
+    "sha256": "ea81c9a76bb4a8ba76e8351a2a32ffb1f596ea7fcf0bc36b84f964e7b1e4a9ce",
+    "bytes": 868903
+  }
+}

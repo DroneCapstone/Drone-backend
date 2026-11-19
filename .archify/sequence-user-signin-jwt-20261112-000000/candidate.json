@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "User Sign In — JWT Authentication",
+    "subtitle": "POST /api/v1/auth/login · Drone Backend",
+    "output": ".archify/sequence-user-signin-jwt-20261112-000000/user-signin-jwt.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/DroneCapstone/Drone-backend",
+      "revision": "7b63ec3c99e7f74462bd6023266ffdf42088a896",
+      "link_mode": "local-only"
+    }
+  },
+  "participants": [
+    { "id": "client", "type": "external", "label": "Client", "sublabel": "browser / app" },
+    {
+      "id": "router",
+      "type": "backend",
+      "label": "Auth Router",
+      "sublabel": "/auth/login",
+      "sources": [
+        { "path": "app/modules/auth/router.py", "line": 56 }
+      ]
+    },
+    {
+      "id": "pydantic",
+      "type": "backend",
+      "label": "Pydantic",
+      "sublabel": "LoginRequest",
+      "sources": [
+        { "path": "app/modules/auth/schemas.py", "line": 18 }
+      ]
+    },
+    {
+      "id": "service",
+      "type": "backend",
+      "label": "Auth Service",
+      "sublabel": "service.py",
+      "sources": [
+        { "path": "app/modules/auth/service.py", "line": 54 }
+      ]
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Database",
+      "sublabel": "accounts table",
+      "sources": [
+        { "path": "app/modules/auth/models.py", "line": 18 }
+      ]
+    },
+    {
+      "id": "bcrypt",
+      "type": "backend",
+      "label": "bcrypt",
+      "sublabel": "pw verify",
+      "sources": [
+        { "path": "app/modules/auth/service.py", "line": 20 }
+      ]
+    },
+    {
+      "id": "jwt",
+      "type": "security",
+      "label": "jose.jwt",
+      "sublabel": "HS256 sign",
+      "sources": [
+        { "path": "app/modules/auth/service.py", "line": 26 }
+      ]
+    },
+    {
+      "id": "logger",
+      "type": "messagebus",
+      "label": "Activity Log",
+      "sublabel": "log_activity()",
+      "sources": [
+        { "path": "app/modules/auth/router.py", "line": 72 }
+      ]
+    }
+  ],
+  "segments": [
+    { "from": 130, "to": 264, "label": "Input & Lookup" },
+    { "from": 272, "to": 440, "label": "Verify & Authorize" },
+    { "from": 450, "to": 870, "label": "Token Generation & Response" }
+  ],
+  "messages": [
+    {
+      "id": "post-login",
+      "from": "client",
+      "to": "router",
+      "y": 160,
+      "label": "POST /api/v1/auth/login",
+      "variant": "emphasis",
+      "note": "Body: { email, password }"
+    },
+    {
+      "id": "validate-input",
+      "from": "router",
+      "to": "pydantic",
+      "y": 220,
+      "label": "validate LoginRequest",
+      "variant": "default"
+    },
+    {
+      "id": "validation-ok",
+      "from": "pydantic",
+      "to": "router",
+      "y": 248,
+      "label": "email ✓  password ✓",
+      "variant": "return"
+    },
+    {
+      "id": "get-user",
+      "from": "router",
+      "to": "service",
+      "y": 290,
+      "label": "get_user_by_email(db, email)",
+      "variant": "default"
+    },
+    {
+      "id": "db-query",
+      "from": "service",
+      "to": "db",
+      "y": 318,
+      "label": "SELECT * FROM accounts WHERE email = :email",
+      "variant": "emphasis"
+    },
+    {
+      "id": "db-result",
+      "from": "db",
+      "to": "service",
+      "y": 346,
+      "label": "User row (or None)",
+      "variant": "return"
+    },
+    {
+      "id": "user-not-found",
+      "from": "service",
+      "to": "router",
+      "y": 374,
+      "label": "None → raise 401",
+      "variant": "dashed",
+      "note": "HTTP 401: Invalid email or password"
+    },
+    {
+      "id": "verify-pw",
+      "from": "router",
+      "to": "bcrypt",
+      "y": 430,
+      "label": "verify_password(plain, hashed)",
+      "variant": "security"
+    },
+    {
+      "id": "bcrypt-result",
+      "from": "bcrypt",
+      "to": "router",
+      "y": 460,
+      "label": "True / False",
+      "variant": "return"
+    },
+    {
+      "id": "pw-fail",
+      "from": "router",
+      "to": "client",
+      "y": 500,
+      "label": "401 Invalid email or password",
+      "variant": "dashed"
+    },
+    {
+      "id": "check-active",
+      "from": "router",
+      "to": "service",
+      "y": 540,
+      "label": "check user.is_active",
+      "variant": "default"
+    },
+    {
+      "id": "inactive",
+      "from": "service",
+      "to": "router",
+      "y": 568,
+      "label": "is_active=False → raise 403",
+      "variant": "dashed",
+      "note": "HTTP 403: Account deleted or suspended"
+    },
+    {
+      "id": "log-activity",
+      "from": "router",
+      "to": "logger",
+      "y": 625,
+      "label": "log_activity(LOGIN)",
+      "variant": "dashed"
+    },
+    {
+      "id": "create-access",
+      "from": "router",
+      "to": "jwt",
+      "y": 660,
+      "label": "create_access_token(user_id, role)",
+      "variant": "security",
+      "note": "Payload: {sub, role, type=access} — expires 60 min"
+    },
+    {
+      "id": "access-token",
+      "from": "jwt",
+      "to": "router",
+      "y": 750,
+      "label": "access_token (JWT)",
+      "variant": "return"
+    },
+    {
+      "id": "create-refresh",
+      "from": "router",
+      "to": "jwt",
+      "y": 788,
+      "label": "create_refresh_token(user_id)",
+      "variant": "security",
+      "note": "Payload: {sub, type=refresh} — expires 7 days"
+    },
+    {
+      "id": "refresh-token",
+      "from": "jwt",
+      "to": "router",
+      "y": 848,
+      "label": "refresh_token (JWT)",
+      "variant": "return"
+    },
+    {
+      "id": "response",
+      "from": "router",
+      "to": "client",
+      "y": 890,
+      "label": "200 TokenResponse",
+      "variant": "emphasis",
+      "note": "{ access_token, refresh_token, token_type: bearer, role }"
+    }
+  ],
+  "activations": [
+    { "participant": "router", "from": 155, "to": 870, "type": "backend" },
+    { "participant": "pydantic", "from": 215, "to": 254, "type": "backend" },
+    { "participant": "service", "from": 285, "to": 380, "type": "backend" },
+    { "participant": "db", "from": 313, "to": 352, "type": "database" },
+    { "participant": "bcrypt", "from": 425, "to": 466, "type": "backend" },
+    { "participant": "jwt", "from": 655, "to": 854, "type": "security" },
+    { "participant": "logger", "from": 620, "to": 640, "type": "messagebus" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Happy Path",
+      "items": [
+        "Client POSTs email + password to /api/v1/auth/login",
+        "Pydantic validates format; service queries the accounts table",
+        "bcrypt verifies the password hash; login logged to activity_logs",
+        "Returns access token (60 min) + refresh token (7 days)"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Error Cases",
+      "items": [
+        "401 — user not found, hashed_password missing, or bcrypt mismatch",
+        "403 — user found but is_active = False (soft-deleted / suspended)",
+        "Both share the same 401 message to prevent email enumeration"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "JWT Structure",
+      "items": [
+        "access_token: {sub: user_id, role, type: access} · HS256",
+        "refresh_token: {sub: user_id, type: refresh} · HS256",
+        "type field distinguishes tokens on protected endpoints",
+        "Stateless — no token stored in DB; logout = client deletes token"
+      ]
+    }
+  ]
+}
