@@ -163,7 +163,7 @@ Technician là vai trò chính tại các Hub, chịu trách nhiệm:
 **Query Params:**
 | Param | Type | Default | Mô tả |
 |---|---|---|---|
-| `status` | string | - | Filter: IDLE, FLYING, CHARGING, MAINTENANCE |
+| `status` | string | - | Filter: AVAILABLE, IN_FLIGHT, MAINTENANCE, RETIRED |
 | `limit` | int | 50 | Số drone tối đa |
 | `offset` | int | 0 | Bỏ qua N drone |
 
@@ -177,7 +177,7 @@ Technician là vai trò chính tại các Hub, chịu trách nhiệm:
       "code": "DJI-M300-028",
       "name": "DJI Matrice 300 RTK #028",
       "model": "DJI M300 RTK",
-      "status": "IDLE",
+      "status": "AVAILABLE",
       "current_hub_id": 2,
       "battery_level_pct": 100,
       "last_maintenance": "2026-10-15T10:00:00",
@@ -200,7 +200,7 @@ Technician là vai trò chính tại các Hub, chịu trách nhiệm:
   "name": "DJI Matrice 300 RTK #028",
   "model": "DJI M300 RTK",
   "manufacturer": "DJI",
-  "status": "IDLE",
+  "status": "AVAILABLE",
   "max_flight_time_min": 55,
   "max_distance_km": 50,
   "payload_capacity_kg": 2.7,
@@ -247,6 +247,12 @@ Technician là vai trò chính tại các Hub, chịu trách nhiệm:
   "reason": "Kiểm tra định kỳ hàng tháng"
 }
 ```
+
+**Các Status Hợp Lệ:**
+- `AVAILABLE`: Drone sẵn sàng, không bay, không bảo trì
+- `IN_FLIGHT`: Drone đang bay
+- `MAINTENANCE`: Drone đang bảo trì/sửa chữa
+- `RETIRED`: Drone ngừng hoạt động
 
 ---
 
@@ -654,7 +660,62 @@ Technician là vai trò chính tại các Hub, chịu trách nhiệm:
 
 ---
 
-## 🆕 Tính Năng Mới Gần Đây
+## 📊 Drone Status Reference
+
+Drone có 4 trạng thái chính:
+
+| Status | Mô Tả | Hành Động Có Thể |
+|--------|-------|-----------------|
+| **AVAILABLE** | Drone sẵn sàng tại hub, không bay, không bảo trì | Dispatch, Charging, Mark Maintenance |
+| **IN_FLIGHT** | Drone đang bay, thi hành mission | Theo dõi, Failsafe RTH |
+| **MAINTENANCE** | Drone đang bảo trì/sửa chữa, không sử dụng được | Check status, Complete maintenance |
+| **RETIRED** | Drone ngừng hoạt động vĩnh viễn | Xem lịch sử |
+
+### Status Transition (Chuyển Đổi Trạng Thái)
+
+```
+AVAILABLE 
+   ↓ (dispatch)
+IN_FLIGHT
+   ↓ (landing)
+AVAILABLE
+   ↓ (mark maintenance)
+MAINTENANCE
+   ↓ (complete maintenance)
+AVAILABLE
+   ↓ (retire)
+RETIRED
+```
+
+---
+
+## 🔧 Workflow: Drone Status Change
+
+**Ví dụ: Drone hạ cánh → Thay pin → Dispatch lại**
+
+```
+1. Drone IN_FLIGHT → Hạ cánh tại hub
+   GET /technician/incoming
+   
+2. Technician confirm-arrival
+   POST /technician/missions/{mission_id}/confirm-arrival
+   → Mission.handling_status = AT_HUB
+   
+3. Thay pin drone
+   POST /technician/missions/{mission_id}/swap-battery
+   → Mission.next_leg.battery_id được set tự động
+   
+4. Mark sẵn sàng
+   POST /technician/missions/{mission_id}/mark-ready
+   → Mission.handling_status = READY
+   
+5. Dispatch drone
+   POST /technician/missions/{mission_id}/dispatch
+   → Drone.status = IN_FLIGHT (tự động)
+   → Mission.status = FLYING
+```
+
+---
 
 | Tính Năng | Mô Tả | Benefit |
 |-----------|-------|---------|
