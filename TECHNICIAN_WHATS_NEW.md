@@ -1,17 +1,14 @@
-# 🆕 Technician - Những Tính Năng Mới (Thực Sự)
+# 🆕 Technician - Tính Năng Mới
 
 > **Base URL:** `https://isp492.onrender.com/api/v1/technician`
 
 ---
 
-## ✨ Chỉ 2 Tính Năng MỚI Thực Sự Gần Đây
+## ✨ 1. Current & Next Leg Info trong `/incoming`
 
-### 1️⃣ Current & Next Leg Info trong `/incoming`
+**Commit:** `6c61d88`
 
-**Khi nào:** Commit `6c61d88` (recent)  
-**Gì mới:** Trả `current_leg` & `next_leg` trong response
-
-#### GET `/incoming` 
+### GET `/incoming` - Trả `current_leg` & `next_leg`
 
 ```json
 {
@@ -43,12 +40,11 @@
 
 ---
 
-### 2️⃣ Battery Charge at Arrival
+## 🔋 2. Battery Charge at Arrival
 
-**Khi nào:** Commit `dcf3986` (recent)  
-**Gì mới:** Lưu % pin lúc drone hạ cánh
+**Commit:** `dcf3986`
 
-#### POST `/missions/{mission_id}/confirm-arrival`
+### POST `/missions/{mission_id}/confirm-arrival` - Lưu pin lúc hạ cánh
 
 ```json
 {
@@ -61,18 +57,16 @@
 ```json
 {
   "mission_status": "ARRIVAL_COMPLETED",
-  "handling_status": null,
   "battery_charge_at_arrival": 87
 }
 ```
 
-#### GET `/history` - Hiển thị `battery_charge_at_arrival`
+### GET `/history` - Hiển thị `battery_charge_at_arrival`
 
 ```json
 [
   {
     "mission_code": "MSN-20261018-0001",
-    "battery_percent": 87,
     "battery_charge_at_arrival": 87,
     "arrived_at": "2026-10-18T13:15:30"
   }
@@ -82,34 +76,8 @@
 **Lợi Ích:**
 - Lưu pin lúc hạ cánh → Phân tích tiêu hao
 - Phát hiện pin bị lỗi (tiêu hao quá nhanh)
-- Lập báo cáo pin cho từng chuyến bay
+- Báo cáo pin cho từng chuyến bay
 
 ---
 
-## ⚠️ Những API KHÔNG phải mới:
-
-Các endpoint này từ branch `feature/transit-mission-relay-flow` (cũ):
-- ❌ `POST /missions/{id}/confirm-relay-arrival` 
-- ❌ `POST /missions/{id}/swap-battery`
-- ❌ `POST /missions/{id}/ready`
-- ❌ `POST /missions/{id}/dispatch`
-
-**Lưu Ý:** Mặc dù những API trên không phải mới, nhưng chúng hoạt động kết hợp với `current_leg` & `next_leg` (MỚI) để hỗ trợ multi-leg missions.
-
----
-
-## 📊 Tóm Tắt
-
-| Tính Năng | Mới? | Khi Nào |
-|-----------|------|---------|
-| current_leg / next_leg | ✅ **MỚI** | 6c61d88 |
-| battery_charge_at_arrival | ✅ **MỚI** | dcf3986 |
-| confirm-relay-arrival | ❌ Cũ | f5fff5a |
-| swap-battery | ❌ Cũ | f5fff5a |
-| ready | ❌ Cũ | f5fff5a |
-| dispatch | ❌ Cũ | f5fff5a |
-
----
-
-**Last Updated:** 2026-10-18  
-**Only 2 new features** 
+**Last Updated:** 2026-10-18
