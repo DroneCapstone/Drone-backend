@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "3c63c0bd-2d71-4fd0-82b9-7ef85f54b7ff",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "D:\\Code github\\Drone-backend\\.archify\\sequence-admin-user-mgmt-20261112-060000\\candidate.json",
+  "output": "D:\\Code github\\Drone-backend\\.archify\\sequence-admin-user-mgmt-20261112-060000\\admin-user-mgmt.html",
+  "specification": {
+    "sha256": "62e37a299a9e5f4939c7ac8ebea452a5982b2a3d63e4e7d036ca3b114f192124",
+    "bytes": 7840
+  },
+  "artifact": {
+    "sha256": "55e765580bba0e76eb118ec559b4408a24c236a66e26808958d77c27110018de",
+    "bytes": 858440
+  }
+}

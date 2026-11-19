@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "85f9a628-e75d-47d8-b62a-37e487ae7b5e",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "D:\\Code github\\Drone-backend\\.archify\\sequence-estimate-route-energy-fee-20261112-030000\\candidate.json",
+  "output": "D:\\Code github\\Drone-backend\\.archify\\sequence-estimate-route-energy-fee-20261112-030000\\estimate-route-energy-fee.html",
+  "specification": {
+    "sha256": "85ed99c0c1b4c8113f8fede396c920ab0f3dda47a50ec95c093818a24f8deb44",
+    "bytes": 8655
+  },
+  "artifact": {
+    "sha256": "123fb7fdafc43143edf3de58ba2a5bf153124208bc62b713c7cc31e20c083b1d",
+    "bytes": 854660
+  }
+}

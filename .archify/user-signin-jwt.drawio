@@ -1,0 +1,326 @@
+<mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+
+    <!-- Title -->
+    <mxCell id="title" value="User Sign In — JWT Authentication" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="300" y="20" width="600" height="40" as="geometry" />
+    </mxCell>
+    <mxCell id="subtitle" value="POST /api/v1/auth/login · Drone Backend" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontColor=#666666;" vertex="1" parent="1">
+      <mxGeometry x="300" y="55" width="600" height="20" as="geometry" />
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════ -->
+    <!-- PARTICIPANT HEADERS -->
+    <!-- ═══════════════════════════════════════════════ -->
+
+    <!-- Client -->
+    <mxCell id="p_client" value="&lt;b&gt;Client&lt;/b&gt;&lt;br/&gt;&lt;font color='#666666' style='font-size:10px'&gt;browser / app&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=0;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="60" y="90" width="110" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- Auth Router -->
+    <mxCell id="p_router" value="&lt;b&gt;Auth Router&lt;/b&gt;&lt;br/&gt;&lt;font color='#666666' style='font-size:10px'&gt;/auth/login&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=0;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="230" y="90" width="110" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- Pydantic -->
+    <mxCell id="p_pydantic" value="&lt;b&gt;Pydantic&lt;/b&gt;&lt;br/&gt;&lt;font color='#666666' style='font-size:10px'&gt;LoginRequest&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=0;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="400" y="90" width="110" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- Auth Service -->
+    <mxCell id="p_service" value="&lt;b&gt;Auth Service&lt;/b&gt;&lt;br/&gt;&lt;font color='#666666' style='font-size:10px'&gt;service.py&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=0;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="570" y="90" width="110" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- Database -->
+    <mxCell id="p_db" value="&lt;b&gt;Database&lt;/b&gt;&lt;br/&gt;&lt;font color='#666666' style='font-size:10px'&gt;accounts table&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="740" y="85" width="110" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- bcrypt -->
+    <mxCell id="p_bcrypt" value="&lt;b&gt;bcrypt&lt;/b&gt;&lt;br/&gt;&lt;font color='#666666' style='font-size:10px'&gt;pw verify&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=0;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="910" y="90" width="110" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- jose.jwt -->
+    <mxCell id="p_jwt" value="&lt;b&gt;jose.jwt&lt;/b&gt;&lt;br/&gt;&lt;font color='#666666' style='font-size:10px'&gt;HS256 sign&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=0;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="1080" y="90" width="110" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- Activity Log -->
+    <mxCell id="p_logger" value="&lt;b&gt;Activity Log&lt;/b&gt;&lt;br/&gt;&lt;font color='#666666' style='font-size:10px'&gt;log_activity()&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=0;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="1250" y="90" width="110" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════ -->
+    <!-- LIFELINES -->
+    <!-- ═══════════════════════════════════════════════ -->
+    <mxCell id="ll_client" value="" style="endArrow=none;dashed=1;strokeColor=#6c8ebf;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><Array as="points"/></mxGeometry>
+      <mxGeometry x="115" y="140" width="1" height="1" as="geometry">
+        <mxPoint x="115" y="140" as="sourcePoint" />
+        <mxPoint x="115" y="1020" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="ll_router" value="" style="endArrow=none;dashed=1;strokeColor=#82b366;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="140" as="sourcePoint" />
+        <mxPoint x="285" y="1020" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="ll_pydantic" value="" style="endArrow=none;dashed=1;strokeColor=#82b366;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="455" y="140" as="sourcePoint" />
+        <mxPoint x="455" y="1020" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="ll_service" value="" style="endArrow=none;dashed=1;strokeColor=#82b366;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="625" y="140" as="sourcePoint" />
+        <mxPoint x="625" y="1020" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="ll_db" value="" style="endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="795" y="145" as="sourcePoint" />
+        <mxPoint x="795" y="1020" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="ll_bcrypt" value="" style="endArrow=none;dashed=1;strokeColor=#82b366;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="965" y="140" as="sourcePoint" />
+        <mxPoint x="965" y="1020" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="ll_jwt" value="" style="endArrow=none;dashed=1;strokeColor=#b85450;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="1135" y="140" as="sourcePoint" />
+        <mxPoint x="1135" y="1020" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="ll_logger" value="" style="endArrow=none;dashed=1;strokeColor=#9673a6;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="1305" y="140" as="sourcePoint" />
+        <mxPoint x="1305" y="1020" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════ -->
+    <!-- SEGMENT: Input & Lookup -->
+    <!-- ═══════════════════════════════════════════════ -->
+    <mxCell id="seg1_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#cccccc;opacity=50;" vertex="1" parent="1">
+      <mxGeometry x="50" y="160" width="1380" height="195" as="geometry" />
+    </mxCell>
+    <mxCell id="seg1_label" value="① Input &amp; Lookup" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;fontColor=#666666;" vertex="1" parent="1">
+      <mxGeometry x="58" y="163" width="160" height="20" as="geometry" />
+    </mxCell>
+
+    <!-- M1: POST /api/v1/auth/login (Client → Router) -->
+    <mxCell id="m1" value="POST /api/v1/auth/login" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#0050ef;strokeWidth=2;fontStyle=1;fontSize=11;fillColor=#0050ef;" edge="1" parent="1" source="p_client" target="p_router">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="115" y="185" as="sourcePoint" />
+        <mxPoint x="285" y="185" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="m1_note" value="Body: { email, password }" style="text;html=1;strokeColor=#cccccc;fillColor=#ffffcc;align=left;verticalAlign=middle;fontSize=10;rounded=1;" vertex="1" parent="1">
+      <mxGeometry x="120" y="168" width="150" height="22" as="geometry" />
+    </mxCell>
+
+    <!-- M2: validate LoginRequest (Router → Pydantic) -->
+    <mxCell id="m2" value="validate LoginRequest" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#333333;strokeWidth=1.5;fontSize=10;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="215" as="sourcePoint" />
+        <mxPoint x="455" y="215" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M3: email ✓ password ✓ (Pydantic → Router) return -->
+    <mxCell id="m3" value="email ✓  password ✓" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#999999;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;endFill=0;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="455" y="240" as="sourcePoint" />
+        <mxPoint x="285" y="240" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M4: get_user_by_email (Router → Service) -->
+    <mxCell id="m4" value="get_user_by_email(db, email)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#333333;strokeWidth=1.5;fontSize=10;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="270" as="sourcePoint" />
+        <mxPoint x="625" y="270" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M5: SELECT query (Service → DB) -->
+    <mxCell id="m5" value="SELECT * FROM accounts WHERE email = :email" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d6b656;strokeWidth=2;fontSize=10;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="625" y="300" as="sourcePoint" />
+        <mxPoint x="795" y="300" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M6: User row (DB → Service) return -->
+    <mxCell id="m6" value="User row (or None)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#999999;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;endFill=0;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="795" y="325" as="sourcePoint" />
+        <mxPoint x="625" y="325" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════ -->
+    <!-- SEGMENT: Verify & Authorize -->
+    <!-- ═══════════════════════════════════════════════ -->
+    <mxCell id="seg2_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff4e6;strokeColor=#ffb347;opacity=50;" vertex="1" parent="1">
+      <mxGeometry x="50" y="360" width="1380" height="230" as="geometry" />
+    </mxCell>
+    <mxCell id="seg2_label" value="② Verify &amp; Authorize" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;fontColor=#c77a00;" vertex="1" parent="1">
+      <mxGeometry x="58" y="363" width="180" height="20" as="geometry" />
+    </mxCell>
+
+    <!-- M7: None → raise 401 (Service → Router) dashed error -->
+    <mxCell id="m7" value="None → raise 401" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#cc0000;strokeWidth=1;dashed=1;fontSize=10;fontColor=#cc0000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="625" y="385" as="sourcePoint" />
+        <mxPoint x="285" y="385" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="m7_note" value="HTTP 401: Invalid email or password" style="text;html=1;strokeColor=#ffcccc;fillColor=#ffeeee;align=left;verticalAlign=middle;fontSize=10;rounded=1;fontColor=#cc0000;" vertex="1" parent="1">
+      <mxGeometry x="295" y="368" width="230" height="22" as="geometry" />
+    </mxCell>
+
+    <!-- M8: verify_password (Router → bcrypt) -->
+    <mxCell id="m8" value="verify_password(plain, hashed)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#b85450;strokeWidth=2;fontSize=10;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="420" as="sourcePoint" />
+        <mxPoint x="965" y="420" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M9: True / False (bcrypt → Router) return -->
+    <mxCell id="m9" value="True / False" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#999999;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;endFill=0;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="965" y="450" as="sourcePoint" />
+        <mxPoint x="285" y="450" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M10: 401 error → Client (pw fail) -->
+    <mxCell id="m10" value="401 Invalid email or password" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#cc0000;strokeWidth=1;dashed=1;fontSize=10;fontColor=#cc0000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="480" as="sourcePoint" />
+        <mxPoint x="115" y="480" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M11: check user.is_active (Router → Service) -->
+    <mxCell id="m11" value="check user.is_active" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#333333;strokeWidth=1.5;fontSize=10;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="510" as="sourcePoint" />
+        <mxPoint x="625" y="510" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M12: is_active=False → raise 403 -->
+    <mxCell id="m12" value="is_active=False → raise 403" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#cc0000;strokeWidth=1;dashed=1;fontSize=10;fontColor=#cc0000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="625" y="540" as="sourcePoint" />
+        <mxPoint x="285" y="540" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="m12_note" value="HTTP 403: Account deleted or suspended" style="text;html=1;strokeColor=#ffcccc;fillColor=#ffeeee;align=left;verticalAlign=middle;fontSize=10;rounded=1;fontColor=#cc0000;" vertex="1" parent="1">
+      <mxGeometry x="295" y="523" width="240" height="22" as="geometry" />
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════ -->
+    <!-- SEGMENT: Token Generation & Response -->
+    <!-- ═══════════════════════════════════════════════ -->
+    <mxCell id="seg3_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#4caf50;opacity=50;" vertex="1" parent="1">
+      <mxGeometry x="50" y="600" width="1380" height="390" as="geometry" />
+    </mxCell>
+    <mxCell id="seg3_label" value="③ Token Generation &amp; Response" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;fontColor=#2e7d32;" vertex="1" parent="1">
+      <mxGeometry x="58" y="603" width="260" height="20" as="geometry" />
+    </mxCell>
+
+    <!-- M13: log_activity(LOGIN) (Router → Logger) dashed -->
+    <mxCell id="m13" value="log_activity(LOGIN)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;strokeWidth=1;dashed=1;fontSize=10;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="630" as="sourcePoint" />
+        <mxPoint x="1305" y="630" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M14: create_access_token (Router → JWT) -->
+    <mxCell id="m14" value="create_access_token(user_id, role)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#b85450;strokeWidth=2;fontSize=10;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="670" as="sourcePoint" />
+        <mxPoint x="1135" y="670" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="m14_note" value="Payload: {sub, role, type=access} — expires 60 min" style="text;html=1;strokeColor=#f8cecc;fillColor=#fff0f0;align=left;verticalAlign=middle;fontSize=10;rounded=1;" vertex="1" parent="1">
+      <mxGeometry x="560" y="653" width="310" height="22" as="geometry" />
+    </mxCell>
+
+    <!-- M15: access_token (JWT → Router) return -->
+    <mxCell id="m15" value="access_token (JWT)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#999999;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;endFill=0;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="1135" y="720" as="sourcePoint" />
+        <mxPoint x="285" y="720" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M16: create_refresh_token (Router → JWT) -->
+    <mxCell id="m16" value="create_refresh_token(user_id)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#b85450;strokeWidth=2;fontSize=10;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="760" as="sourcePoint" />
+        <mxPoint x="1135" y="760" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="m16_note" value="Payload: {sub, type=refresh} — expires 7 days" style="text;html=1;strokeColor=#f8cecc;fillColor=#fff0f0;align=left;verticalAlign=middle;fontSize=10;rounded=1;" vertex="1" parent="1">
+      <mxGeometry x="560" y="743" width="290" height="22" as="geometry" />
+    </mxCell>
+
+    <!-- M17: refresh_token (JWT → Router) return -->
+    <mxCell id="m17" value="refresh_token (JWT)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#999999;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;endFill=0;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="1135" y="810" as="sourcePoint" />
+        <mxPoint x="285" y="810" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+
+    <!-- M18: 200 TokenResponse (Router → Client) -->
+    <mxCell id="m18" value="200 TokenResponse" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#0050ef;strokeWidth=2;fontStyle=1;fontSize=11;fillColor=#0050ef;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="285" y="860" as="sourcePoint" />
+        <mxPoint x="115" y="860" as="targetPoint" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="m18_note" value="{ access_token, refresh_token, token_type: bearer, role }" style="text;html=1;strokeColor=#dae8fc;fillColor=#e8f4ff;align=left;verticalAlign=middle;fontSize=10;rounded=1;" vertex="1" parent="1">
+      <mxGeometry x="120" y="843" width="320" height="22" as="geometry" />
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════ -->
+    <!-- LEGEND / CARDS -->
+    <!-- ═══════════════════════════════════════════════ -->
+    <mxCell id="legend_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;" vertex="1" parent="1">
+      <mxGeometry x="50" y="1010" width="1380" height="130" as="geometry" />
+    </mxCell>
+
+    <!-- Happy Path card -->
+    <mxCell id="card1" value="&lt;b&gt;✅ Happy Path&lt;/b&gt;&lt;br/&gt;Client POSTs email + password → Pydantic validates → DB lookup →&lt;br/&gt;bcrypt verifies hash → log activity → issue access + refresh tokens" style="text;html=1;strokeColor=#82b366;fillColor=#d5e8d4;align=left;verticalAlign=top;fontSize=10;rounded=1;" vertex="1" parent="1">
+      <mxGeometry x="65" y="1020" width="420" height="110" as="geometry" />
+    </mxCell>
+
+    <!-- Error Cases card -->
+    <mxCell id="card2" value="&lt;b&gt;⚠️ Error Cases&lt;/b&gt;&lt;br/&gt;401 — user not found, hashed_password missing, or bcrypt mismatch&lt;br/&gt;403 — user found but is_active = False (soft-deleted / suspended)&lt;br/&gt;Same 401 message prevents email enumeration" style="text;html=1;strokeColor=#b85450;fillColor=#f8cecc;align=left;verticalAlign=top;fontSize=10;rounded=1;" vertex="1" parent="1">
+      <mxGeometry x="510" y="1020" width="420" height="110" as="geometry" />
+    </mxCell>
+
+    <!-- JWT card -->
+    <mxCell id="card3" value="&lt;b&gt;🔐 JWT Structure&lt;/b&gt;&lt;br/&gt;access_token: {sub, role, type:access} · HS256 · 60 min&lt;br/&gt;refresh_token: {sub, type:refresh} · HS256 · 7 days&lt;br/&gt;Stateless — no token in DB; logout = client deletes token" style="text;html=1;strokeColor=#9673a6;fillColor=#e1d5e7;align=left;verticalAlign=top;fontSize=10;rounded=1;" vertex="1" parent="1">
+      <mxGeometry x="955" y="1020" width="460" height="110" as="geometry" />
+    </mxCell>
+
+  </root>
+</mxGraphModel>

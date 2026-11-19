@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "sequence",
+  "quality": "showcase",
+  "specification": {
+    "path": "D:\\Code github\\Drone-backend\\.archify\\seq-create-order-webhook-20261112-070000\\candidate.json",
+    "sha256": "2d1266908fef18fec0aa43603fa2f0dcdb8c4364c69b9afdc2d12f67143c3858",
+    "bytes": 8677
+  },
+  "artifact": {
+    "path": "D:\\Code github\\Drone-backend\\.archify\\seq-create-order-webhook-20261112-070000\\create-order-webhook.html",
+    "sha256": "d0e8f5d8dbb65b3e2ee399278345ea9b4712e54647bcedc688bea1ace6b4c355",
+    "bytes": 862353
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "D:\\Code github\\Drone-backend\\.archify\\seq-create-order-webhook-20261112-070000\\create-order-webhook.finalize.json",
+    "summaryReceipt": "D:\\Code github\\Drone-backend\\.archify\\seq-create-order-webhook-20261112-070000\\create-order-webhook.finalize-summary.json",
+    "browserCheckReceipt": "D:\\Code github\\Drone-backend\\.archify\\seq-create-order-webhook-20261112-070000\\create-order-webhook.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-14T02:40:57.820Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 6011,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}
