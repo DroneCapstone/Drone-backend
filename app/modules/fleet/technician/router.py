@@ -1372,7 +1372,8 @@ async def list_maintenance_alerts(
                 select(func.max(MaintenanceAlert.id))
                 .where(MaintenanceAlert.work_order_id == None)
                 .group_by(MaintenanceAlert.drone_id)
-            )
+            ),
+            Drone.status.in_([DroneStatus.MAINTENANCE, DroneStatus.AVAILABLE])  # ← Hiện cả 2
         )
         .order_by(MaintenanceAlert.id.desc())
     )
