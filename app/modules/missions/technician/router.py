@@ -690,14 +690,9 @@ async def get_confirmations(
             Mission.status == MissionStatus.ARRIVAL_COMPLETED
         )
         if user.hub_id and str(user.hub_id).isdigit():
-            from sqlalchemy import or_
             tech_hub_id = int(user.hub_id)
             query = query.where(
-                or_(
-                    Mission.destination_hub_id == tech_hub_id,  # Normal delivery
-                    Mission.origin_hub_id == tech_hub_id,       # Incident return to origin
-                    # Để xử lý mission đáp tại hub khác (relay), cần check MissionLeg
-                )
+                Mission.destination_hub_id == tech_hub_id  # Chỉ hàng tới hub của technician
             )
             
         result = await db.execute(query.order_by(Mission.id.desc()))
