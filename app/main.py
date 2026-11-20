@@ -133,7 +133,7 @@ async def _warmup_caches_background():
                 return_exceptions=True,
             )
     except Exception as exc:
-        print(f"⚠️ [STARTUP WARMUP WARNING] Không thể warm-up cache nền: {exc}")
+        print(f"[STARTUP WARMUP WARNING] Không thể warm-up cache nền: {exc}")
 
 
 @asynccontextmanager
@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
         async with async_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     except Exception as e:
-        print(f"⚠️ [STARTUP DB WARNING] Không thể chạy create_all lúc khởi động (bỏ qua để giữ Server online): {e}")
+        print(f"[STARTUP DB WARNING] Không thể chạy create_all lúc khởi động (bỏ qua để giữ Server online): {e}")
         
     # [PERF NOTE] Hệ thống dùng in-memory cache (Hubs, Compat, Route, Weather) cho FastAPI 1 worker;
     # không bật nhiều workers (--workers > 1) trừ khi chuyển cache sang Redis.
@@ -193,27 +193,14 @@ def custom_openapi():
                         detected_role = part.upper()
                         break
                 
-                role_icons = {
-                    "ADMIN": "🔴",
-                    "OPERATOR": "🔵",
-                    "CUSTOMER": "🟢",
-                    "TECHNICIAN": "🟠",
-                    "NOTIFICATIONS": "🟣"
-                }
-                
                 # Auto-prefix Summary
                 if detected_role:
-                    icon = role_icons.get(detected_role, "⚪")
-                    prefix = f"{icon} [{detected_role}]"
+                    prefix = f"[{detected_role}]"
                     original_summary = operation.get("summary", "")
-                    
+
                     if original_summary:
-                        # Prevent double prefixing if it somehow runs multiple times
-                        if not original_summary.startswith(icon) and not original_summary.startswith(f"[{detected_role}]"):
+                        if not original_summary.startswith(prefix):
                             operation["summary"] = f"{prefix} {original_summary}"
-                        elif original_summary.startswith(f"[{detected_role}]"):
-                            # If it only has the text prefix, add the icon
-                            operation["summary"] = f"{icon} {original_summary}"
                     else:
                         operation["summary"] = f"{prefix} {operation.get('operationId', '')}"
                         
@@ -286,12 +273,12 @@ for mod in ["auth", "users", "missions", "fleet", "ai_predictions", "orders", "c
                 pass
             else:
                 # Nếu file router.py CÓ TỒN TẠI nhưng bị thiếu thư viện bên trong -> Cảnh báo rõ ràng cho dev!
-                print(f"⚠️ [IMPORT ERROR] Không thể nạp '{target_mod}' do lỗi: {e}")
+                print(f"[IMPORT ERROR] Không thể nạp '{target_mod}' do lỗi: {e}")
         except Exception as e:
             print(f"[WARN] Failed to load {target_mod}: {e}")
 
 if loaded_chatbot_roles:
-    print(f"🤖 [CHATBOT] Đã nạp thành công {len(loaded_chatbot_roles)}/4 Chatbot Routers: {', '.join(loaded_chatbot_roles)}")
+    print(f"[CHATBOT] Đã nạp thành công {len(loaded_chatbot_roles)}/4 Chatbot Routers: {', '.join(loaded_chatbot_roles)}")
 
 
 

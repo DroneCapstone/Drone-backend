@@ -128,8 +128,8 @@ async def execute_agent_chat(
         return ChatMessageResponse(
             conversation_id=conv_id,
             reply=(
-                "⚠️ **AI library (`google-genai`) is not installed on the backend server.**\n\n"
-                "👉 Developers: please stop the backend server (Ctrl+C) and run:\n"
+                "**AI library (`google-genai`) is not installed on the backend server.**\n\n"
+                "Developers: please stop the backend server (Ctrl+C) and run:\n"
                 "```bash\n"
                 "pip install google-genai==2.29.0\n"
                 "```"
@@ -146,7 +146,7 @@ async def execute_agent_chat(
         return ChatMessageResponse(
             conversation_id=conv_id,
             reply=(
-                "⚠️ **Missing API Key:** `GEMINI_API_KEY` is not configured in the `.env` file."
+                "**Missing API Key:** `GEMINI_API_KEY` is not configured in the `.env` file."
             ),
             tools_called=[],
             data={"type": "generic_answer", "code": "AI_UNAVAILABLE"},
@@ -352,7 +352,7 @@ async def execute_agent_chat(
         return ChatMessageResponse(
             conversation_id=conv_id,
             reply=(
-                f"⚠️ **An error occurred while connecting to the AI service:** `{error_msg}`\n\n"
+                f"**An error occurred while connecting to the AI service:** `{error_msg}`\n\n"
                 "Please try again in a moment."
             ),
             tools_called=tools_called,

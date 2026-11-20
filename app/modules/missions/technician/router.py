@@ -358,7 +358,7 @@ async def receive_outbound_delivery(
             if not ex_cust:
                 db.add(_Notif(
                     user_id=str(order.customer_id),
-                    title=f"📦 Package Received #{order.id} at {hub_label}",
+                    title=f"Package Received #{order.id} at {hub_label}",
                     message=(
                         f"A technician at {hub_label} has received the package for order #{order.id} at {time_str}. "
                         f"Your order is now awaiting flight scheduling by an Operator."
@@ -374,7 +374,7 @@ async def receive_outbound_delivery(
             for _op_id in _ops:
                 db.add(_Notif(
                     user_id=_op_id,
-                    title=f"📦 Package Ready at Hub — Order #{order.id}",
+                    title=f"Package Ready at Hub — Order #{order.id}",
                     message=(
                         f"Order #{order.id} was received by a Technician at {hub_label} at {time_str}. "
                         f"Ready for Mission Planning."

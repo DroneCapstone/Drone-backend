@@ -72,17 +72,17 @@ async def get_technician_quick_questions(
     questions = [
         QuickQuestionItem(
             id="fleet_health",
-            title="🛠️ Drone Fleet Health",
+            title="Drone Fleet Health",
             prompt="How many drones currently require maintenance or repair?"
         ),
         QuickQuestionItem(
             id="low_battery",
-            title="🔋 Batteries Needing Charge",
+            title="Batteries Needing Charge",
             prompt="Check batteries below 30% charge that need immediate charging"
         ),
         QuickQuestionItem(
             id="pending_orders",
-            title="📋 Pending Work Orders",
+            title="Pending Work Orders",
             prompt="How many repair work orders are currently pending?"
         )
     ]

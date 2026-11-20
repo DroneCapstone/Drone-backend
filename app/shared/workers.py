@@ -187,7 +187,7 @@ async def run_telemetry_signal_loss_watcher(db: AsyncSession):
                 reporter_id=mission.operator_id,
                 severity=IncidentSeverity.HIGH,
                 description=(
-                    f"🚨 [SIGNAL LOSS] Telemetry signal lost for Mission #{mission.id} "
+                    f"[SIGNAL LOSS] Telemetry signal lost for Mission #{mission.id} "
                     f"(Drone #{mission.drone_id}) since {latest_log.timestamp} at "
                     f"({latest_log.latitude:.5f}, {latest_log.longitude:.5f})."
                 ),
@@ -215,7 +215,7 @@ async def run_telemetry_signal_loss_watcher(db: AsyncSession):
         for uid in recipient_ids:
             db.add(Notification(
                 user_id=uid,
-                title="⚠️ Drone Signal Loss Alert",
+                title="Drone Signal Loss Alert",
                 message=(
                     f"Mission #{mission.id} (Drone #{mission.drone_id}) has lost telemetry signal "
                     f"for over 10 seconds! Last contact: {latest_log.timestamp}."
@@ -503,7 +503,7 @@ async def run_aging_priority_watcher(db: AsyncSession):
         for op_id in operator_ids:
             db.add(Notification(
                 user_id=op_id,
-                title="⚡ Aging Priority: Urgent Flight Scheduling Required",
+                title="Aging Priority: Urgent Flight Scheduling Required",
                 message=(
                     f"Order #{order.id} (NORMAL mode) has reached Aging Priority. "
                     f"Delivery deadline: {order.estimated_window_end.strftime('%H:%M %d/%m') if order.estimated_window_end else 'N/A'}. "
@@ -600,7 +600,7 @@ async def run_critical_order_notifier(db: AsyncSession):
         for op_id in operator_ids:
             db.add(Notification(
                 user_id=op_id,
-                title=f"🚨 CRITICAL — Order #{order.id} overdue by {int(overdue_mins)} mins",
+                title=f"CRITICAL — Order #{order.id} overdue by {int(overdue_mins)} mins",
                 message=(
                     f"Order #{order.id} ({d_mode}) is overdue for delivery by {int(overdue_mins)} mins "
                     f"with no Mission assigned. Schedule a flight immediately!"
@@ -724,13 +724,12 @@ async def run_deadline_alert_watcher(db: AsyncSession):
 
         slack_str = f"{int(slack_mins)} mins"
         eta_str = w_end.strftime("%H:%M %d/%m") if w_end else "N/A"
-        icon = "🔴" if priority_level == "HIGH" else "🟡"
 
         # ── Notify Operators ─────────────────────────────────────────────────
         for op_id in operator_ids:
             db.add(Notification(
                 user_id=op_id,
-                title=f"{icon} [{priority_level}] Order #{order.id} nearing deadline ({slack_str})",
+                title=f"[{priority_level}] Order #{order.id} nearing deadline ({slack_str})",
                 message=(
                     f"Order #{order.id} ({d_mode}) has no Mission yet. "
                     f"{slack_str} remaining before the dispatch deadline. "

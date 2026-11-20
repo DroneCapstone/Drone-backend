@@ -72,12 +72,12 @@ async def get_admin_quick_questions(
     questions = [
         QuickQuestionItem(
             id="executive_summary",
-            title="📈 Executive Business Summary",
+            title="Executive Business Summary",
             prompt="Summarize overall business performance, total revenue, and total order count"
         ),
         QuickQuestionItem(
             id="user_breakdown",
-            title="👥 User Role Breakdown",
+            title="User Role Breakdown",
             prompt="Show the breakdown of user accounts across each role in the system"
         )
     ]

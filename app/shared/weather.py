@@ -231,9 +231,8 @@ def evaluate_weather_safety(weather: Optional[WeatherData], altitude_m: float = 
         warnings.append(f"Extreme weather ({cond})")
 
     is_bad = len(warnings) > 0
-    icon = "⛈️" if is_bad else ("🌧️" if precip > 0.2 else "🌤️")
     temp_str = f"{temp:.0f}°C" if temp is not None else "N/A"
-    parts = [f"{icon} {temp_str}", f"Wind {eff_wind:.1f} m/s"]
+    parts = [temp_str, f"Wind {eff_wind:.1f} m/s"]
     if precip > 0:
         parts.append(f"Rain {precip:.1f} mm")
     parts.append(cond)

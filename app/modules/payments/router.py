@@ -211,7 +211,7 @@ async def _notify_customer_payment_confirmed(db: AsyncSession, order: Order, pai
         fee_str = f"{int(round(order.delivery_fee or 0)):,} VND"
         db.add(Notification(
             user_id=str(order.customer_id),
-            title=f"💳 Payment confirmed for Order #{order.id}",
+            title=f"Payment confirmed for Order #{order.id}",
             message=(
                 f"Payment of {fee_str} for Order #{order.id} was confirmed at {time_str}. "
                 f"Please drop off your package at the origin Hub so our staff can receive it and dispatch a Drone."

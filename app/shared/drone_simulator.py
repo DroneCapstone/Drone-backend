@@ -259,21 +259,21 @@ async def _notify_hub_technicians_drone_arrived(
         now_tz = get_vn_datetime()
         hub_code_part = f" ({hub.code})" if hub.code else ""
         if is_incident_return:
-            title = f"⚠️ Drone #{mission.drone_id} returned due to incident to {hub.name}"
+            title = f"Drone #{mission.drone_id} returned due to incident to {hub.name}"
             message = (
                 f"Mission #{mission.id} made an emergency landing back at {hub.name}{hub_code_part} "
                 f"(Cannot continue). Please receive it for technical inspection and cargo unloading."
             )
             notif_type = NotificationType.SYSTEM_ALERT
         elif is_final_hub:
-            title = f"🛬 Drone #{mission.drone_id} arrived at {hub.name} — Awaiting confirmation"
+            title = f"Drone #{mission.drone_id} arrived at {hub.name} — Awaiting confirmation"
             message = (
                 f"Mission #{mission.id} has landed at destination hub {hub.name}{hub_code_part}. "
                 f"Please inspect the cargo and click Confirm Arrival."
             )
             notif_type = NotificationType.MISSION_STATUS
         else:
-            title = f"🛬 Drone #{mission.drone_id} arrived at relay hub {hub.name}"
+            title = f"Drone #{mission.drone_id} arrived at relay hub {hub.name}"
             message = (
                 f"Mission #{mission.id} has landed at intermediate hub {hub.name}{hub_code_part}. "
                 f"Please swap the battery and dispatch the next leg."
@@ -406,7 +406,7 @@ async def _trigger_disconnect_crash(
                     reporter_id=mission.operator_id,
                     severity=IncidentSeverity.HIGH,
                     description=(
-                        f"🚨 [DISCONNECT / CRASH] Complete telemetry signal loss / suspected drone crash at GPS "
+                        f"[DISCONNECT / CRASH] Complete telemetry signal loss / suspected drone crash at GPS "
                         f"({incident_lat:.5f}, {incident_lng:.5f}). Field recovery assigned to {recovery_hub.name}."
                     ),
                     status=IncidentStatus.OPEN,
@@ -442,7 +442,7 @@ async def _trigger_disconnect_crash(
             for uid in op_admin_ids:
                 db.add(Notification(
                     user_id=uid,
-                    title=f"🚨 CRITICAL: Drone Disconnected — Mission #{mission_id}",
+                    title=f"CRITICAL: Drone Disconnected — Mission #{mission_id}",
                     message=(
                         f"Drone #{mission.drone_id} lost all telemetry signal / potential crash at GPS "
                         f"({incident_lat:.5f}, {incident_lng:.5f}). Recovery team at {recovery_hub.name} notified."
@@ -465,7 +465,7 @@ async def _trigger_disconnect_crash(
             for tid in tech_ids:
                 db.add(Notification(
                     user_id=tid,
-                    title=f"🚨 Field Recovery Needed: Drone #{mission.drone_id}",
+                    title=f"Field Recovery Needed: Drone #{mission.drone_id}",
                     message=(
                         f"Mission #{mission_id} lost connection at GPS ({incident_lat:.5f}, {incident_lng:.5f}). "
                         f"Please recover the drone and package back to {recovery_hub.name} and click Confirm Arrival."
@@ -480,7 +480,7 @@ async def _trigger_disconnect_crash(
             if mission.customer_id:
                 db.add(Notification(
                     user_id=mission.customer_id,
-                    title="⚠️ Flight Signal Interrupted — Order Under Investigation",
+                    title="Flight Signal Interrupted — Order Under Investigation",
                     message=(
                         f"Flight #{mission_id} carrying your order #{mission.order_id} experienced an unexpected "
                         f"signal interruption mid-route. Our recovery team is actively securing your parcel and will update you shortly."
@@ -493,7 +493,7 @@ async def _trigger_disconnect_crash(
 
             await db.commit()
             print(
-                f"[SIMULATOR] 🚨 DISCONNECT_CRASH đã ghi nhận cho mission {mission_id} tại ({incident_lat:.5f}, {incident_lng:.5f}) "
+                f"[SIMULATOR] DISCONNECT_CRASH đã ghi nhận cho mission {mission_id} tại ({incident_lat:.5f}, {incident_lng:.5f}) "
                 f"→ recovery_hub={recovery_hub.name}, notified ops/admins={len(op_admin_ids)}, techs={len(tech_ids)}."
             )
         except Exception as e:
@@ -571,7 +571,7 @@ async def _trigger_incident(
             try:
                 from app.shared.workers import get_operator_and_admin_ids
                 recipient_ids = await get_operator_and_admin_ids(db)
-                notif_title = f"⚠️ Failsafe {'Divert' if is_divert else 'RTH'}: Mission #{mission_id}"
+                notif_title = f"Failsafe {'Divert' if is_divert else 'RTH'}: Mission #{mission_id}"
                 for uid in recipient_ids:
                     db.add(Notification(
                         user_id=uid,
@@ -843,7 +843,7 @@ async def simulate_mission_flight(mission_id: str) -> None:
     armed_incident = simulator_config.consume_next_flight_incident(total_points)
     if armed_incident:
         print(
-            f"[SIMULATOR] ⚡ Chuyến bay {mission_id} nhận kịch bản incident 1 lần: "
+            f"[SIMULATOR] Chuyến bay {mission_id} nhận kịch bản incident 1 lần: "
             f"type={armed_incident['incident_type']}, severity={armed_incident['severity']}, step={armed_incident['trigger_idx'] + 1}/{total_points}"
         )
 
@@ -898,7 +898,7 @@ async def simulate_mission_flight(mission_id: str) -> None:
                     triggered_now = True
 
             if triggered_now:
-                print(f"[SIMULATOR] ⚠️ INCIDENT ({trigger_type}) xảy ra tại điểm {idx+1}/{total_points} ({lat:.6f}, {lng:.6f})")
+                print(f"[SIMULATOR] INCIDENT ({trigger_type}) xảy ra tại điểm {idx+1}/{total_points} ({lat:.6f}, {lng:.6f})")
                 if trigger_type == "DISCONNECT_CRASH":
                     await _trigger_disconnect_crash(
                         mission_id=mission_id,
@@ -910,7 +910,7 @@ async def simulate_mission_flight(mission_id: str) -> None:
                     return
                 if trigger_type == "SIGNAL_LOSS":
                     # Mất kết nối tạm thời: drone vẫn bay tiếp nhưng telemetry dừng khoảng 20 điểm (~60s)
-                    print(f"[SIMULATOR] 📡 Mất tín hiệu cho Mission {mission_id} — drone vẫn bay tiếp, telemetry dừng (duration: ~20 points).")
+                    print(f"[SIMULATOR] Mất tín hiệu cho Mission {mission_id} — drone vẫn bay tiếp, telemetry dừng (duration: ~20 points).")
                     signal_loss_triggered = True
                     signal_loss_duration = 20  # ← Mất 20 điểm rồi có lại
                     continue  # ← Bỏ qua ghi telemetry lần này, bay tiếp
@@ -986,7 +986,7 @@ async def simulate_mission_flight(mission_id: str) -> None:
                         print(
                             f"[SIMULATOR] [{idx+1:>3}/{total_points}] "
                             f"({lat:.6f}, {lng:.6f}) "
-                            f"📡 SIGNAL RECOVERED — telemetry restored, pin={new_charge_pct}%"
+                            f"SIGNAL RECOVERED — telemetry restored, pin={new_charge_pct}%"
                         )
                         signal_loss_triggered = False  # ← Kết nối bình thường lại
                         # Tiếp tục ghi telemetry bình thường ở dưới
@@ -1032,7 +1032,7 @@ async def simulate_mission_flight(mission_id: str) -> None:
                     f"[SIMULATOR] [{idx+1:>3}/{total_points}] "
                     f"({lat:.6f}, {lng:.6f}) "
                     f"alt={altitude}m spd={speed}m/s bat={battery_volt}V pin={new_charge_pct}%"
-                    + (f" ⚠️ [FAILSAFE WARNING: PIN THẤP < 20%]" if new_charge_pct < SAFE_BATTERY_RESERVE_PCT else "")
+                    + (f" [FAILSAFE WARNING: PIN THẤP < 20%]" if new_charge_pct < SAFE_BATTERY_RESERVE_PCT else "")
                 )
 
             except Exception as e:

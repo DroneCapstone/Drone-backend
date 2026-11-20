@@ -92,7 +92,7 @@ async def send_mission_scheduled_email(
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background-color: #7c3aed; padding: 20px; text-align: center;">
-            <h1 style="color: #ffffff; margin: 0;">📅 DroneOptAI</h1>
+            <h1 style="color: #ffffff; margin: 0;">DroneOptAI</h1>
         </div>
         <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
             <h2 style="color: #111827;">Your Order Has Been Scheduled for Delivery!</h2>
@@ -114,7 +114,7 @@ async def send_mission_scheduled_email(
 
     return await _send_brevo_email_async(
         to_email=to_email,
-        subject=f"[DroneOptAI] Order {order_id} has been scheduled for flight 📅",
+        subject=f"[DroneOptAI] Order {order_id} has been scheduled for flight",
         html_body=html_body,
         log_label="mission scheduled",
     )
@@ -151,7 +151,7 @@ async def send_delivery_email(
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background-color: #2563eb; padding: 20px; text-align: center;">
-            <h1 style="color: #ffffff; margin: 0;">🚁 DroneOptAI</h1>
+            <h1 style="color: #ffffff; margin: 0;">DroneOptAI</h1>
         </div>
         <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
             <h2 style="color: #111827;">Your Order Is Out for Delivery!</h2>
@@ -172,7 +172,7 @@ async def send_delivery_email(
 
     return await _send_brevo_email_async(
         to_email=to_email,
-        subject=f"[DroneOptAI] Order {order_id} is out for delivery 🚁",
+        subject=f"[DroneOptAI] Order {order_id} is out for delivery",
         html_body=html_body,
         log_label="delivery",
     )
@@ -206,7 +206,7 @@ async def send_hub_arrival_email(
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background-color: #16a34a; padding: 20px; text-align: center;">
-            <h1 style="color: #ffffff; margin: 0;">✅ DroneOptAI</h1>
+            <h1 style="color: #ffffff; margin: 0;">DroneOptAI</h1>
         </div>
         <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
             <h2 style="color: #111827;">Your Order Has Arrived!</h2>
@@ -216,7 +216,7 @@ async def send_hub_arrival_email(
             {hub_line}
             {tracking_section}
             <p style="color: #dc2626; font-size: 13px; margin-top: 12px;">
-                ⚠️ Your order will be cancelled if it is not picked up within 5 days.
+                Your order will be cancelled if it is not picked up within 5 days.
             </p>
             <p style="color: #6b7280; font-size: 13px; margin-top: 12px;">
                 If you have any questions, please contact support via this email.
@@ -230,7 +230,7 @@ async def send_hub_arrival_email(
 
     return await _send_brevo_email_async(
         to_email=to_email,
-        subject=f"[DroneOptAI] Order {order_id} has arrived at the pickup hub 📦",
+        subject=f"[DroneOptAI] Order {order_id} has arrived at the pickup hub",
         html_body=html_body,
         log_label="hub arrival",
     )
@@ -248,7 +248,7 @@ async def send_refund_email(
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background-color: #16a34a; padding: 20px; text-align: center;">
-            <h1 style="color: #ffffff; margin: 0;">💰 DroneOptAI</h1>
+            <h1 style="color: #ffffff; margin: 0;">DroneOptAI</h1>
         </div>
         <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
             <h2 style="color: #111827;">Hoàn tiền đã được xử lý</h2>
@@ -275,7 +275,7 @@ async def send_refund_email(
 
     return await _send_brevo_email_async(
         to_email=to_email,
-        subject=f"[DroneOptAI] Hoàn tiền đơn hàng {order_id} 💰",
+        subject=f"[DroneOptAI] Hoàn tiền đơn hàng {order_id}",
         html_body=html_body,
         log_label="refund",
     )
@@ -316,7 +316,7 @@ async def send_incident_notification_email(
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background-color: #dc2626; padding: 20px; text-align: center;">
-            <h1 style="color: #ffffff; margin: 0;">⚠️ Thông báo sự cố DroneOptAI</h1>
+            <h1 style="color: #ffffff; margin: 0;">Thông báo sự cố DroneOptAI</h1>
         </div>
         <div style="padding: 24px; background-color: #f9fafb; border: 1px solid #e5e7eb;">
             {message_body}
@@ -332,7 +332,7 @@ async def send_incident_notification_email(
 
     return await _send_brevo_email_async(
         to_email=to_email,
-        subject=f"[DroneOptAI] ⚠️ Sự cố chuyến bay — Đơn hàng {order_id}",
+        subject=f"[DroneOptAI] Sự cố chuyến bay — Đơn hàng {order_id}",
         html_body=html_body,
         log_label=f"incident ({role_label})",
     )

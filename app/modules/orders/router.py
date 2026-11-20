@@ -617,7 +617,7 @@ def _build_battery_eligible_schema(
     description="""
     **[Operator API] Tìm kiếm Drone và Pin đủ điều kiện cho đơn hàng (Hỗ trợ Cross-Hub Dispatch)**
     
-    ### 📌 Tính năng cốt lõi:
+    ### Tính năng cốt lõi:
     1. **Drone nội bộ (Origin Hub)**:
        - Liệt kê các Drone đang đỗ tại Origin Hub (`current_hub_id == origin_hub_id`), trạng thái `AVAILABLE`, đủ tải trọng và chưa bị gán cho Mission active khác.
        - Với mỗi Drone, trả về danh sách Pin tương thích (`eligible_batteries`) kèm mức sạc thực tế (`charge_level_pct`) và năng lượng (`available_energy_wh`).
@@ -627,7 +627,7 @@ def _build_battery_eligible_schema(
        - **Tự động fallback (Mặc định `include_cross_hub=false`)**: Khi Hub xuất phát không còn cặp Drone-Pin nào đạt 100% để cất cánh (toàn bộ drone bận, pin đang sạc hoặc đã bị reserve), hệ thống **tự động tìm kiếm các Drone khả dụng từ Hub khác gần nhất** và gắn cờ `is_cross_hub: true`.
        - **Chủ động bật (`include_cross_hub=true`)**: Cho phép Operator/FE chủ động xem và lựa chọn Drone từ các Hub khác kể cả khi Hub xuất phát vẫn còn Drone nội bộ (phục vụ điều phối linh hoạt hoặc test chức năng).
     
-    ### ⚙️ Query Parameters:
+    ### Query Parameters:
     - `include_cross_hub` (boolean, mặc định `false`):
       - `false`: Ưu tiên Drone nội bộ tại Origin Hub. Nếu Hub hết Drone/Pin khả dụng thì tự động fallback hiển thị Drone Cross-Hub.
       - `true`: Luôn hiển thị danh sách Drone nội bộ kèm danh sách Drone điều phối từ các Hub lân cận (`is_cross_hub: true`, có tên Hub hiện tại `current_hub_name`).

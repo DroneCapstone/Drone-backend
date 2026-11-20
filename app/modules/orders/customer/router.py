@@ -332,7 +332,7 @@ async def create_order(
 
         db.add(_Notif(
             user_id=str(current_user.id),
-            title=f"✅ Order #{new_order.id} Created Successfully",
+            title=f"Order #{new_order.id} Created Successfully",
             message=(
                 f"Order #{new_order.id} ({body.package_label or 'Package'}, {body.payload_kg} kg) "
                 f"was created at {_time_str}. Route: {origin_hub.name} -> {dest_hub.name}. "
@@ -349,7 +349,7 @@ async def create_order(
             for _op_id in _ops:
                 db.add(_Notif(
                     user_id=_op_id,
-                    title=f"📦 New Order #{new_order.id}",
+                    title=f"New Order #{new_order.id}",
                     message=(
                         f"Customer placed order #{new_order.id} at {_time_str} "
                         f"({_mode_str}, {body.payload_kg} kg). "
