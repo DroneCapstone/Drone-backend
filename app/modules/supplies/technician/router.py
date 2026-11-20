@@ -205,7 +205,7 @@ async def create_parts_request(
                 for _uid in _admin_ids:
                     db.add(Notification(
                         user_id=_uid,
-                        title=f"🔧 New Parts Request — Hub #{hub_id}",
+                        title=f"New Parts Request — Hub #{hub_id}",
                         message=(
                             f"Technician requested {body.quantity_needed}x {cat.name}"
                             f"{' for drone ' + body.drone_id if body.drone_id else ''}. "
@@ -640,7 +640,7 @@ async def create_replacement_request(
             for _uid in _admin_ids:
                 db.add(Notification(
                     user_id=_uid,
-                    title=f"🔄 Yêu cầu thay {type_label} mới — Hub #{hub_id}",
+                    title=f"Yêu cầu thay {type_label} mới — Hub #{hub_id}",
                     message=(
                         f"Technician yêu cầu thay {body.quantity}x {type_label}. "
                         f"Lý do: {body.reason[:80]}. Cần Admin cấp phát."

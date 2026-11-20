@@ -479,7 +479,7 @@ async def get_live_tracking(
             failsafe_alert = (
                 inc_desc
                 if inc_desc and ("[DISCONNECT" in inc_desc_upper or "[SIGNAL LOSS]" in inc_desc_upper)
-                else "🚨 CONNECTION LOST: Complete telemetry signal loss / potential drone crash!"
+                else "CONNECTION LOST: Complete telemetry signal loss / potential drone crash!"
             )
             divert_hub_id = mission.destination_hub_id
             if divert_hub_id and divert_hub_id in hubs_map:
@@ -640,7 +640,7 @@ async def create_incident(
         for uid in await get_operator_and_admin_ids(db):
             db.add(Notification(
                 user_id=uid,
-                title=f"🚨 Incident #{incident.id} ({sev_label}) — Mission #{body.mission_id or 'N/A'}",
+                title=f"Incident #{incident.id} ({sev_label}) — Mission #{body.mission_id or 'N/A'}",
                 message=(
                     f"Incident reported for Drone #{body.drone_id or 'N/A'}"
                     f"{f' on Mission #{body.mission_id}' if body.mission_id else ''}: {body.description}"
@@ -670,7 +670,7 @@ async def create_incident(
                 for _itid in _itech_res.scalars().all():
                     db.add(Notification(
                         user_id=_itid,
-                        title=f"🚨 Incident — Drone #{body.drone_id} Requires Inspection",
+                        title=f"Incident — Drone #{body.drone_id} Requires Inspection",
                         message=(
                             f"Incident #{incident.id} ({sev_label}) reported for Drone #{body.drone_id}"
                             f"{f' on Mission #{body.mission_id}' if body.mission_id else ''}: {body.description}"
@@ -3348,11 +3348,11 @@ async def compute_mission_routes_internal(
             if s.weather and s.weather.is_bad_weather and s.weather.warning_message:
                 if idx == best_idx:
                     bad_weather_prefix = (
-                        f"⚠️ Weather advisory ({s.weather.warning_message}) — best available feasible route; proceed with caution. "
+                        f"Weather advisory ({s.weather.warning_message}) — best available feasible route; proceed with caution. "
                     )
                 else:
                     bad_weather_prefix = (
-                        f"⚠️ Severe weather warning ({s.weather.warning_message}) — AI does not recommend this route. "
+                        f"Severe weather warning ({s.weather.warning_message}) — AI does not recommend this route. "
                     )
 
             spd_mps = float(s.flight_speed_mps or 10.0)
@@ -5044,7 +5044,7 @@ async def _create_mission_internal(
         if o_item.customer_id:
             db.add(Notification(
                 user_id=o_item.customer_id,
-                title=f"✈️ Order #{o_item.id} Flight Scheduled",
+                title=f"Order #{o_item.id} Flight Scheduled",
                 message=(
                     f"Flight #{mission.id} has been scheduled to deliver your order #{o_item.id}. "
                     f"Estimated ETA: {_eta}. You will be notified upon arrival."
@@ -5074,7 +5074,7 @@ async def _create_mission_internal(
             for _tid in _tech_res.scalars().all():
                 db.add(Notification(
                     user_id=_tid,
-                    title=f"✈️ New Mission Scheduled — {_origin_hub_name}",
+                    title=f"New Mission Scheduled — {_origin_hub_name}",
                     message=(
                         f"Mission #{mission.id} has been scheduled. "
                         f"Please prepare drone and batteries at your hub."
@@ -5400,7 +5400,7 @@ async def operator_battery_swap(
     for tech_id in technician_ids:
         db.add(Notification(
             user_id=tech_id,
-            title=f"🔋 Operator Requested Battery Swap — Mission #{mission_id}",
+            title=f"Operator Requested Battery Swap — Mission #{mission_id}",
             message=(
                 f"Operator {user.id} swapped the battery for Mission #{mission_id} at {hub_name}. "
                 f"Old battery: {old_battery_id or 'N/A'} → New battery: {new_battery.id} ({charge}%)."
@@ -5576,7 +5576,7 @@ async def transit_confirm(
     for op_id in operator_ids:
         db.add(Notification(
             user_id=op_id,
-            title=f"✈️ Transit Confirmed — Mission #{mission_id}",
+            title=f"Transit Confirmed — Mission #{mission_id}",
             message=notif_msg,
             notifications_type=NotificationType.MISSION_STATUS,
             mission_id=str(mission.id),
@@ -5708,7 +5708,7 @@ async def emergency_land(
     )
     operator_ids = op_result.scalars().all()
 
-    notif_title = f"🚨 EMERGENCY LANDING — Mission #{mission_id}"
+    notif_title = f"EMERGENCY LANDING — Mission #{mission_id}"
     notif_msg = (
         f"Operator {user.id} triggered emergency landing for Mission #{mission_id} "
         f"(Drone #{mission.drone_id}). Reason: {body.reason}. "
@@ -6117,7 +6117,7 @@ async def execute_mission_failsafe(
         for uid in await get_operator_and_admin_ids(db):
             db.add(Notification(
                 user_id=uid,
-                title=f"🚨 EMERGENCY LANDING — Mission #{mission_id}",
+                title=f"EMERGENCY LANDING — Mission #{mission_id}",
                 message=(
                     f"Failsafe EMERGENCY_LAND triggered for Mission #{mission_id} "
                     f"(Drone #{mission.drone_id}). Reason: {body.reason}. Drone switched to MAINTENANCE."
@@ -6132,7 +6132,7 @@ async def execute_mission_failsafe(
         if mission.customer_id:
             db.add(Notification(
                 user_id=mission.customer_id,
-                title="⚠️ Flight Emergency Landing — Safety Inspection",
+                title="Flight Emergency Landing — Safety Inspection",
                 message=(
                     f"Flight #{mission_id} performed a precautionary emergency landing for safety inspection. "
                     f"Our team is securing your package and will update you shortly."
@@ -6226,7 +6226,7 @@ async def execute_mission_failsafe(
     from app.shared.workers import get_operator_and_admin_ids
     recipient_ids = await get_operator_and_admin_ids(db)
 
-    notif_title = f"🚨 EMERGENCY DIVERT — Mission #{mission_id}"
+    notif_title = f"EMERGENCY DIVERT — Mission #{mission_id}"
     notif_msg = (
         f"Failsafe system triggered a flight divert for Mission #{mission_id} "
         f"(Drone #{mission.drone_id}) to {target_hub.name} (Hub #{target_hub.id}). "

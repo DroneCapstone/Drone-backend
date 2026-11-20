@@ -72,17 +72,17 @@ async def get_operator_quick_questions(
     questions = [
         QuickQuestionItem(
             id="active_flights",
-            title="🚁 Active Flight Missions",
+            title="Active Flight Missions",
             prompt="How many drones are currently executing flight missions?"
         ),
         QuickQuestionItem(
             id="kpi_report",
-            title="📊 Operations KPI Report",
+            title="Operations KPI Report",
             prompt="Summarize operational performance and today's mission completion rate"
         ),
         QuickQuestionItem(
             id="recent_incidents",
-            title="⚠️ Recent Incident Report",
+            title="Recent Incident Report",
             prompt="Are there any recent flight incidents that require attention?"
         )
     ]

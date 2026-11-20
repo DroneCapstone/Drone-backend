@@ -662,7 +662,7 @@ async def confirm_arrival(
                     if order_obj.customer_id:
                         db.add(_Notif(
                             user_id=order_obj.customer_id,
-                            title="⚠️ Order Cancelled After Flight Crash — Refund Initiated",
+                            title="Order Cancelled After Flight Crash — Refund Initiated",
                             message=(
                                 f"Unfortunately, your package for order #{order_obj.id} was lost/damaged during an "
                                 f"in-flight crash on Mission #{mission.id}. Our support team has cancelled the order and initiated refund handling."
@@ -676,7 +676,7 @@ async def confirm_arrival(
                     for op_adm_id in await get_operator_and_admin_ids(db):
                         db.add(_Notif(
                             user_id=op_adm_id,
-                            title=f"🚨 Crash Recovery: Package Lost for Order #{order_obj.id}",
+                            title=f"Crash Recovery: Package Lost for Order #{order_obj.id}",
                             message=(
                                 f"Technician confirmed drone #{mission.drone_id} recovery at {hub_name or f'Hub #{receiving_hub_id}'}, "
                                 f"but package #{order_obj.id} was lost/damaged. Order marked CANCELLED — please process PayOS refund if PAID."
@@ -760,7 +760,7 @@ async def confirm_arrival(
                         for op_id in await get_operator_ids(db):
                             db.add(_Notif(
                                 user_id=op_id,
-                                title=f"📦 Package Recovered at {hub_name or f'Hub #{receiving_hub_id}'} — Ready to Replan",
+                                title=f"Package Recovered at {hub_name or f'Hub #{receiving_hub_id}'} — Ready to Replan",
                                 message=(
                                     f"Technician recovered Drone #{mission.drone_id} and Order #{order_obj.id} back to "
                                     f"{hub_name or f'Hub #{receiving_hub_id}'}. Order is now ready for replacement mission planning."
@@ -794,7 +794,7 @@ async def confirm_arrival(
                         from app.modules.system.models import Notification as _Notif, NotificationType as _NT
                         db.add(_Notif(
                             user_id=order_obj.customer_id,
-                            title="🚁 Drone Arrived at Hub — Your Package Is Ready!",
+                            title="Drone Arrived at Hub — Your Package Is Ready!",
                             message=(
                                 f"Your order #{order_obj.id} has been delivered by drone to "
                                 f"{hub_name or 'the destination hub'}. "
@@ -824,7 +824,7 @@ async def confirm_arrival(
                             for _atid in _a_tech_res.scalars().all():
                                 db.add(_ANotif(
                                     user_id=_atid,
-                                    title=f"🛬 Drone Arrived at {_a_hub_name} — Ready for Inspection",
+                                    title=f"Drone Arrived at {_a_hub_name} — Ready for Inspection",
                                     message=(
                                         f"Drone #{mission.drone_id} has landed at {_a_hub_name} "
                                         f"(Mission #{mission.id}). Please proceed with post-flight inspection."
@@ -1866,7 +1866,7 @@ async def update_inspection(
             for _uid in set(_notif_ids):
                 db.add(Notification(
                     user_id=_uid,
-                    title=f"✅ Work Order #{wo.id} Completed",
+                    title=f"Work Order #{wo.id} Completed",
                     message=(
                         f"{_drone_label} repair has been completed. "
                         f"Technician: {user.id}. "

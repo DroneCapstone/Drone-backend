@@ -51,7 +51,7 @@ class NotificationListResponse(BaseModel):
 # ── GET list (với pagination + filter) ────────────────────────────
 
 @router.get("", response_model=NotificationListResponse,
-            summary="List user notifications (bell 🔔)")
+            summary="List user notifications")
 async def get_notifications(
     page: int = Query(1, ge=1, description="Current page number"),
     page_size: int = Query(20, ge=1, le=100, description="Number of notifications per page"),
