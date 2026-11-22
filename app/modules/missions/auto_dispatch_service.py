@@ -423,7 +423,13 @@ def _score_and_explain_routes(
             u_sla = min(1.0, max(0.2, min_duration / max(int(r.predictedDurationMin or 1), 1)))
             sla_impact = f"Speed {speed_mps:.0f} m/s completes trip in {r.predictedDurationMin} min (FAST objective)"
         else:
-            if speed_mps <= 10.5:
+            if "SAFE" in r.routeId or speed_mps < 9.0:
+                u_sla = 0.70
+                sla_impact = (
+                    f"Conservative low-speed profile ({speed_mps:.0f} m/s) extends transit time "
+                    f"to {r.predictedDurationMin} min vs optimal Eco cruise (10 m/s)"
+                )
+            elif speed_mps <= 10.5:
                 u_sla = 1.0
                 sla_impact = f"Cruise speed {speed_mps:.0f} m/s avoids v^2 aerodynamic drag penalty (ECO objective)"
             else:
@@ -663,8 +669,16 @@ def build_route_nl_explanation(
                 )
             elif "DETOUR" in r.routeId and "DETOUR" not in selected_route.routeId:
                 reason = (
-                    f"Not selected: Contingency bypass corridor ({r.distanceKm:.2f} km, {r.predictedEnergyWh:.1f} Wh, {r.predictedDurationMin} min) "
+                    f"Not selected: Alternate bypass corridor ({r.distanceKm:.2f} km, {r.predictedEnergyWh:.1f} Wh, {r.predictedDurationMin} min) "
                     f"is held in reserve and only recommended when primary routes violate battery reserve (80%) or weather safety limits."
+                )
+            elif "SAFE" in r.routeId and "SAFE" not in selected_route.routeId:
+                spd_kmh = int(round(float(r.flight_speed_mps or 8.0) * 3.6))
+                alt_m = int(round(float(r.flight_altitude_m or 40.0)))
+                reason = (
+                    f"Not selected: Conservative low-speed profile ({spd_kmh} km/h, Altitude {alt_m}m, "
+                    f"{r.predictedDurationMin} min vs {selected_route.predictedDurationMin} min on {selected_route.routeId}) "
+                    f"is prioritized mainly when primary routes breach tight battery limits or severe wind thresholds."
                 )
             elif len(r.legs_detail) > len(selected_route.legs_detail):
                 baseline_desc = (
