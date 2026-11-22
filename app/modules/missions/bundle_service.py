@@ -101,6 +101,7 @@ def predict_flight_energy_cached(
     speed: float = 10.0,
     altitude: float = 50.0,
     weather_override: Optional[dict] = None,
+    bearing_deg: Optional[float] = None,
 ) -> dict:
     """Memoized wrapper around `predict_flight_energy` returning an isolated copy."""
     key = (
@@ -109,6 +110,7 @@ def predict_flight_energy_cached(
         round(float(speed or 10.0), 2),
         round(float(altitude or 50.0), 1),
         _weather_cache_key(weather_override),
+        round(float(bearing_deg) % 360.0, 1) if bearing_deg is not None else None,
     )
     cached = _FLIGHT_ENERGY_CACHE.get(key)
     if cached is not None:
@@ -120,6 +122,7 @@ def predict_flight_energy_cached(
         speed=speed,
         altitude=altitude,
         weather_override=weather_override,
+        bearing_deg=bearing_deg,
     )
     if len(_FLIGHT_ENERGY_CACHE) >= _FLIGHT_ENERGY_CACHE_MAX:
         _FLIGHT_ENERGY_CACHE.clear()

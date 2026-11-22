@@ -101,39 +101,59 @@ async def run_realtime_cronjobs():
 async def _warmup_caches_background():
     """
     [PERF NOTE] Nạp ấm (warm-up) các cache RAM và connection pool DB ngay khi server vừa khởi động
-    ở chế độ nền (non-blocking) để request đầu tiên của Operator không bị chậm (cold start):
-    1. Bắt tay SSL trước với Supabase pool + cache Hubs (30s) & Battery Compatibility (60s).
+    và định kỳ làm mới mỗi 12 phút (720s) ở chế độ nền (non-blocking) để lượt bấm đầu tiên
+    của Operator / Hội đồng luôn đạt tốc độ warm (~1.5s) mà không cần bấm mồi trước:
+    1. Bắt tay SSL trước với Supabase pool + cache Hubs & Battery Compatibility.
     2. Load sẵn model ML predict_flight_energy vào RAM.
-    3. Fetch song song thời tiết Open-Meteo cho tọa độ các Hub để bước Route Analyze đầu tiên chạy nhanh.
+    3. Fetch song song thời tiết Open-Meteo theo lưới 0.05° cho cả tọa độ Hub lẫn midpoint giữa các Hub.
     """
-    try:
-        from app.database.db import AsyncSessionLocal
-        from app.modules.missions.bundle_service import (
-            get_all_hubs_cached,
-            get_compatible_battery_models_map,
-            predict_flight_energy_cached,
-        )
-        from app.shared.weather import fetch_weather
+    from app.database.db import AsyncSessionLocal
+    from app.modules.missions.bundle_service import (
+        get_all_hubs_cached,
+        get_compatible_battery_models_map,
+        predict_flight_energy_cached,
+    )
+    from app.shared.weather import fetch_weather, _weather_grid_key
 
-        hubs = []
-        async with AsyncSessionLocal() as db:
-            hubs = await get_all_hubs_cached(db)
-            await get_compatible_battery_models_map(db)
+    first_run = True
+    while True:
+        try:
+            hubs = []
+            async with AsyncSessionLocal() as db:
+                hubs = await get_all_hubs_cached(db)
+                await get_compatible_battery_models_map(db)
 
-        await asyncio.to_thread(predict_flight_energy_cached, 10.0, 1.0)
+            if first_run:
+                await asyncio.to_thread(predict_flight_energy_cached, 10.0, 1.0)
+                first_run = False
 
-        unique_coords = {
-            (round(float(h.latitude), 2), round(float(h.longitude), 2))
-            for h in hubs
-            if h.latitude is not None and h.longitude is not None
-        }
-        if unique_coords:
-            await asyncio.gather(
-                *(fetch_weather(lat, lng) for lat, lng in unique_coords),
-                return_exceptions=True,
-            )
-    except Exception as exc:
-        print(f"[STARTUP WARMUP WARNING] Không thể warm-up cache nền: {exc}")
+            valid_hubs = [h for h in hubs if h.latitude is not None and h.longitude is not None]
+            unique_cells: set[tuple[float, float]] = set()
+            for h in valid_hubs:
+                unique_cells.add(_weather_grid_key(h.latitude, h.longitude))
+            for i in range(len(valid_hubs)):
+                for j in range(i + 1, len(valid_hubs)):
+                    mlat = (float(valid_hubs[i].latitude) + float(valid_hubs[j].latitude)) / 2.0
+                    mlng = (float(valid_hubs[i].longitude) + float(valid_hubs[j].longitude)) / 2.0
+                    unique_cells.add(_weather_grid_key(mlat, mlng))
+
+            if unique_cells:
+                sem = asyncio.Semaphore(4)
+
+                async def _warm_one(lat: float, lng: float):
+                    async with sem:
+                        await fetch_weather(lat, lng, use_cache=False)
+
+                await asyncio.gather(
+                    *(_warm_one(lat, lng) for lat, lng in unique_cells),
+                    return_exceptions=True,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[STARTUP WARMUP WARNING] Không thể warm-up cache nền: {exc}")
+
+        await asyncio.sleep(720)
 
 
 @asynccontextmanager
