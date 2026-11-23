@@ -52,7 +52,7 @@ from app.database.router import router as db_router
 import asyncio
 from app.database.db import async_engine, Base
 from app.database.cron_db import run_with_retry
-from app.modules.fleet.technician.service import run_maintenance_alerts_logic, run_battery_overdue_alerts_logic
+from app.modules.fleet.technician.service import run_maintenance_alerts_logic, run_battery_overdue_alerts_logic, run_preventive_maintenance_scheduler
 from app.shared.workers import run_approval_deadline_watcher, run_telemetry_signal_loss_watcher, run_battery_charging_simulation, run_pickup_reminder_watcher, run_aging_priority_watcher, run_critical_order_notifier, run_deadline_alert_watcher
 
 async def run_hourly_cronjobs():
@@ -66,6 +66,7 @@ async def run_hourly_cronjobs():
         await run_with_retry(run_battery_charging_simulation,  "battery_charging_sim")
         await run_with_retry(run_pickup_reminder_watcher,      "pickup_reminder")
         await run_with_retry(run_critical_order_notifier,      "critical_order_notifier")
+        await run_with_retry(run_preventive_maintenance_scheduler, "preventive_maintenance")
         await asyncio.sleep(3600)
 
 async def run_quarter_cronjobs():
