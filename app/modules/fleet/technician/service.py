@@ -157,3 +157,108 @@ async def run_preventive_maintenance_scheduler(db: AsyncSession):
         await db.commit()
 
     return created
+
+
+# ── Drone Daily Stats Worker ──────────────────────────────────────────────────
+
+async def run_drone_daily_stats(db: AsyncSession):
+    """
+    Worker: Tổng kết thống kê hoạt động drone theo ngày.
+
+    Chạy 1 lần/ngày (cron hourly nhưng chỉ ghi khi chưa có record cho ngày hôm qua).
+    Tổng hợp: số chuyến bay, completed, incidents, tổng km, tổng thời gian bay, tổng energy Wh.
+    """
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select, func, case, and_
+    from app.modules.fleet.models import Drone, DroneDailyStat
+    from app.modules.missions.models import Mission, MissionStatus, Incident
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    yesterday = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Chỉ chạy 1 lần/ngày: kiểm tra đã có stat cho hôm qua chưa
+    existing_count = (await db.execute(
+        select(func.count(DroneDailyStat.id)).where(
+            DroneDailyStat.stat_date == yesterday
+        )
+    )).scalar() or 0
+
+    if existing_count > 0:
+        return 0  # Đã tính rồi
+
+    # Lấy missions của hôm qua theo drone
+    _COMPLETED = [MissionStatus.COMPLETED, MissionStatus.ARRIVAL_COMPLETED, MissionStatus.MISSION_COMPLETED]
+
+    missions = (await db.execute(
+        select(Mission).where(
+            Mission.departed_at >= yesterday,
+            Mission.departed_at < today_start,
+            Mission.drone_id.isnot(None),
+        )
+    )).scalars().all()
+
+    if not missions:
+        return 0
+
+    # Lấy incidents liên quan
+    m_ids = [m.id for m in missions]
+    incident_counts: dict[str, int] = {}
+    if m_ids:
+        inc_rows = (await db.execute(
+            select(Mission.drone_id, func.count(Incident.id).label("cnt"))
+            .join(Incident, Incident.mission_id == Mission.id)
+            .where(Mission.id.in_(m_ids), Mission.drone_id.isnot(None))
+            .group_by(Mission.drone_id)
+        )).all()
+        incident_counts = {r.drone_id: r.cnt for r in inc_rows}
+
+    # AI energy
+    from app.modules.ai_predictions.models import AIPrediction
+    energy_map: dict[str, float] = {}
+    pred_rows = (await db.execute(
+        select(AIPrediction.mission_id, AIPrediction.estimated_energy_wh)
+        .where(AIPrediction.mission_id.in_(m_ids))
+    )).all()
+    for p in pred_rows:
+        energy_map[str(p.mission_id)] = float(p.estimated_energy_wh or 0)
+
+    # Group by drone_id
+    from collections import defaultdict
+    drone_data: dict[str, dict] = defaultdict(lambda: {
+        "missions": 0, "completed": 0, "distance_m": 0.0,
+        "flight_min": 0.0, "energy_wh": 0.0,
+    })
+
+    for m in missions:
+        d = drone_data[m.drone_id]
+        d["missions"] += 1
+        if m.status in _COMPLETED:
+            d["completed"] += 1
+        d["distance_m"] += float(m.distance_m or 0)
+        dep = m.departed_at
+        arr = m.arrived_at or m.end_time
+        if dep and arr:
+            secs = max(0.0, (arr - dep).total_seconds())
+            d["flight_min"] += secs / 60.0
+        d["energy_wh"] += energy_map.get(str(m.id), 0.0)
+
+    created = 0
+    for drone_id, stats in drone_data.items():
+        db.add(DroneDailyStat(
+            drone_id=drone_id,
+            stat_date=yesterday,
+            mission_count=stats["missions"],
+            completed_count=stats["completed"],
+            incident_count=incident_counts.get(drone_id, 0),
+            total_distance_km=round(stats["distance_m"] / 1000.0, 2),
+            total_flight_min=round(stats["flight_min"], 1),
+            total_energy_wh=round(stats["energy_wh"], 1),
+            created_at=now,
+        ))
+        created += 1
+
+    if created > 0:
+        await db.commit()
+
+    return created
