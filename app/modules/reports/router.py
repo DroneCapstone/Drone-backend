@@ -365,3 +365,60 @@ async def export_fleet_csv(
 
     today = datetime.now().strftime("%Y%m%d")
     return _csv_response(rows, f"fleet_{today}.csv")
+
+
+# ── Cancellation Stats ────────────────────────────────────────────────────────
+
+@router.get(
+    "/cancellation-stats",
+    summary="Thống kê lý do hủy đơn hàng",
+)
+async def get_cancellation_stats(
+    from_date: Optional[str] = Query(None, description="Từ ngày YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="Đến ngày YYYY-MM-DD"),
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Admin] Thống kê lý do hủy đơn hàng.**
+
+    Trả về: tổng đơn hủy, phân phối theo lý do, top 5 lý do phổ biến nhất.
+    """
+    from sqlalchemy import func
+    from app.modules.missions.models import OrderStatus as _OS
+
+    q = (
+        select(
+            Order.cancellation_reason,
+            func.count(Order.id).label("count"),
+        )
+        .where(Order.status == _OS.CANCELLED)
+        .group_by(Order.cancellation_reason)
+        .order_by(func.count(Order.id).desc())
+    )
+
+    dt_from = _parse_date(from_date)
+    dt_to   = _parse_date(to_date)
+    if dt_from:
+        q = q.where(Order.cancelled_at >= dt_from)
+    if dt_to:
+        from datetime import timedelta
+        q = q.where(Order.cancelled_at < dt_to + timedelta(days=1))
+
+    rows = (await db.execute(q)).all()
+
+    total = sum(r.count for r in rows)
+    distribution = [
+        {
+            "reason": r.cancellation_reason or "not_specified",
+            "count": r.count,
+            "pct": round(r.count / total * 100, 1) if total else 0.0,
+        }
+        for r in rows
+    ]
+
+    return {
+        "total_cancelled": total,
+        "distribution": distribution,
+        "top_reason": distribution[0]["reason"] if distribution else None,
+    }
