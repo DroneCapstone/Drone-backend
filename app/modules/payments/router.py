@@ -194,7 +194,7 @@ async def create_checkout(
 # ── Helper Notification ───────────────────────────────────────────────────────
 
 async def _notify_customer_payment_confirmed(db: AsyncSession, order: Order, paid_time: datetime) -> None:
-    """Gửi Notification xác nhận thanh toán kèm thời gian về cho Customer (chống gửi trùng)."""
+    """Gửi Notification + Email xác nhận thanh toán cho Customer (chống gửi trùng)."""
     if not order.customer_id:
         return
     try:
@@ -220,6 +220,23 @@ async def _notify_customer_payment_confirmed(db: AsyncSession, order: Order, pai
             reference_id=ref_id,
             created_at=vn_now,
         ))
+
+        # Gửi email xác nhận thanh toán (non-blocking)
+        _sender_email = (order.sender_email or "").strip()
+        if _sender_email:
+            import asyncio as _ao
+            from app.core.email import send_payment_confirmation_email as _send_pay_email
+            from app.core.config import settings as _s
+            _asyncio_task = _ao.create_task(
+                _send_pay_email(
+                    to_email=_sender_email,
+                    order_id=order.id,
+                    amount=order.delivery_fee,
+                    paid_at=time_str,
+                    frontend_url=_s.FRONTEND_URL,
+                )
+            )
+            del _asyncio_task  # Không cần await
     except Exception as e:
         print(f"[NOTIFY PAYMENT ERROR] {e}")
 

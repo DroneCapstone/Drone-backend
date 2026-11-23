@@ -431,3 +431,67 @@ async def send_order_confirmation_email(
         html_body=html_body,
         log_label="order_confirmation",
     )
+
+
+async def send_payment_confirmation_email(
+    to_email: str,
+    order_id: str,
+    amount: float | None = None,
+    paid_at: str | None = None,
+    frontend_url: str | None = None,
+) -> bool:
+    """
+    Gửi email xác nhận thanh toán thành công. Trigger khi order.payment_status → PAID.
+    """
+    tracking_url = f"{frontend_url}/customer/deliveries/{order_id}" if frontend_url else ""
+    tracking_btn = f"""
+        <a href="{tracking_url}" style="
+            display: inline-block; padding: 11px 24px;
+            background-color: #22c55e; color: #000000;
+            text-decoration: none; border-radius: 8px;
+            font-weight: 700; font-size: 14px;">
+            View Order
+        </a>
+    """ if tracking_url else ""
+
+    amount_line = f"<tr><td style='color:#6b7280;padding:4px 0'>Amount paid</td><td style='font-weight:700;color:#22c55e'>{int(amount):,} VND</td></tr>" if amount else ""
+    paid_line   = f"<tr><td style='color:#6b7280;padding:4px 0'>Paid at</td><td style='font-weight:600'>{paid_at}</td></tr>" if paid_at else ""
+
+    html_body = f"""
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background:#0f0d10;">
+        <div style="background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%); padding: 28px 32px; border-radius: 12px 12px 0 0;">
+            <h1 style="color:#ffffff; margin:0; font-size:22px; letter-spacing:-0.5px;">DroneOptAI</h1>
+            <p style="color:rgba(255,255,255,0.8); margin:4px 0 0; font-size:13px;">Payment Confirmation</p>
+        </div>
+        <div style="padding: 28px 32px; background: #1a1620; border: 1px solid rgba(255,255,255,0.08);">
+            <h2 style="color:#ffffff; margin:0 0 8px; font-size:20px;">Payment Received ✅</h2>
+            <p style="color:rgba(255,255,255,0.6); margin:0 0 24px; font-size:14px;">
+                Your payment has been confirmed. Please drop off your package at the origin hub.
+            </p>
+            <div style="display:inline-block; background:rgba(34,197,94,0.12); border:1px solid rgba(34,197,94,0.3);
+                        padding:8px 16px; border-radius:8px; margin-bottom:24px;">
+                <span style="color:#22c55e; font-size:13px; font-weight:700; letter-spacing:0.05em;">
+                    ORDER #{order_id}
+                </span>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:14px; color:#e5e7eb;">
+                {amount_line}
+                {paid_line}
+                <tr><td style='color:#6b7280;padding:4px 0'>Next step</td><td style='font-weight:600'>Drop off package at origin hub</td></tr>
+            </table>
+            <div style="margin-top: 28px;">{tracking_btn}</div>
+            <p style="color:rgba(255,255,255,0.3); font-size:12px; margin-top:28px; line-height:1.6;">
+                Questions? Contact our support team.
+            </p>
+        </div>
+        <div style="padding:16px 32px; text-align:center; color:rgba(255,255,255,0.2); font-size:11px; background:#0f0d10; border-radius:0 0 12px 12px;">
+            DroneOptAI — Automated Drone Delivery · Ho Chi Minh City
+        </div>
+    </div>
+    """
+    return await _send_brevo_email_async(
+        to_email=to_email,
+        subject=f"[DroneOptAI] Payment confirmed for Order #{order_id}",
+        html_body=html_body,
+        log_label="payment_confirmation",
+    )
