@@ -309,3 +309,59 @@ async def export_incidents_csv(
 
     today = datetime.now().strftime("%Y%m%d")
     return _csv_response(rows, f"incidents_{today}.csv")
+
+
+# ── Drone Fleet CSV ───────────────────────────────────────────────────────────
+
+@router.get(
+    "/fleet.csv",
+    summary="Export thống kê drone fleet (CSV)",
+    response_class=StreamingResponse,
+)
+async def export_fleet_csv(
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Admin] Export thống kê toàn bộ drone fleet CSV.**
+
+    Mỗi dòng = 1 drone: id, name, model, serial, hub, status, flight_hours,
+    total_missions, last_maintenance_at, utilization_pct.
+    """
+    from sqlalchemy import func
+    from app.modules.system.models import Hub
+
+    # Count missions per drone
+    mission_counts = (await db.execute(
+        select(Mission.drone_id, func.count(Mission.id).label("total"))
+        .where(Mission.drone_id.isnot(None))
+        .group_by(Mission.drone_id)
+    )).all()
+    mission_count_map = {r.drone_id: r.total for r in mission_counts}
+
+    drones = (await db.execute(select(Drone).order_by(Drone.name))).scalars().all()
+
+    hub_ids = {d.current_hub_id for d in drones if d.current_hub_id}
+    hub_map: dict[int, str] = {}
+    if hub_ids:
+        hubs = (await db.execute(select(Hub).where(Hub.id.in_(hub_ids)))).scalars().all()
+        hub_map = {h.id: h.name for h in hubs}
+
+    rows = []
+    for d in drones:
+        rows.append({
+            "drone_id":           d.id,
+            "name":               d.name,
+            "model":              d.model,
+            "serial_number":      d.serial_number,
+            "current_hub":        hub_map.get(d.current_hub_id, str(d.current_hub_id or "Unassigned")),
+            "status":             d.status.value if hasattr(d.status, "value") else str(d.status or ""),
+            "total_flight_hours": round(float(d.total_flight_hours or 0), 2),
+            "total_missions":     mission_count_map.get(d.id, 0),
+            "utilization_pct":    round(float(d.utilization_pct or 0), 1),
+            "battery_level_pct":  d.battery_level_pct or "",
+            "last_maintenance_at": d.last_maintenance_at.strftime("%Y-%m-%d") if d.last_maintenance_at else "Never",
+        })
+
+    today = datetime.now().strftime("%Y%m%d")
+    return _csv_response(rows, f"fleet_{today}.csv")
