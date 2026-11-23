@@ -473,6 +473,91 @@ async def get_my_customer_order_detail(
 
 
 # ══════════════════════════════════════════════════════════════════════
+# CANCEL ORDER WITH REASON
+# ══════════════════════════════════════════════════════════════════════
+
+_CANCELLATION_REASONS = [
+    "changed_my_mind",
+    "wrong_information",
+    "price_too_high",
+    "found_alternative",
+    "delivery_too_slow",
+    "other",
+]
+
+
+class CancelOrderRequest(BaseModel):
+    reason: str = PydanticField(
+        ...,
+        description=f"Lý do hủy đơn. Các giá trị hợp lệ: {_CANCELLATION_REASONS}"
+    )
+    note: Optional[str] = PydanticField(default=None, max_length=500, description="Ghi chú thêm (tùy chọn)")
+
+
+@router.patch(
+    "/orders/{order_id}/cancel",
+    summary="Hủy đơn hàng kèm lý do",
+)
+async def cancel_order_with_reason(
+    order_id: str,
+    body: CancelOrderRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Customer API] Hủy đơn hàng kèm lý do.**
+
+    Chỉ được hủy khi:
+    - Order đang ở trạng thái `PENDING` hoặc `AWAITING_DROP_OFF`.
+    - Chưa thanh toán (UNPAID/PENDING payment).
+    - Lý do phải thuộc danh sách: `changed_my_mind`, `wrong_information`, `price_too_high`,
+      `found_alternative`, `delivery_too_slow`, `other`.
+    """
+    if body.reason not in _CANCELLATION_REASONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid reason. Must be one of: {_CANCELLATION_REASONS}"
+        )
+
+    order = await db.get(Order, order_id)
+    if not order or order.status == OrderStatus.CANCELLED:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if str(order.customer_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not your order")
+    if order.payment_status == PaymentStatus.PAID:
+        raise HTTPException(
+            status_code=400,
+            detail="Paid orders cannot be cancelled directly. Contact support for a refund."
+        )
+    if order.status not in (OrderStatus.PENDING, OrderStatus.AWAITING_DROP_OFF):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel order in '{order.status.value}' status."
+        )
+
+    from app.core.timezone import get_vn_naive_datetime
+    now = get_vn_naive_datetime()
+
+    full_reason = body.reason
+    if body.note:
+        full_reason = f"{body.reason}: {body.note.strip()}"
+
+    order.status = OrderStatus.CANCELLED
+    order.cancelled_at = now
+    order.cancellation_reason = full_reason
+    order.updated_at = now
+
+    await db.commit()
+
+    return {
+        "message": "Order cancelled successfully.",
+        "order_id": order_id,
+        "reason": full_reason,
+        "cancelled_at": now.isoformat(),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
 # DELETE ORDER (chỉ khi còn PENDING và chưa có mission)
 # ══════════════════════════════════════════════════════════════════════
 @router.delete("/orders/{order_id}", status_code=204, summary="Xóa đơn hàng (chỉ khi chưa xử lý)")
