@@ -6,7 +6,7 @@ from app.database.db import get_async_db
 from app.shared.dependencies import RoleChecker, CurrentUser
 from app.shared.roles import UserRole
 from app.modules.auth.models import User, ROLE_ID_MAP
-from app.modules.missions.models import Mission, MissionStatus, Incident, IncidentStatus, Order, PaymentStatus
+from app.modules.missions.models import Mission, MissionStatus, Incident, IncidentStatus, Order, PaymentStatus, DeliveryRating
 from app.modules.fleet.models import Drone, Battery, MaintenanceAlert
 from app.modules.system.models import ActivityLog
 from app.modules.supplies.models import SupplyTransaction, SupplyTxnReason, PartCategory
@@ -20,6 +20,7 @@ from app.modules.dashboard.schemas import (
     AdminBatteries,
     AdminAI,
     AdminAlerts,
+    AdminRatings,
 )
 from app.modules.dashboard.service import COMPLETED_STATUSES, now_naive
 
@@ -232,6 +233,25 @@ async def admin_dashboard(
         total_audit_logs=total_audit,
     )
 
+    # Delivery ratings stats
+    rating_stats = (await db.execute(
+        select(
+            func.count(DeliveryRating.id).label("total"),
+            func.avg(DeliveryRating.rating).label("avg"),
+            func.count(case((DeliveryRating.rating == 5, 1))).label("five_star"),
+            func.count(case((DeliveryRating.rating <= 2, 1))).label("low"),
+        )
+    )).one()
+    r_total = rating_stats.total or 0
+    r_avg = round(float(rating_stats.avg), 2) if rating_stats.avg else 0.0
+    r_five_pct = round(rating_stats.five_star / r_total * 100, 1) if r_total else 0.0
+    ratings = AdminRatings(
+        total_ratings=r_total,
+        avg_rating=r_avg,
+        five_star_pct=r_five_pct,
+        low_rating_count=rating_stats.low or 0,
+    )
+
     return AdminDashboardResponse(
         revenue=revenue,
         users=users,
@@ -240,4 +260,5 @@ async def admin_dashboard(
         batteries=batteries,
         ai=ai,
         alerts=alerts,
+        ratings=ratings,
     )
