@@ -1007,3 +1007,108 @@ async def get_delivery_rating(
     if not rating_obj:
         raise HTTPException(status_code=404, detail="No rating found for this order")
     return rating_obj
+
+
+# ══════════════════════════════════════════════════════════════════════
+# LIVE POSITION (lightweight real-time GPS endpoint)
+# ══════════════════════════════════════════════════════════════════════
+
+class LivePositionResponse(BaseModel):
+    order_id: str
+    mission_id: Optional[str]
+    mission_status: Optional[str]
+    # GPS
+    latitude: Optional[float]
+    longitude: Optional[float]
+    altitude_m: Optional[float]
+    speed_mps: Optional[float]
+    battery_pct: Optional[float]
+    # Timing
+    last_update: Optional[datetime]
+    elapsed_sec: Optional[int]      # Giây đã bay
+    eta_sec: Optional[int]          # Giây còn lại tới ETA
+    # Human-readable
+    is_flying: bool
+    status_label: str
+
+
+@router.get(
+    "/orders/{order_id}/live-position",
+    response_model=LivePositionResponse,
+    summary="Vị trí GPS thời gian thực của drone đang giao hàng",
+)
+async def get_live_position(
+    order_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Customer API] Vị trí GPS live của drone đang giao đơn hàng.**
+
+    Endpoint nhẹ, chỉ trả về vị trí mới nhất từ telemetry. Gọi mỗi 3-5s từ FE để
+    update marker trên bản đồ mà không cần load full tracking response.
+
+    - Trả về `is_flying: false` nếu mission chưa cất cánh hoặc đã hoàn thành.
+    - `eta_sec`: giây còn lại tới `estimated_window_end` (null nếu đã giao xong).
+    - `last_update`: timestamp của telemetry log cuối cùng.
+    """
+    order = await db.get(Order, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.customer_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not your order")
+
+    mission = await _latest_mission_for_order(db, order_id)
+
+    flying_statuses = {MissionStatus.FLYING, MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION}
+    is_flying = bool(mission and mission.status in flying_statuses)
+
+    # Latest telemetry log
+    lat = lng = alt = speed = bat_pct = None
+    last_update = None
+    if mission:
+        tlog = (await db.execute(
+            select(TelemetryLog)
+            .where(TelemetryLog.mission_id == str(mission.id))
+            .order_by(TelemetryLog.id.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        if tlog:
+            lat, lng, alt = tlog.latitude, tlog.longitude, tlog.altitude
+            speed = tlog.speed
+            bat_pct = tlog.battery_pct
+            last_update = tlog.timestamp
+
+    # ETA
+    from app.core.timezone import get_vn_naive_datetime
+    now_vn = get_vn_naive_datetime()
+    eta_sec = None
+    if order.estimated_window_end and is_flying:
+        eta_naive = order.estimated_window_end.replace(tzinfo=None) if order.estimated_window_end.tzinfo else order.estimated_window_end
+        eta_sec = max(0, int((eta_naive - now_vn).total_seconds()))
+
+    # Elapsed
+    elapsed_sec = None
+    dep_at = (mission.departed_at or mission.start_time) if mission else None
+    if dep_at and is_flying:
+        d_start = dep_at.replace(tzinfo=None) if dep_at.tzinfo else dep_at
+        elapsed_sec = max(0, int((now_vn - d_start).total_seconds()))
+
+    # Status label
+    code, label = compute_delivery_status(order, mission)
+
+    return LivePositionResponse(
+        order_id=order_id,
+        mission_id=str(mission.id) if mission else None,
+        mission_status=mission.status.value if mission and hasattr(mission.status, "value") else None,
+        latitude=lat,
+        longitude=lng,
+        altitude_m=alt,
+        speed_mps=speed,
+        battery_pct=bat_pct,
+        last_update=last_update,
+        elapsed_sec=elapsed_sec,
+        eta_sec=eta_sec,
+        is_flying=is_flying,
+        status_label=label,
+    )
