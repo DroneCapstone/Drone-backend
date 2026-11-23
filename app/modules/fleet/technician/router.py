@@ -1763,14 +1763,31 @@ async def delete_work_order(
     wo = await db.get(WorkOrder, work_order_id)
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
-    
-    # Nếu work order đang được dùng bởi battery/drone, không thể xóa
-    if wo.battery_id:
-        battery = await db.get(Battery, wo.battery_id)
-        if battery and battery.work_order_id == wo.id:
-            raise HTTPException(status_code=400, detail="Cannot delete a work order that is currently in use. Please complete it first.")
-    
-    db.delete(wo)
+
+    # Không xóa work order đang In Progress
+    if wo.status == WorkOrderStatus.IN_PROGRESS:
+        raise HTTPException(status_code=400, detail="Cannot delete a work order that is In Progress. Please complete or cancel it first.")
+
+    # ── 1. Unlink Battery.work_order_id → tránh FK violation khi xóa WO ──────
+    # Check cả chiều thuận (wo.battery_id) và chiều ngược (Battery.work_order_id == wo.id)
+    batteries_to_unlink = (await db.execute(
+        select(Battery).where(Battery.work_order_id == work_order_id)
+    )).scalars().all()
+    for bat in batteries_to_unlink:
+        bat.work_order_id = None
+
+    # ── 2. Unlink MaintenanceAlert.work_order_id → alert trở về Pending ──────
+    alerts_to_unlink = (await db.execute(
+        select(MaintenanceAlert).where(MaintenanceAlert.work_order_id == work_order_id)
+    )).scalars().all()
+    for alert in alerts_to_unlink:
+        alert.work_order_id = None
+
+    # ── 3. Xóa WO ─────────────────────────────────────────────────────────────
+    await db.flush()   # Apply unlink trước
+    await db.delete(wo)
+    await db.flush()   # Verify delete staged OK
+
     await db.commit()
 
 
