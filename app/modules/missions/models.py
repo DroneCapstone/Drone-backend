@@ -278,3 +278,25 @@ class DeliveryRating(Base):
     rating: Mapped[int] = mapped_column(Integer, nullable=False)   # 1-5
     comment: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+# ── Saved Address (Customer Address Book) ────────────────────────────────────
+
+class SavedAddress(Base):
+    """
+    Danh bạ địa chỉ giao hàng của Customer — lưu thông tin người nhận thường dùng.
+    """
+    __tablename__ = "saved_addresses"
+    __table_args__ = (
+        Index("idx_saved_addresses_customer", "customer_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    customer_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)        # e.g. "Home", "Office"
+    recipient_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    recipient_phone: Mapped[str] = mapped_column(String(20), nullable=False)
+    recipient_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    hub_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # destination hub
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
