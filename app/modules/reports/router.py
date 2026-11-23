@@ -256,3 +256,56 @@ async def export_missions_csv(
 
     today = datetime.now().strftime("%Y%m%d")
     return _csv_response(rows, f"missions_{today}.csv")
+
+
+# ── Incidents CSV ─────────────────────────────────────────────────────────────
+
+@router.get(
+    "/incidents.csv",
+    summary="Export báo cáo incidents (CSV)",
+    response_class=StreamingResponse,
+)
+async def export_incidents_csv(
+    from_date: Optional[str] = Query(None, description="Từ ngày YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="Đến ngày YYYY-MM-DD"),
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Admin] Export danh sách incidents CSV.**
+
+    Mỗi dòng = 1 incident: id, mission_id, drone_id, severity, status,
+    description, compensation_pct, requires_inspection, reported_at.
+    """
+    from app.modules.missions.models import IncidentStatus
+
+    q = select(Incident).order_by(Incident.reported_at.desc().nullslast())
+
+    dt_from = _parse_date(from_date)
+    dt_to   = _parse_date(to_date)
+    if dt_from:
+        q = q.where(Incident.reported_at >= dt_from)
+    if dt_to:
+        from datetime import timedelta
+        q = q.where(Incident.reported_at < dt_to + timedelta(days=1))
+
+    q = q.limit(5000)
+    incidents = (await db.execute(q)).scalars().all()
+
+    rows = []
+    for inc in incidents:
+        rows.append({
+            "incident_id":               inc.id,
+            "mission_id":                inc.mission_id or "",
+            "drone_id":                  inc.drone_id or "",
+            "severity":                  inc.severity.value if hasattr(inc.severity, "value") else str(inc.severity or ""),
+            "status":                    inc.status.value if hasattr(inc.status, "value") else str(inc.status or ""),
+            "description":               (inc.description or "").replace("\n", " "),
+            "requires_technical_inspection": "Yes" if inc.requires_technical_inspection else "No",
+            "compensation_pct":          inc.compensation_pct or "",
+            "compensation_note":         (inc.compensation_note or "").replace("\n", " "),
+            "reported_at":               inc.reported_at.strftime("%Y-%m-%d %H:%M") if inc.reported_at else "",
+        })
+
+    today = datetime.now().strftime("%Y%m%d")
+    return _csv_response(rows, f"incidents_{today}.csv")
