@@ -512,6 +512,14 @@ async def confirm_arrival(
     # Ghi nhận arrival_confirmed_at khi drone đáp hub (bình thường hay incident)
     mission.arrival_confirmed_at = now
     mission.arrival_confirmed_by = user.id
+
+    # ── Tích lũy giờ bay thực tế vào drone.total_flight_hours ────────────────
+    if drone and mission.departed_at:
+        _dep = mission.departed_at.replace(tzinfo=None) if mission.departed_at.tzinfo else mission.departed_at
+        _arr = now.replace(tzinfo=None) if hasattr(now, "tzinfo") and now.tzinfo else now
+        _flight_secs = max(0.0, (_arr - _dep).total_seconds())
+        _flight_hours = round(_flight_secs / 3600.0, 4)
+        drone.total_flight_hours = round(float(drone.total_flight_hours or 0.0) + _flight_hours, 4)
     
     # Lưu battery percent lúc đáp hub
     if mission.battery_id:
