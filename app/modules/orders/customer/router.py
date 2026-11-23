@@ -365,6 +365,32 @@ async def create_order(
 
     await db.commit()
 
+    # ── Gửi email xác nhận đơn hàng cho customer (non-blocking) ──────────────
+    _sender_email_addr = (new_order.sender_email or "").strip()
+    if _sender_email_addr:
+        import asyncio as _asyncio
+        from app.core.email import send_order_confirmation_email as _send_order_confirm
+        from app.core.config import settings as _settings
+
+        _eta_str = None
+        if new_order.estimated_window_end:
+            _eta_str = new_order.estimated_window_end.strftime("%H:%M %d/%m/%Y")
+
+        _asyncio.create_task(
+            _send_order_confirm(
+                to_email=_sender_email_addr,
+                order_id=new_order.id,
+                package_label=new_order.package_label,
+                payload_kg=new_order.payload_kg,
+                delivery_mode=new_order.delivery_mode.value if new_order.delivery_mode else None,
+                origin_hub_name=origin_hub.name if origin_hub else None,
+                destination_hub_name=dest_hub.name if dest_hub else None,
+                delivery_fee=new_order.delivery_fee,
+                estimated_window_end=_eta_str,
+                frontend_url=_settings.FRONTEND_URL,
+            )
+        )
+
     return OrderCreateResponse(
         id=new_order.id,
         status=new_order.status,
