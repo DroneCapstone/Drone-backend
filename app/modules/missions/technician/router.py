@@ -20,6 +20,8 @@ from app.modules.missions.models import (
 from app.modules.system.models import Hub
 from app.modules.fleet.models import Drone, Battery, batteries_status
 from app.modules.auth.models import User
+from sqlalchemy.orm import aliased as _sa_aliased
+OriginHub = _sa_aliased(Hub, flat=True)
 
 # Bảng tra cứu mặc định (khớp 100% với 3 loại Drone và 3 loại Pin thực tế trong Database)
 DRONE_BATTERY_COMPATIBILITY = {
