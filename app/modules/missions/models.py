@@ -234,6 +234,8 @@ class Order(Base):
     # ── Aging Priority fields (NORMAL mode) ──────────────────────────────────
     is_aging_priority: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     aging_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # ── Cancellation ──────────────────────────────────────────────────────────
+    cancellation_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class MissionLeg(Base):
