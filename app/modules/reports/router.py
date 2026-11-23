@@ -422,3 +422,101 @@ async def get_cancellation_stats(
         "distribution": distribution,
         "top_reason": distribution[0]["reason"] if distribution else None,
     }
+
+
+# ── Dashboard Chart Data ──────────────────────────────────────────────────────
+
+@router.get(
+    "/chart/revenue",
+    summary="Dữ liệu biểu đồ doanh thu theo ngày (30 ngày gần nhất)",
+)
+async def get_revenue_chart(
+    days: int = 30,
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Admin] Dữ liệu doanh thu theo ngày cho biểu đồ FE.**
+
+    Trả về mảng `{date, revenue, mission_count}` cho `days` ngày gần nhất (mặc định 30).
+    FE dùng để vẽ line/bar chart doanh thu.
+    """
+    from sqlalchemy import func, cast, Date as SADate
+    from datetime import timedelta
+
+    days = max(7, min(days, 365))
+    cutoff = datetime.now() - timedelta(days=days)
+
+    rows = (await db.execute(
+        select(
+            cast(Mission.arrival_confirmed_at, SADate).label("day"),
+            func.coalesce(func.sum(Mission.delivery_fee), 0.0).label("revenue"),
+            func.count(Mission.id).label("mission_count"),
+        )
+        .where(
+            Mission.status.in_(_COMPLETED),
+            Mission.arrival_confirmed_at >= cutoff,
+        )
+        .group_by(cast(Mission.arrival_confirmed_at, SADate))
+        .order_by(cast(Mission.arrival_confirmed_at, SADate))
+    )).all()
+
+    return {
+        "days": days,
+        "data": [
+            {
+                "date": str(r.day),
+                "revenue": int(r.revenue or 0),
+                "mission_count": r.mission_count,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get(
+    "/chart/missions",
+    summary="Dữ liệu biểu đồ missions theo ngày (30 ngày gần nhất)",
+)
+async def get_missions_chart(
+    days: int = 30,
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Admin] Phân phối missions theo status theo ngày.**
+
+    Trả về mảng `{date, completed, failed, cancelled}` cho `days` ngày gần nhất.
+    """
+    from sqlalchemy import func, cast, Date as SADate, case
+    from datetime import timedelta
+
+    days = max(7, min(days, 365))
+    cutoff = datetime.now() - timedelta(days=days)
+
+    rows = (await db.execute(
+        select(
+            cast(Mission.scheduled_time, SADate).label("day"),
+            func.count(Mission.id).label("total"),
+            func.count(case((Mission.status.in_(_COMPLETED), 1))).label("completed"),
+            func.count(case((Mission.status == MissionStatus.FAILED, 1))).label("failed"),
+            func.count(case((Mission.status == MissionStatus.CANCELLED, 1))).label("cancelled"),
+        )
+        .where(Mission.scheduled_time >= cutoff)
+        .group_by(cast(Mission.scheduled_time, SADate))
+        .order_by(cast(Mission.scheduled_time, SADate))
+    )).all()
+
+    return {
+        "days": days,
+        "data": [
+            {
+                "date": str(r.day),
+                "total": r.total,
+                "completed": r.completed,
+                "failed": r.failed,
+                "cancelled": r.cancelled,
+            }
+            for r in rows
+        ],
+    }
