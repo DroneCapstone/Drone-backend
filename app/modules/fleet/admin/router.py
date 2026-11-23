@@ -1627,3 +1627,62 @@ async def update_battery_model(
     from app.modules.missions.bundle_service import invalidate_planning_metadata_caches
     invalidate_planning_metadata_caches()
     return cat
+
+
+# ── Drone Daily Stats ─────────────────────────────────────────────────────────
+
+@router.get(
+    "/drones/daily-stats",
+    summary="Thống kê hoạt động drone theo ngày",
+)
+async def get_drone_daily_stats(
+    drone_id: Optional[str] = Query(None, description="Filter theo drone_id cụ thể"),
+    days: int = Query(30, ge=1, le=365, description="Số ngày gần nhất"),
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Admin] Lịch sử hoạt động drone theo ngày.**
+
+    Trả về dữ liệu `{stat_date, drone_id, drone_name, mission_count, completed_count,
+    incident_count, total_distance_km, total_flight_min, total_energy_wh}`.
+
+    Dùng để vẽ trend chart utilization per drone.
+    """
+    from datetime import timedelta
+    from app.modules.fleet.models import DroneDailyStat
+
+    cutoff = datetime.now() - timedelta(days=days)
+
+    q = select(DroneDailyStat).where(DroneDailyStat.stat_date >= cutoff)
+    if drone_id:
+        q = q.where(DroneDailyStat.drone_id == drone_id)
+    q = q.order_by(DroneDailyStat.stat_date.desc(), DroneDailyStat.drone_id)
+
+    stats = (await db.execute(q)).scalars().all()
+
+    # Drone names
+    drone_ids = {s.drone_id for s in stats}
+    drone_name_map: dict[str, str] = {}
+    if drone_ids:
+        drones = (await db.execute(select(Drone).where(Drone.id.in_(drone_ids)))).scalars().all()
+        drone_name_map = {d.id: d.name for d in drones}
+
+    return {
+        "days": days,
+        "total_records": len(stats),
+        "data": [
+            {
+                "stat_date": s.stat_date.strftime("%Y-%m-%d") if s.stat_date else None,
+                "drone_id": s.drone_id,
+                "drone_name": drone_name_map.get(s.drone_id, s.drone_id),
+                "mission_count": s.mission_count,
+                "completed_count": s.completed_count,
+                "incident_count": s.incident_count,
+                "total_distance_km": s.total_distance_km,
+                "total_flight_min": s.total_flight_min,
+                "total_energy_wh": s.total_energy_wh,
+            }
+            for s in stats
+        ],
+    }
