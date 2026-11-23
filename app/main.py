@@ -27,7 +27,7 @@ from app.core.config import settings
 from app.database.db import async_engine, Base
 import app.modules.auth.models  # noqa: F401
 import app.modules.fleet.models  # noqa: F401
-import app.modules.missions.models  # noqa: F401
+import app.modules.missions.models  # noqa: F401 — includes DeliveryRating
 import app.modules.system.models  # noqa: F401
 import app.modules.inventory.models  # noqa: F401 — backward-compat, keeps old tables mapped
 import app.modules.supplies.models   # noqa: F401
