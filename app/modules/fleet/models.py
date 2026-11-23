@@ -129,6 +129,9 @@ class Drone(Base):
     current_hub_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     battery_level_pct: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     utilization_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # ── Preventive maintenance tracking ──────────────────────────────
+    total_flight_hours: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0.0")
+    last_maintenance_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     batteries = relationship("Battery", back_populates="drone")
 
