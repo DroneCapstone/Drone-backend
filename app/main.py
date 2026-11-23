@@ -43,6 +43,7 @@ from app.modules.system.router import router as system_router
 from app.modules.system.admin.router import router as system_admin_router
 from app.modules.system.notifications.router import router as notifications_router
 from app.modules.orders.router import router as orders_router
+from app.modules.orders.customer.addresses import router as addresses_router
 from app.modules.payments.router import router as payments_router
 from app.modules.chatbot.rag.router import router as rag_router
 from app.modules.reports.router import router as reports_router
@@ -273,6 +274,7 @@ app.include_router(system_router, prefix=settings.API_V1_STR)
 app.include_router(system_admin_router, prefix=settings.API_V1_STR)
 app.include_router(notifications_router, prefix=settings.API_V1_STR)
 app.include_router(orders_router, prefix=settings.API_V1_STR)
+app.include_router(addresses_router, prefix=settings.API_V1_STR)
 app.include_router(payments_router, prefix=settings.API_V1_STR)
 app.include_router(rag_router, prefix=settings.API_V1_STR)
 app.include_router(reports_router, prefix=settings.API_V1_STR)
