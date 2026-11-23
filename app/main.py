@@ -45,6 +45,7 @@ from app.modules.system.notifications.router import router as notifications_rout
 from app.modules.orders.router import router as orders_router
 from app.modules.payments.router import router as payments_router
 from app.modules.chatbot.rag.router import router as rag_router
+from app.modules.reports.router import router as reports_router
 
 # Developer Database API (dùng chung server, prefix /dev/db/...)
 from app.database.router import router as db_router
@@ -274,6 +275,7 @@ app.include_router(notifications_router, prefix=settings.API_V1_STR)
 app.include_router(orders_router, prefix=settings.API_V1_STR)
 app.include_router(payments_router, prefix=settings.API_V1_STR)
 app.include_router(rag_router, prefix=settings.API_V1_STR)
+app.include_router(reports_router, prefix=settings.API_V1_STR)
 app.include_router(db_router)
 
 # Tự động include các router của các roles
