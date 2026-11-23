@@ -148,3 +148,111 @@ async def export_revenue_csv(
 
     today = datetime.now().strftime("%Y%m%d")
     return _csv_response(rows, f"revenue_{today}.csv")
+
+
+# ── Missions CSV ──────────────────────────────────────────────────────────────
+
+@router.get(
+    "/missions.csv",
+    summary="Export danh sách missions (CSV)",
+    response_class=StreamingResponse,
+)
+async def export_missions_csv(
+    from_date: Optional[str] = Query(None, description="Từ ngày YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="Đến ngày YYYY-MM-DD"),
+    status: Optional[str] = Query(None, description="Filter theo status (Completed, Failed, ...)"),
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Admin] Export danh sách missions CSV.**
+
+    Mỗi dòng = 1 mission: id, order_id, drone_id, status, route, distance_km,
+    payload_kg, energy_wh, duration_min, departed_at, arrived_at, delivery_fee.
+
+    Filter theo `from_date` / `to_date` / `status`.
+    """
+    from app.modules.system.models import Hub
+    from app.modules.ai_predictions.models import AIPrediction
+
+    q = (
+        select(
+            Mission.id.label("mission_id"),
+            Mission.order_id,
+            Mission.drone_id,
+            Mission.status,
+            Mission.origin_hub_id,
+            Mission.destination_hub_id,
+            Mission.distance_m,
+            Mission.payload_weight,
+            Mission.delivery_fee,
+            Mission.departed_at,
+            Mission.arrived_at,
+            Mission.arrival_confirmed_at,
+            Mission.end_time,
+            Mission.scheduled_time,
+        )
+    )
+
+    dt_from = _parse_date(from_date)
+    dt_to   = _parse_date(to_date)
+
+    if dt_from:
+        q = q.where(Mission.scheduled_time >= dt_from)
+    if dt_to:
+        from datetime import timedelta
+        q = q.where(Mission.scheduled_time < dt_to + timedelta(days=1))
+    if status:
+        q = q.where(Mission.status.cast(type_=None).contains(status))
+
+    q = q.order_by(Mission.scheduled_time.desc().nullslast()).limit(5000)
+    missions = (await db.execute(q)).all()
+
+    hub_ids = {r.origin_hub_id for r in missions} | {r.destination_hub_id for r in missions}
+    hub_ids.discard(None)
+    hub_map: dict[int, str] = {}
+    if hub_ids:
+        hubs = (await db.execute(select(Hub).where(Hub.id.in_(hub_ids)))).scalars().all()
+        hub_map = {h.id: h.name for h in hubs}
+
+    # AI prediction for energy/duration
+    m_ids = [r.mission_id for r in missions]
+    pred_map: dict[str, dict] = {}
+    if m_ids:
+        preds = (await db.execute(
+            select(AIPrediction).where(AIPrediction.mission_id.in_(m_ids))
+        )).scalars().all()
+        for p in preds:
+            pred_map[str(p.mission_id)] = {
+                "energy_wh": round(float(p.estimated_energy_wh or 0), 1),
+                "duration_min": round(float(p.estimated_duration_m or 0), 1),
+            }
+
+    rows = []
+    for r in missions:
+        dep = r.departed_at
+        arr = r.arrived_at or r.end_time
+        duration_min = None
+        if dep and arr:
+            duration_min = round((arr - dep).total_seconds() / 60, 1)
+        pred = pred_map.get(str(r.mission_id), {})
+        rows.append({
+            "mission_id":        r.mission_id,
+            "order_id":          r.order_id or "",
+            "drone_id":          r.drone_id or "",
+            "status":            r.status.value if hasattr(r.status, "value") else str(r.status or ""),
+            "origin_hub":        hub_map.get(r.origin_hub_id, str(r.origin_hub_id or "")),
+            "destination_hub":   hub_map.get(r.destination_hub_id, str(r.destination_hub_id or "")),
+            "distance_km":       round(float(r.distance_m or 0) / 1000, 2),
+            "payload_kg":        round(float(r.payload_weight or 0), 2),
+            "delivery_fee_vnd":  int(r.delivery_fee or 0),
+            "estimated_energy_wh":    pred.get("energy_wh", ""),
+            "estimated_duration_min": pred.get("duration_min", ""),
+            "actual_duration_min":    duration_min or "",
+            "scheduled_at":      r.scheduled_time.strftime("%Y-%m-%d %H:%M") if r.scheduled_time else "",
+            "departed_at":       dep.strftime("%Y-%m-%d %H:%M") if dep else "",
+            "arrived_at":        arr.strftime("%Y-%m-%d %H:%M") if arr else "",
+        })
+
+    today = datetime.now().strftime("%Y%m%d")
+    return _csv_response(rows, f"missions_{today}.csv")
