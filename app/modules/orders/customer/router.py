@@ -898,3 +898,112 @@ async def get_mission_report(
         actuals=actuals,
         generated_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DELIVERY RATING
+# ══════════════════════════════════════════════════════════════════════
+
+from pydantic import BaseModel, Field as PydanticField, field_validator
+from app.modules.missions.models import DeliveryRating
+
+
+class RatingRequest(BaseModel):
+    rating: int = PydanticField(..., ge=1, le=5, description="Rating from 1 to 5 stars")
+    comment: Optional[str] = PydanticField(default=None, max_length=1000, description="Optional feedback comment")
+
+    @field_validator("rating")
+    @classmethod
+    def validate_rating(cls, v: int) -> int:
+        if v < 1 or v > 5:
+            raise ValueError("Rating must be between 1 and 5")
+        return v
+
+
+class RatingResponse(BaseModel):
+    id: int
+    order_id: str
+    rating: int
+    comment: Optional[str]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@router.post(
+    "/orders/{order_id}/rating",
+    response_model=RatingResponse,
+    status_code=201,
+    summary="Đánh giá trải nghiệm giao hàng (1-5 sao)",
+)
+async def submit_delivery_rating(
+    order_id: str,
+    body: RatingRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Customer API] Gửi đánh giá trải nghiệm sau khi nhận hàng.**
+
+    - Chỉ được đánh giá khi order ở trạng thái `DELIVERED_TO_HUB`.
+    - Mỗi đơn chỉ được đánh giá **1 lần**.
+    - `rating`: 1-5 sao. `comment`: tùy chọn, tối đa 1000 ký tự.
+    """
+    order = await db.get(Order, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.customer_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not your order")
+    if order.status != OrderStatus.DELIVERED_TO_HUB:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only rate orders with status DELIVERED_TO_HUB. Current: {order.status.value if order.status else 'unknown'}"
+        )
+
+    # Check already rated
+    existing = (await db.execute(
+        select(DeliveryRating).where(DeliveryRating.order_id == order_id)
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="You have already rated this order")
+
+    from app.core.timezone import get_vn_naive_datetime
+    now = get_vn_naive_datetime()
+
+    rating_obj = DeliveryRating(
+        order_id=order_id,
+        customer_id=str(current_user.id),
+        rating=body.rating,
+        comment=body.comment,
+        created_at=now,
+    )
+    db.add(rating_obj)
+    await db.commit()
+    await db.refresh(rating_obj)
+    return rating_obj
+
+
+@router.get(
+    "/orders/{order_id}/rating",
+    response_model=RatingResponse,
+    summary="Xem đánh giá của đơn hàng",
+)
+async def get_delivery_rating(
+    order_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """**[Customer API] Xem đánh giá đã gửi cho đơn hàng."""
+    order = await db.get(Order, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.customer_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not your order")
+
+    rating_obj = (await db.execute(
+        select(DeliveryRating).where(DeliveryRating.order_id == order_id)
+    )).scalar_one_or_none()
+    if not rating_obj:
+        raise HTTPException(status_code=404, detail="No rating found for this order")
+    return rating_obj
