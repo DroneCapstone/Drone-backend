@@ -278,3 +278,26 @@ class BatteryModelCatalog(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ── Drone Daily Stats ─────────────────────────────────────────────────────────
+
+class DroneDailyStat(Base):
+    """
+    Thống kê hoạt động drone theo ngày — được tính cuối mỗi ngày bởi worker.
+    """
+    __tablename__ = "drone_daily_stats"
+    __table_args__ = (
+        Index("idx_drone_daily_drone_date", "drone_id", "stat_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    drone_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    stat_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)   # date only (store as datetime)
+    mission_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    incident_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_distance_km: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_flight_min: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_energy_wh: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
