@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text, cast, String, and_, func
+from sqlalchemy import select, text, cast, String, and_, or_, func
 
 from app.core.timezone import get_vn_naive_datetime, get_vn_datetime
 
@@ -1430,14 +1430,19 @@ async def list_maintenance_alerts(
         .alias("latest_alerts")
     )
     
+    _closed_statuses = ["Dismissed", "DISMISSED", "Resolved", "RESOLVED"]
     query = (
         select(MaintenanceAlert)
         .outerjoin(Drone, MaintenanceAlert.drone_id == Drone.id)
         .where(
             MaintenanceAlert.work_order_id == None,
+            or_(MaintenanceAlert.status.is_(None), MaintenanceAlert.status.notin_(_closed_statuses)),
             MaintenanceAlert.id.in_(
                 select(func.max(MaintenanceAlert.id))
-                .where(MaintenanceAlert.work_order_id == None)
+                .where(
+                    MaintenanceAlert.work_order_id == None,
+                    or_(MaintenanceAlert.status.is_(None), MaintenanceAlert.status.notin_(_closed_statuses)),
+                )
                 .group_by(MaintenanceAlert.drone_id)
             ),
             Drone.status.in_([DroneStatus.MAINTENANCE, DroneStatus.AVAILABLE])  # ← Hiện cả 2
@@ -1458,11 +1463,14 @@ async def list_maintenance_alerts_history(
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Trả alerts đã được xử lý (đã có work order) tại hub của technician."""
+    """Trả alerts đã được xử lý (đã có work order hoặc đã Dismissed) tại hub của technician."""
     query = (
         select(MaintenanceAlert)
         .outerjoin(Drone, MaintenanceAlert.drone_id == Drone.id)
-        .where(MaintenanceAlert.work_order_id != None)
+        .where(or_(
+            MaintenanceAlert.work_order_id != None,
+            MaintenanceAlert.status.in_(["Dismissed", "DISMISSED"]),
+        ))
         .order_by(MaintenanceAlert.id.desc())
     )
     
@@ -1776,12 +1784,14 @@ async def delete_work_order(
     for bat in batteries_to_unlink:
         bat.work_order_id = None
 
-    # ── 2. Unlink MaintenanceAlert.work_order_id → alert trở về Pending ──────
+    # ── 2. Alert gắn với WO bị xóa → đánh dấu Dismissed (không quay lại danh sách Active) ──
     alerts_to_unlink = (await db.execute(
         select(MaintenanceAlert).where(MaintenanceAlert.work_order_id == work_order_id)
     )).scalars().all()
     for alert in alerts_to_unlink:
         alert.work_order_id = None
+        alert.status = "Dismissed"
+        alert.handled_by = str(user.id)
 
     # ── 3. Xóa WO ─────────────────────────────────────────────────────────────
     await db.flush()   # Apply unlink trước
