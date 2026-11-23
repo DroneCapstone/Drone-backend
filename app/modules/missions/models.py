@@ -254,3 +254,25 @@ class MissionLeg(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# ── Delivery Rating ───────────────────────────────────────────────────────────
+
+class DeliveryRating(Base):
+    """
+    Đánh giá trải nghiệm giao hàng của Customer sau khi đơn DELIVERED_TO_HUB.
+    Mỗi đơn chỉ được đánh giá 1 lần (unique constraint: order_id).
+    """
+    __tablename__ = "delivery_ratings"
+    __table_args__ = (
+        Index("idx_delivery_ratings_order", "order_id"),
+        Index("idx_delivery_ratings_customer", "customer_id"),
+        Index("idx_delivery_ratings_rating", "rating"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
+    customer_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)   # 1-5
+    comment: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
