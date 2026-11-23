@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from pydantic import BaseModel, Field as PydanticField, field_validator
 import uuid
 import math
 
@@ -1015,7 +1016,6 @@ async def get_mission_report(
 # DELIVERY RATING
 # ══════════════════════════════════════════════════════════════════════
 
-from pydantic import BaseModel, Field as PydanticField, field_validator
 from app.modules.missions.models import DeliveryRating
 
 
