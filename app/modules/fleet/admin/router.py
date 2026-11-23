@@ -925,6 +925,64 @@ DRONE_DEFAULT_COSTS = {
 }
 
 
+@router.get(
+    "/drones/maintenance-due",
+    summary="Danh sách drone cần bảo dưỡng định kỳ theo giờ bay",
+)
+async def get_drones_maintenance_due(
+    user: CurrentUser = Depends(allow_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    **[Admin API] Danh sách drone đang tiến gần hoặc vượt ngưỡng bảo dưỡng định kỳ.**
+
+    - `status = WARNING`: 40h ≤ giờ bay < 50h — sắp đến hạn.
+    - `status = OVERDUE`: giờ bay ≥ 50h — đã quá hạn, cần bảo dưỡng ngay.
+    - Ngưỡng: 40h warning / 50h overdue (định nghĩa trong preventive_maintenance_scheduler).
+    """
+    from app.modules.fleet.technician.service import WARNING_THRESHOLD_HOURS, MAINTENANCE_THRESHOLD_HOURS
+    from app.modules.system.models import Hub
+
+    result = await db.execute(
+        select(Drone).where(
+            Drone.total_flight_hours >= WARNING_THRESHOLD_HOURS
+        ).order_by(Drone.total_flight_hours.desc())
+    )
+    drones = result.scalars().all()
+
+    hub_ids = {d.current_hub_id for d in drones if d.current_hub_id}
+    hub_map = {}
+    if hub_ids:
+        hubs = (await db.execute(select(Hub).where(Hub.id.in_(hub_ids)))).scalars().all()
+        hub_map = {h.id: h.name for h in hubs}
+
+    items = []
+    for d in drones:
+        hours = float(d.total_flight_hours or 0.0)
+        is_overdue = hours >= MAINTENANCE_THRESHOLD_HOURS
+        items.append({
+            "drone_id": d.id,
+            "drone_name": d.name,
+            "drone_model": d.model,
+            "serial_number": d.serial_number,
+            "hub_id": d.current_hub_id,
+            "hub_name": hub_map.get(d.current_hub_id) if d.current_hub_id else None,
+            "total_flight_hours": round(hours, 2),
+            "maintenance_threshold_hours": MAINTENANCE_THRESHOLD_HOURS,
+            "hours_until_due": round(max(0.0, MAINTENANCE_THRESHOLD_HOURS - hours), 2),
+            "status": "OVERDUE" if is_overdue else "WARNING",
+            "last_maintenance_at": d.last_maintenance_at.isoformat() if d.last_maintenance_at else None,
+            "drone_status": d.status.value if hasattr(d.status, "value") else str(d.status),
+        })
+
+    return {
+        "total": len(items),
+        "overdue_count": sum(1 for i in items if i["status"] == "OVERDUE"),
+        "warning_count": sum(1 for i in items if i["status"] == "WARNING"),
+        "drones": items,
+    }
+
+
 @router.post("/drones", response_model=DroneResponse, status_code=201, summary="Thêm drone mới vào kho")
 async def create_drone(
     body: DroneCreate,
