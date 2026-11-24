@@ -509,7 +509,7 @@ async def cancel_order_with_reason(
     **[Customer API] Hủy đơn hàng kèm lý do.**
 
     Chỉ được hủy khi:
-    - Order đang ở trạng thái `PENDING` hoặc `AWAITING_DROP_OFF`.
+    - Order đang ở trạng thái `PENDING`.
     - Chưa thanh toán (UNPAID/PENDING payment).
     - Lý do phải thuộc danh sách: `changed_my_mind`, `wrong_information`, `price_too_high`,
       `found_alternative`, `delivery_too_slow`, `other`.
@@ -530,10 +530,10 @@ async def cancel_order_with_reason(
             status_code=400,
             detail="Paid orders cannot be cancelled directly. Contact support for a refund."
         )
-    if order.status not in (OrderStatus.PENDING, OrderStatus.AWAITING_DROP_OFF):
+    if order.status != OrderStatus.PENDING:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot cancel order in '{order.status.value}' status."
+            detail=f"Cannot cancel order in '{order.status.value}' status. Only PENDING orders can be cancelled."
         )
 
     # Đã lập mission (bất kỳ trạng thái nào chưa hủy) thì không cho customer hủy nữa
