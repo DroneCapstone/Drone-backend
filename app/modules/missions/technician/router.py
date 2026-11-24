@@ -25,8 +25,8 @@ OriginHub = _sa_aliased(Hub, flat=True)
 
 # Bảng tra cứu mặc định (khớp 100% với 3 loại Drone và 3 loại Pin thực tế trong Database)
 DRONE_BATTERY_COMPATIBILITY = {
-    "DJI Matrice 100": ["TB48D"],
-    "Aurelia X6 Pro": ["Aurelia UltraPower"],
+    "DJI Matrice 100": ["DJI TB48D"],
+    "Aurelia X6 Pro": ["Aurelia UltraPower 12S"],
     "DJI FlyCart 15 Heavy": ["DJI DB2000"],
 }
 

@@ -450,8 +450,14 @@ async def validate_bundle_orders(
         clean_drone_id = str(drone_id).strip()
         drone_obj = await db.get(Drone, clean_drone_id)
         if not drone_obj and clean_drone_id.isdigit():
-            alt_id = f"DRN-{int(clean_drone_id):04d}"
+            num_suffix = f"{int(clean_drone_id):04d}"
+            alt_id = f"DRN-{num_suffix}"
             drone_obj = await db.get(Drone, alt_id)
+            if not drone_obj:
+                d_res = await db.execute(
+                    select(Drone).where(Drone.id.like(f"%-DRN{num_suffix}")).limit(1)
+                )
+                drone_obj = d_res.scalar_one_or_none()
 
         if not drone_obj:
             raise HTTPException(status_code=404, detail=f"Drone '{drone_id}' not found")
@@ -520,8 +526,14 @@ async def get_post_analyze_bundle_candidates(
     clean_drone_id = str(drone_id).strip()
     drone_obj = await db.get(Drone, clean_drone_id)
     if not drone_obj and clean_drone_id.isdigit():
-        alt_id = f"DRN-{int(clean_drone_id):04d}"
+        num_suffix = f"{int(clean_drone_id):04d}"
+        alt_id = f"DRN-{num_suffix}"
         drone_obj = await db.get(Drone, alt_id)
+        if not drone_obj:
+            d_res = await db.execute(
+                select(Drone).where(Drone.id.like(f"%-DRN{num_suffix}")).limit(1)
+            )
+            drone_obj = d_res.scalar_one_or_none()
 
     if not drone_obj:
         raise HTTPException(status_code=404, detail=f"Drone '{drone_id}' not found")

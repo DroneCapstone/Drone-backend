@@ -8,8 +8,10 @@
 > **Lưu ý về Múi giờ (Timezone)**: 
 > Toàn bộ các trường kiểu thời gian (`DATETIME`, `TIMESTAMP`, `TIMESTAMPTZ`) trong hệ thống được quản lý, khởi tạo và ghi nhận đồng bộ theo múi giờ chuẩn Việt Nam (GMT+7 / `Asia/Ho_Chi_Minh`) thông qua module `app.core.timezone`.
 
-> **Lưu ý về Định dạng Mã Drone (Drone ID Format)**:
-> Hệ thống sử dụng định dạng mã chuỗi chuẩn `DRN-XXXX` (ví dụ `DRN-0001`, `DRN-0002`). Toàn bộ khóa chính `drones.id` và các khóa ngoại/tham chiếu `drone_id` ở các bảng liên quan đều sử dụng kiểu `VARCHAR(50)`.
+> **Lưu ý về Định dạng Mã Drone & Pin (Drone & Battery ID Format)**:
+> - **Drone (`drones.id`)**: `{ModelCode}-DRNXXXX` (`M100-DRN0001` cho DJI Matrice 100, `X6P-DRN0002` cho Aurelia X6 Pro, `FC15-DRN0005` cho DJI FlyCart 15 Heavy).
+> - **Battery (`batteries.id`)**: `{BatteryCode}-BATXXXX` (`TB48-BAT0001` cho DJI TB48D, `UP12-BAT0002` cho Aurelia UltraPower 12S, `DB20-BAT0005` cho DJI DB2000).
+> - Toàn bộ khóa chính và các cột tham chiếu `drone_id` / `battery_id` ở các bảng liên quan đều sử dụng kiểu `VARCHAR(50)`.
 
 ---
 
@@ -59,16 +61,16 @@
 ### 4. Bảng batteries
 | Cột | Kiểu dữ liệu | Khóa / Ràng buộc |
 | :--- | :--- | :--- |
-| id | VARCHAR(50) | **PK**, Non-nullable |
-| drone_id | VARCHAR(50) | **FK** (`drones.id`), Nullable |
-| serial_number | VARCHAR(100) | Unique, Non-nullable |
+| id | VARCHAR(50) | **PK**, Non-nullable (Chuẩn `{BatteryCode}-BATXXXX`: `TB48-BAT0001`, `UP12-BAT0002`, `DB20-BAT0005`) |
+| drone_id | VARCHAR(50) | **FK** (`drones.id`), Nullable (`ON UPDATE CASCADE`) |
+| serial_number | VARCHAR(100) | Unique, Non-nullable (`SN-BAT-XXXX`) |
 | capacity_wh | FLOAT | Non-nullable |
 | status | VARCHAR(20) | Non-nullable (`batteries_status`) |
 | current_hub_id | INTEGER | **FK** (`hubs.id`), Nullable |
 | charge_level_pct | BIGINT | Nullable |
 | create_at | TIMESTAMPTZ | Nullable |
 | update_at | TIMESTAMPTZ | Nullable |
-| battery_model | VARCHAR(100) | Nullable |
+| battery_model | VARCHAR(100) | Nullable (`DJI TB48D` / `Aurelia UltraPower 12S` / `DJI DB2000`) |
 | last_charged_at | TIMESTAMP | Nullable |
 | work_order_id | INTEGER | **FK** (`work_orders.id`), Nullable |
 
@@ -89,10 +91,10 @@ Catalog model pin chuẩn với giá nhập và danh sách dòng drone tương t
 ### 6. Bảng drones
 | Cột | Kiểu dữ liệu | Khóa / Ràng buộc |
 | :--- | :--- | :--- |
-| id | VARCHAR(50) | **PK**, Non-nullable (Chuẩn `DRN-XXXX`) |
+| id | VARCHAR(50) | **PK**, Non-nullable (Chuẩn `{ModelCode}-DRNXXXX`: `M100-DRN0001`, `X6P-DRN0002`, `FC15-DRN0005`) |
 | name | VARCHAR(100) | Non-nullable |
 | model | VARCHAR(100) | Non-nullable |
-| serial_number | VARCHAR(100) | Unique, Non-nullable |
+| serial_number | VARCHAR(100) | Unique, Non-nullable (`SN-DRN-XXXX`) |
 | payload_capacity_kg | FLOAT | Non-nullable |
 | max_speed | FLOAT | Non-nullable |
 | operational_status | VARCHAR(20) | Non-nullable (`drone_status`) |
@@ -101,9 +103,9 @@ Catalog model pin chuẩn với giá nhập và danh sách dòng drone tương t
 | utilization_pct | FLOAT | Nullable |
 
 > **Quy tắc chuẩn hóa tên hiển thị Drone (drones.name):**
-> - **Light (<= 1.0kg - DJI Matrice 100)**: Swift XX (Swift 01 - Swift 40)
-> - **Medium (<= 5.0kg - Aurelia X6 Pro)**: Falcon XX (Falcon 01 - Falcon 33)
-> - **Heavy (> 5.0kg - DJI FlyCart 15 Heavy)**: Eagle XX (Eagle 01 - Eagle 32)
+> - **Light (<= 1.0kg - DJI Matrice 100 / Mã ID `M100`)**: Swift XX (Swift 01 - Swift 72)
+> - **Medium (<= 5.0kg - Aurelia X6 Pro / Mã ID `X6P`)**: Falcon XX (Falcon 01 - Falcon 57)
+> - **Heavy (> 5.0kg - DJI FlyCart 15 Heavy / Mã ID `FC15`)**: Eagle XX (Eagle 01 - Eagle 56)
 
 ### 7. Bảng hubs
 | Cột | Kiểu dữ liệu | Khóa / Ràng buộc |
@@ -431,6 +433,7 @@ Yêu cầu thay thế pin hoặc linh kiện từ Technician (được Admin c�
   - `app/shared/database/migrate_logs_schema.py`: Tách `audit_logs` thành `activity_logs` (user actions) và `system_logs` (cron/background events).
   - `app/shared/database/migrate_battery_catalog.py`: Thêm bảng `battery_model_catalog` (seed 3 model pin chuẩn: `TB48D` 130Wh, `Aurelia UltraPower` 444Wh, `DJI DB2000` 980Wh).
   - `app/shared/database/migrate_replacement_requests.py`: Thêm bảng `replacement_requests` và đồng bộ `orders.refund_status` (Chuẩn hóa **22 bảng chính thức**, không còn cột `orders.sender_email`).
+  - Chuẩn hóa ID & Model Pin toàn hệ thống: `drones.id` → `{M100|X6P|FC15}-DRNXXXX`, `batteries.id` → `{TB48|UP12|DB20}-BATXXXX`, chuẩn hóa `drones.name` (`Swift/Falcon/Eagle`), `serial_number` (`SN-DRN-XXXX`/`SN-BAT-XXXX`), đồng bộ `battery_model` & `battery_model_catalog` (`DJI TB48D`, `Aurelia UltraPower 12S`, `DJI DB2000`), bật `ON UPDATE CASCADE` cho `missions_battery_id_fkey` và `mission_legs_battery_id_fkey`, và đồng bộ toàn bộ cột tham chiếu/nhật ký liên quan.
 
 ### 3. Performance Indexes (Done-Backend-v8)
 - Đã tạo 25 non-blocking indexes (`CREATE INDEX CONCURRENTLY IF NOT EXISTS`) trên các bảng nóng và đồng bộ vào SQLAlchemy models:
