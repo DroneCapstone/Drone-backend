@@ -38,6 +38,7 @@ from app.modules.missions.bundle_service import (
     validate_bundle_orders,
     get_post_analyze_bundle_candidates,
     resolve_effective_origin_hub_id,
+    resolve_effective_origin_from_missions,
     predict_flight_energy_cached,
     get_compatible_battery_models_map,
     resolve_compatible_models_from_map,
@@ -1242,54 +1243,27 @@ async def _get_reserved_battery_info_map(
     return info_map
 
 
-async def _get_reserved_batteries_and_virtual_holds(
-    db: AsyncSession,
-    relay_hub_ids: Optional[list[int]] = None,
+_ACTIVE_HOLD_MISSION_STATUSES = [
+    MissionStatus.SCHEDULED,
+    MissionStatus.IN_PROGRESS,
+    MissionStatus.APPROVED,
+    MissionStatus.FLYING,
+    MissionStatus.ACTIVE_MISSION,
+]
+
+
+def _parse_reserved_and_holds_rows(
+    rows,
+    relay_hub_set: set[int],
     compatible_models: Optional[list[str]] = None,
-    exclude_order_id: Optional[str] = None,
-    exclude_mission_id: Optional[str] = None,
     busy_drone_ids_out: Optional[set[str]] = None,
 ) -> tuple[set[str], dict[int, int]]:
-    """
-    [PERF NOTE] Trả về reserved_battery_ids và held_count_by_hub (kèm busy_drone_ids_out nếu cần)
-    trong 1 query SQL duy nhất; không tách thành nhiều query Mission/MissionLeg riêng lẻ.
-    """
-    active_statuses = [
-        MissionStatus.SCHEDULED,
-        MissionStatus.IN_PROGRESS,
-        MissionStatus.APPROVED,
-        MissionStatus.FLYING,
-        MissionStatus.ACTIVE_MISSION,
-    ]
-    relay_hub_set = set(relay_hub_ids) if relay_hub_ids else set()
-
-    stmt = (
-        select(
-            Mission.id,
-            Mission.drone_id,
-            Mission.battery_id,
-            MissionLeg.id,
-            MissionLeg.battery_id,
-            MissionLeg.sequence_no,
-            MissionLeg.status,
-            MissionLeg.from_hub_id,
-            Drone.model,
-        )
-        .outerjoin(MissionLeg, MissionLeg.mission_id == Mission.id)
-        .outerjoin(Drone, Mission.drone_id == Drone.id)
-        .where(Mission.status.in_(active_statuses))
-    )
-    if exclude_order_id:
-        stmt = stmt.where(Mission.order_id != exclude_order_id)
-    if exclude_mission_id:
-        stmt = stmt.where(Mission.id != exclude_mission_id)
-
-    res = await db.execute(stmt)
+    """Extract reserved battery IDs, relay virtual-hold counts, and optional busy drone IDs from Mission/MissionLeg rows."""
     reserved_battery_ids: set[str] = set()
     held_count_by_hub: dict[int, int] = {}
     seen_hold_leg_ids: set[int] = set()
 
-    for _, m_drone_id, m_bat_id, leg_id, leg_bat_id, leg_seq, leg_stat, from_hub_id, other_drone_model in res.all():
+    for _, m_drone_id, m_bat_id, leg_id, leg_bat_id, leg_seq, leg_stat, from_hub_id, other_drone_model in rows:
         if busy_drone_ids_out is not None and m_drone_id is not None:
             busy_drone_ids_out.add(m_drone_id)
         if m_bat_id:
@@ -1315,6 +1289,50 @@ async def _get_reserved_batteries_and_virtual_holds(
                 held_count_by_hub[from_hub_id] = held_count_by_hub.get(from_hub_id, 0) + 1
 
     return reserved_battery_ids, held_count_by_hub
+
+
+async def _get_reserved_batteries_and_virtual_holds(
+    db: AsyncSession,
+    relay_hub_ids: Optional[list[int]] = None,
+    compatible_models: Optional[list[str]] = None,
+    exclude_order_id: Optional[str] = None,
+    exclude_mission_id: Optional[str] = None,
+    busy_drone_ids_out: Optional[set[str]] = None,
+) -> tuple[set[str], dict[int, int]]:
+    """
+    [PERF NOTE] Trả về reserved_battery_ids và held_count_by_hub (kèm busy_drone_ids_out nếu cần)
+    trong 1 query SQL duy nhất; không tách thành nhiều query Mission/MissionLeg riêng lẻ.
+    """
+    relay_hub_set = set(relay_hub_ids) if relay_hub_ids else set()
+
+    stmt = (
+        select(
+            Mission.id,
+            Mission.drone_id,
+            Mission.battery_id,
+            MissionLeg.id,
+            MissionLeg.battery_id,
+            MissionLeg.sequence_no,
+            MissionLeg.status,
+            MissionLeg.from_hub_id,
+            Drone.model,
+        )
+        .outerjoin(MissionLeg, MissionLeg.mission_id == Mission.id)
+        .outerjoin(Drone, Mission.drone_id == Drone.id)
+        .where(Mission.status.in_(_ACTIVE_HOLD_MISSION_STATUSES))
+    )
+    if exclude_order_id:
+        stmt = stmt.where(Mission.order_id != exclude_order_id)
+    if exclude_mission_id:
+        stmt = stmt.where(Mission.id != exclude_mission_id)
+
+    res = await db.execute(stmt)
+    return _parse_reserved_and_holds_rows(
+        rows=res.all(),
+        relay_hub_set=relay_hub_set,
+        compatible_models=compatible_models,
+        busy_drone_ids_out=busy_drone_ids_out,
+    )
 
 
 async def _resolve_drone_battery_capacity_wh(
@@ -1973,22 +1991,61 @@ async def compute_mission_routes_internal(
             pass
 
     _set_zone("ZONE 01: Kiểm tra Order & Thông tin Hub xuất phát - đích")
-    if "eff_origin_hub_id" in ctx:
-        eff_origin_hub_id = ctx["eff_origin_hub_id"]
-    else:
-        eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
-    if not eff_origin_hub_id or not order.destination_hub_id:
-        raise HTTPException(status_code=400, detail="Order is missing Origin Hub or Destination Hub information")
-
-    _set_zone("ZONE 02: Nạp đồ thị mạng lưới Hubs & Kho Pin ACTIVE")
-    # 1. Get all active hubs (hỗ trợ cả 'Active' và 'ACTIVE')
     if "hubs" in ctx and ctx["hubs"] is not None:
         hubs = list(ctx["hubs"])
     else:
         all_cached_hubs = await get_all_hubs_cached(db)
         hubs = [h for h in all_cached_hubs if (h.status or "").lower() == "active"] or list(all_cached_hubs)
     hub_dict = {h.id: h for h in hubs}
+    all_hub_ids = [h.id for h in hubs]
 
+    _need_origin = "eff_origin_hub_id" not in ctx
+    _need_holds = not ("reserved_battery_ids" in ctx and "held_count_by_hub" in ctx)
+
+    if _need_origin and _need_holds:
+        # [PERF] Gộp kiểm tra replan của Order + kiểm tra giữ chỗ Pin active thành 1 SQL duy nhất
+        combined_m_stmt = (
+            select(
+                Mission,
+                MissionLeg.id,
+                MissionLeg.battery_id,
+                MissionLeg.sequence_no,
+                MissionLeg.status,
+                MissionLeg.from_hub_id,
+                Drone.model,
+            )
+            .outerjoin(MissionLeg, MissionLeg.mission_id == Mission.id)
+            .outerjoin(Drone, Mission.drone_id == Drone.id)
+            .where(or_(Mission.order_id == order.id, Mission.status.in_(_ACTIVE_HOLD_MISSION_STATUSES)))
+            .order_by(Mission.id.desc())
+        )
+        combined_rows = (await db.execute(combined_m_stmt)).all()
+        order_missions_map: dict[str, Mission] = {}
+        active_hold_rows = []
+        active_hold_set = set(_ACTIVE_HOLD_MISSION_STATUSES)
+        for m_obj, leg_id, leg_bat_id, leg_seq, leg_stat, from_hub_id, d_model in combined_rows:
+            if m_obj.order_id == order.id:
+                order_missions_map.setdefault(m_obj.id, m_obj)
+            elif m_obj.status in active_hold_set:
+                active_hold_rows.append(
+                    (m_obj.id, m_obj.drone_id, m_obj.battery_id, leg_id, leg_bat_id, leg_seq, leg_stat, from_hub_id, d_model)
+                )
+        eff_origin_hub_id, _ = resolve_effective_origin_from_missions(order, list(order_missions_map.values()))
+        reserved_battery_ids, held_count_by_hub = _parse_reserved_and_holds_rows(
+            rows=active_hold_rows,
+            relay_hub_set=set(all_hub_ids),
+            compatible_models=[],
+        )
+    else:
+        if "eff_origin_hub_id" in ctx:
+            eff_origin_hub_id = ctx["eff_origin_hub_id"]
+        else:
+            eff_origin_hub_id, _ = await resolve_effective_origin_hub_id(db, order)
+
+    if not eff_origin_hub_id or not order.destination_hub_id:
+        raise HTTPException(status_code=400, detail="Order is missing Origin Hub or Destination Hub information")
+
+    _set_zone("ZONE 02: Nạp đồ thị mạng lưới Hubs & Kho Pin ACTIVE")
     origin_hub = hub_dict.get(eff_origin_hub_id) or await db.get(Hub, eff_origin_hub_id)
     dest_hub = hub_dict.get(order.destination_hub_id) or await db.get(Hub, order.destination_hub_id)
     if not origin_hub or not dest_hub:
@@ -2013,18 +2070,17 @@ async def compute_mission_routes_internal(
     all_batteries = [b for b in all_active_batteries if b.drone_id is None]
 
     _set_zone("ZONE 03: Kiểm tra giữ chỗ Pin (Virtual Holds)")
-    # 3. Lấy danh sách pin đã bị giữ chỗ bởi các Mission/MissionLeg đang hoạt động khác
-    all_hub_ids = [h.id for h in hubs]
-    if "reserved_battery_ids" in ctx and "held_count_by_hub" in ctx:
-        reserved_battery_ids = ctx["reserved_battery_ids"]
-        held_count_by_hub = ctx["held_count_by_hub"]
-    else:
-        reserved_battery_ids, held_count_by_hub = await _get_reserved_batteries_and_virtual_holds(
-            db=db,
-            relay_hub_ids=all_hub_ids,
-            compatible_models=[],
-            exclude_order_id=order.id,
-        )
+    if not (_need_origin and _need_holds):
+        if "reserved_battery_ids" in ctx and "held_count_by_hub" in ctx:
+            reserved_battery_ids = ctx["reserved_battery_ids"]
+            held_count_by_hub = ctx["held_count_by_hub"]
+        else:
+            reserved_battery_ids, held_count_by_hub = await _get_reserved_batteries_and_virtual_holds(
+                db=db,
+                relay_hub_ids=[h.id for h in hubs],
+                compatible_models=[],
+                exclude_order_id=order.id,
+            )
 
     if "compat_models_map" in ctx and ctx["compat_models_map"] is not None:
         _compat_models_map = ctx["compat_models_map"]
@@ -4232,12 +4288,25 @@ async def analyze_mission_planning(
     zone_tracker = {"current": "ZONE 01: Validate Order & Origin/Destination Hubs"}
     try:
         clean_order_id = str(request.orderId).strip() if request.orderId else request.orderId
-        order = await db.get(Order, clean_order_id)
+        clean_drone_id = str(request.droneId).strip() if request.droneId is not None else None
+        requested_battery_id = (request.batteryId or request.battery_id or "").strip() or None
+
+        preloaded_drone = None
+        if clean_drone_id:
+            pair_row = (
+                await db.execute(
+                    select(Order, Drone)
+                    .outerjoin(Drone, Drone.id == clean_drone_id)
+                    .where(Order.id == clean_order_id)
+                )
+            ).first()
+            order = pair_row[0] if pair_row else None
+            preloaded_drone = pair_row[1] if pair_row else None
+        else:
+            order = await db.get(Order, clean_order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
 
-        clean_drone_id = str(request.droneId).strip() if request.droneId is not None else None
-        requested_battery_id = (request.batteryId or request.battery_id or "").strip() or None
         total_bundle_payload = None
         if request.bundledOrderIds:
             all_bundle_ids = [clean_order_id] + [str(x).strip() for x in request.bundledOrderIds if str(x).strip()]
@@ -4246,6 +4315,7 @@ async def analyze_mission_planning(
                 raise HTTPException(status_code=400, detail=val_res["message"])
             total_bundle_payload = val_res["total_payload_kg"]
 
+        analyze_ctx = {"drones_by_id": {preloaded_drone.id: preloaded_drone}} if preloaded_drone is not None else None
         routes_schemas, raw_data_list = await compute_mission_routes_internal(
             db=db,
             order=order,
@@ -4255,6 +4325,7 @@ async def analyze_mission_planning(
             override_payload_kg=total_bundle_payload,
             recommend_mode=getattr(request, "recommend_mode", "AUTO"),
             zone_tracker=zone_tracker,
+            preloaded_context=analyze_ctx,
         )
 
         # Lưu cache kết quả phân tích để bước Create/Assign Mission tái sử dụng ngay mà không chạy lại từ đầu
@@ -4830,9 +4901,15 @@ async def _create_mission_internal(
     3. Gửi email ở nền (_schedule_mission_email_background), không block response API.
     """
     clean_order_id = request.orderId.strip() if request.orderId else request.orderId
-    order = await db.get(Order, clean_order_id)
-    if not order:
+    od_res = await db.execute(
+        select(Order, Drone)
+        .outerjoin(Drone, Drone.id == request.droneId)
+        .where(Order.id == clean_order_id)
+    )
+    od_row = od_res.first()
+    if not od_row:
         raise HTTPException(status_code=404, detail="Order not found")
+    order, drone = od_row[0], od_row[1]
 
     if order.payment_status != PaymentStatus.PAID:
         raise HTTPException(status_code=400, detail="Order has not been paid")
@@ -4852,13 +4929,41 @@ async def _create_mission_internal(
     }
     active_status_list = list(active_statuses)
 
-    # Gộp check Order active mission, Order incident chưa thu hồi, Drone bận, và eff_origin_hub_id trong 1 query
+    # Gộp check Order active mission, Order incident chưa thu hồi, Drone bận, eff_origin_hub_id, và reserved batteries trong 1 query
     rel_missions_res = await db.execute(
-        select(Mission)
-        .where(or_(Mission.order_id == order.id, Mission.drone_id == request.droneId))
+        select(
+            Mission,
+            MissionLeg.id,
+            MissionLeg.battery_id,
+            MissionLeg.sequence_no,
+            MissionLeg.status,
+            MissionLeg.from_hub_id,
+        )
+        .outerjoin(MissionLeg, MissionLeg.mission_id == Mission.id)
+        .where(
+            or_(
+                Mission.order_id == order.id,
+                Mission.drone_id == request.droneId,
+                Mission.status.in_(_ACTIVE_HOLD_MISSION_STATUSES),
+            )
+        )
         .order_by(Mission.id.desc())
     )
-    rel_missions = rel_missions_res.scalars().all()
+    rel_rows = rel_missions_res.all()
+    seen_missions: dict[str, Mission] = {}
+    hold_rows = []
+    for m_obj, leg_id, leg_bat_id, leg_seq, leg_stat, from_hub_id in rel_rows:
+        if m_obj.id not in seen_missions:
+            seen_missions[m_obj.id] = m_obj
+        if m_obj.status in active_statuses:
+            hold_rows.append(
+                (m_obj.id, m_obj.drone_id, m_obj.battery_id, leg_id, leg_bat_id, leg_seq, leg_stat, from_hub_id, None)
+            )
+
+    rel_missions = [
+        m_obj for m_obj in seen_missions.values()
+        if m_obj.order_id == order.id or m_obj.drone_id == request.droneId
+    ]
     order_missions = [m for m in rel_missions if m.order_id == order.id]
 
     if any(m.status in active_statuses for m in order_missions):
@@ -4877,7 +4982,6 @@ async def _create_mission_internal(
             detail="A previous flight for this order encountered an incident or disconnection, and a Technician has not yet confirmed drone/package recovery at a hub. Please wait for the Technician to confirm recovery via confirm-arrival before creating a replacement mission."
         )
 
-    drone = await db.get(Drone, request.droneId)
     if not drone:
         raise HTTPException(status_code=404, detail="Drone not found")
 
@@ -4935,7 +5039,10 @@ async def _create_mission_internal(
                     bundled_order_objs.append(b_by_id[bid])
 
     compat_models_map = await get_compatible_battery_models_map(db)
-    reserved_bat_ids, _ = await _get_reserved_batteries_and_virtual_holds(db)
+    reserved_bat_ids, _ = _parse_reserved_and_holds_rows(
+        rows=hold_rows,
+        relay_hub_set=set(),
+    )
 
     preloaded_fast_bats: dict[str, Battery] = {}
     preloaded_drone_id: Optional[str] = None
@@ -5303,18 +5410,22 @@ async def _create_mission_internal(
         if o_item.receiver_email:
             emails_to_send.append((o_item.receiver_email, o_item.id))
 
-    # 6. Notify Technicians at origin hub: new mission assigned
+    hub_list = await get_all_hubs_cached(db)
+    hub_by_id = {h.id: h for h in hub_list}
+
+    # 6. Notify Technicians at origin hub: new mission assigned (strictly inside ACID tx)
     try:
         from app.modules.auth.models import User as _TUser, ROLE_NAME_TO_ID as _ROLE_MAP
         from app.shared.roles import UserRole as _TRole
         _tech_role_id = _ROLE_MAP.get(_TRole.TECHNICIAN)
         if mission.origin_hub_id and _tech_role_id:
-            _origin_hub = await db.get(Hub, mission.origin_hub_id)
+            _origin_hub_id_int = int(mission.origin_hub_id)
+            _origin_hub = hub_by_id.get(_origin_hub_id_int)
             _origin_hub_name = _origin_hub.name if _origin_hub else f"Hub #{mission.origin_hub_id}"
             _tech_res = await db.execute(
                 select(_TUser.id).where(
                     _TUser.role_id == _tech_role_id,
-                    _TUser.hub_id == str(mission.origin_hub_id),
+                    _TUser.hub_id == _origin_hub_id_int,
                 )
             )
             for _tid in _tech_res.scalars().all():
@@ -5344,9 +5455,6 @@ async def _create_mission_internal(
             mission_id=mission.id,
             frontend_url=settings.FRONTEND_URL,
         )
-
-    hub_list = await get_all_hubs_cached(db)
-    hub_by_id = {h.id: h for h in hub_list}
     return _build_created_mission_response(
         mission=mission,
         drone=drone,

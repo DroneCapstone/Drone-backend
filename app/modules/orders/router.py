@@ -15,6 +15,7 @@ from app.modules.system.models import Hub
 from app.modules.fleet.models import Drone, DroneStatus, Battery, batteries_status, compute_battery_available_status
 from app.modules.missions.bundle_service import (
     resolve_effective_origin_hub_id,
+    resolve_effective_origin_from_missions,
     predict_flight_energy_cached,
     get_compatible_battery_models_map,
     resolve_compatible_models_from_map,
@@ -933,10 +934,74 @@ async def get_eligible_batteries_for_order(
       chưa bị giữ chỗ bởi nhiệm vụ khác, kèm theo năng lượng thực tế (`available_energy_wh`) để phân tích tuyến đường AI.
     """
     order_id = order_id.strip()
-    order = await db.get(Order, order_id)
+    # [PERF] Gộp truy vấn Order + Drone thành 1 lượt SQL duy nhất
+    pair_res = await db.execute(
+        select(Order, Drone)
+        .outerjoin(Drone, Drone.id == drone_id)
+        .where(Order.id == order_id)
+    )
+    pair_row = pair_res.first()
+    order = pair_row[0] if pair_row else None
+    drone = pair_row[1] if pair_row else None
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    eff_origin_id, _ = await resolve_effective_origin_hub_id(db, order)
+    if not drone:
+        raise HTTPException(status_code=404, detail="Drone not found")
+
+    # [PERF] Gộp 2 query missions (kiểm tra replan của Order + giữ chỗ pin active) thành 1 SQL duy nhất
+    active_list = list(ACTIVE_MISSION_STATUSES)
+    combined_m_stmt = (
+        select(
+            Mission,
+            MissionLeg.battery_id,
+            MissionLeg.sequence_no,
+            MissionLeg.status,
+        )
+        .outerjoin(
+            MissionLeg,
+            and_(
+                MissionLeg.mission_id == Mission.id,
+                MissionLeg.status.in_([MissionLegStatus.PENDING, MissionLegStatus.IN_PROGRESS]),
+                MissionLeg.battery_id.is_not(None),
+            ),
+        )
+        .where(
+            or_(
+                Mission.order_id == order_id,
+                Mission.status.in_(active_list),
+            )
+        )
+        .order_by(Mission.id.desc())
+    )
+    combined_rows = (await db.execute(combined_m_stmt)).all()
+
+    order_missions_by_id: dict[str, Mission] = {}
+    reserved_info_map: dict[str, dict] = {}
+    active_set = set(active_list)
+    for m_obj, leg_bat_id, leg_seq, _ in combined_rows:
+        if m_obj.order_id == order_id:
+            order_missions_by_id.setdefault(m_obj.id, m_obj)
+            continue
+        if m_obj.status not in active_set:
+            continue
+        m_status = m_obj.status.value if hasattr(m_obj.status, "value") else str(m_obj.status)
+        if m_obj.battery_id and m_obj.battery_id not in reserved_info_map:
+            reserved_info_map[m_obj.battery_id] = {
+                "mission_id": m_obj.id,
+                "mission_code": m_obj.id,
+                "mission_status": m_status,
+                "reason": f"In use by Mission #{m_obj.id} ({m_status})",
+            }
+        if leg_bat_id:
+            seq_info = f"Leg {leg_seq}" if leg_seq else "Intermediate Leg"
+            reserved_info_map[leg_bat_id] = {
+                "mission_id": m_obj.id,
+                "mission_code": m_obj.id,
+                "mission_status": m_status,
+                "reason": f"In use by Mission #{m_obj.id} ({seq_info} - {m_status})",
+            }
+
+    eff_origin_id, _ = resolve_effective_origin_from_missions(order, list(order_missions_by_id.values()))
     if not eff_origin_id:
         raise HTTPException(status_code=400, detail="Order does not have an origin hub")
 
@@ -962,13 +1027,8 @@ async def get_eligible_batteries_for_order(
             pred = predict_flight_energy_cached(direct_dist_km, payload_kg)
             required_direct_energy_wh = round(float(pred.get("energy_wh") or 0.0), 2)
 
-    drone = await db.get(Drone, drone_id)
-    if not drone:
-        raise HTTPException(status_code=404, detail="Drone not found")
-
     compat_models_map = await get_compatible_battery_models_map(db)
     compat_models = resolve_compatible_models_from_map(compat_models_map, drone.model)
-    reserved_info_map = await _get_reserved_battery_info_map(db, exclude_order_id=order_id)
 
     def _is_battery_usable(b: Battery) -> bool:
         if b.id in reserved_info_map:

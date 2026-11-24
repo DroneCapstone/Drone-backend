@@ -19,10 +19,10 @@ _FLIGHT_ENERGY_CACHE: dict[tuple, dict] = {}
 _FLIGHT_ENERGY_CACHE_MAX = 4096
 
 _COMPAT_MODELS_CACHE: Optional[tuple[float, dict[str, list[str]]]] = None
-_COMPAT_MODELS_TTL_SEC = 60.0
+_COMPAT_MODELS_TTL_SEC = 300.0
 
 _HUBS_CACHE: Optional[tuple[float, list["_CachedHub"]]] = None
-_HUBS_CACHE_TTL_SEC = 30.0
+_HUBS_CACHE_TTL_SEC = 300.0
 
 
 @dataclass(frozen=True)
@@ -60,7 +60,7 @@ def invalidate_planning_metadata_caches() -> None:
 
 
 async def get_all_hubs_cached(db: AsyncSession) -> list[_CachedHub]:
-    """Fetch all Hubs with a short 30s TTL cache to avoid repeated remote DB roundtrips."""
+    """Fetch all Hubs with a 300s TTL cache (invalidated on admin Hub changes) to avoid repeated remote DB roundtrips."""
     global _HUBS_CACHE
     now_mono = time.monotonic()
     if _HUBS_CACHE is not None and (now_mono - _HUBS_CACHE[0]) <= _HUBS_CACHE_TTL_SEC:
