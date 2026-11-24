@@ -146,8 +146,12 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
 async def change_password(body: ChangePasswordRequest, db: AsyncSession = Depends(get_async_db), user: dict = Depends(get_current_user)):
     """
     Thay đổi mật khẩu.
-    Người dùng phải cung cấp mật khẩu cũ để xác minh, sau đó nhập mật khẩu mới.
+    Người dùng phải cung cấp mật khẩu cũ để xác minh, sau đó nhập mật khẩu mới và xác nhận.
     """
+    # Kiểm tra new_password và confirm_new_password có trùng không
+    if body.new_password != body.confirm_new_password:
+        raise HTTPException(status_code=400, detail="New password and confirm password do not match")
+    
     # Lấy user từ database
     current_user = await service.get_user_by_id(db, user["sub"])
     if not current_user:
