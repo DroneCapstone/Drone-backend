@@ -7,6 +7,7 @@ from app.database.db import get_async_db, AsyncSessionLocal
 from app.modules.auth import service
 from app.modules.auth.schemas import LoginRequest, RegisterRequest, TokenResponse, UserResponse, ForgotPasswordRequest, ResetPasswordRequest, ChangePasswordRequest
 from app.modules.system.service import log_activity
+from app.shared.dependencies import get_current_user
 
 
 async def _log_login_activity_bg(user_id: str, user_email: str, role_value: str) -> None:
@@ -142,7 +143,7 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
 
 
 @router.post("/change-password")
-async def change_password(body: ChangePasswordRequest, db: AsyncSession = Depends(get_async_db), user: dict = Depends(service.get_current_user)):
+async def change_password(body: ChangePasswordRequest, db: AsyncSession = Depends(get_async_db), user: dict = Depends(get_current_user)):
     """
     Thay đổi mật khẩu.
     Người dùng phải cung cấp mật khẩu cũ để xác minh, sau đó nhập mật khẩu mới.
