@@ -1079,10 +1079,10 @@ async def submit_delivery_rating(
         raise HTTPException(status_code=404, detail="Order not found")
     if order.customer_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not your order")
-    if order.status != OrderStatus.DELIVERED_TO_HUB:
+    if order.status not in (OrderStatus.DELIVERED_TO_HUB, OrderStatus.DELIVERED_TO_CUSTOMER):
         raise HTTPException(
             status_code=400,
-            detail=f"Can only rate orders with status DELIVERED_TO_HUB. Current: {order.status.value if order.status else 'unknown'}"
+            detail=f"Can only rate delivered orders (DELIVERED_TO_HUB or DELIVERED_TO_CUSTOMER). Current: {order.status.value if order.status else 'unknown'}"
         )
 
     # Check already rated
