@@ -48,7 +48,8 @@ def get_drone_asset_serial(drone: Drone, hub_code: Optional[str] = None) -> str:
         m_tag = "X6"
     else:
         m_tag = "DRN"
-    clean_id = str(drone.id).replace("DRN-", "")
+    m_num = re.search(r"DRN-?(\d+)$", str(drone.id))
+    clean_id = m_num.group(1) if m_num else str(drone.id).replace("DRN-", "")
     return f"{m_tag}-{h_tag}-{clean_id}"
 
 
@@ -1005,7 +1006,9 @@ async def create_drone(
     if existing_sn.scalar_one_or_none():
         raise HTTPException(status_code=400, detail=f"Serial number '{serial_str}' already exists in the system.")
 
-    drone_id = await generate_sequential_id(db, Drone, "DRN")
+    drone_id = await generate_sequential_id(
+        db, Drone, "DRN", model_name=body.model, payload_capacity_kg=body.payload_capacity_kg
+    )
 
     drone_name = (body.name or "").strip()
     if not drone_name:
@@ -1248,7 +1251,9 @@ async def create_battery(
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=400, detail=f"Serial number '{serial_str}' already exists in the system.")
 
-        battery_id = await generate_sequential_id(db, Battery, "BAT")
+        battery_id = await generate_sequential_id(
+            db, Battery, "BAT", model_name=body.battery_model
+        )
         total_cost = body.acquisition_cost if (body.acquisition_cost and body.acquisition_cost > 0) else unit_cost
 
         battery = Battery(
@@ -1326,20 +1331,25 @@ async def create_battery(
         created_batteries = []
         battery_ids = []
 
-        # Sinh mã BAT-XXXX 1 lần rồi tăng tuần tự trong RAM thay vì N câu SELECT MAX
-        first_bid = await generate_sequential_id(db, Battery, "BAT")
-        try:
-            prefix, num_part = first_bid.rsplit("-", 1)
+        # Sinh mã {ModelCode}-BATXXXX 1 lần rồi tăng tuần tự trong RAM thay vì N câu SELECT MAX
+        first_bid = await generate_sequential_id(
+            db, Battery, "BAT", model_name=body.battery_model
+        )
+        m_bat = re.match(r"^(.*BAT-?)(\d+)$", first_bid)
+        if m_bat:
+            prefix, num_part = m_bat.group(1), m_bat.group(2)
             base_num = int(num_part)
             pad_len = len(num_part)
-        except Exception:
-            prefix, base_num, pad_len = "BAT", None, 4
+        else:
+            prefix, base_num, pad_len = "GEN-BAT", None, 4
 
         for idx, sn in enumerate(serials):
             if base_num is not None:
-                b_id = f"{prefix}-{(base_num + idx):0{pad_len}d}"
+                b_id = f"{prefix}{(base_num + idx):0{pad_len}d}"
             else:
-                b_id = await generate_sequential_id(db, Battery, "BAT")
+                b_id = await generate_sequential_id(
+                    db, Battery, "BAT", model_name=body.battery_model
+                )
             b_obj = Battery(
                 id=b_id,
                 serial_number=sn,

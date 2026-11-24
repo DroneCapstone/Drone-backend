@@ -316,6 +316,8 @@ async def get_live_tracking(
             TelemetryLog.energy_consumed_wh.label("energy_consumed_wh"),
             TelemetryLog.wind_speed.label("wind_speed"),
             TelemetryLog.weather_temperature.label("weather_temperature"),
+            TelemetryLog.weather_apparent_temp.label("weather_apparent_temp"),
+            TelemetryLog.weather_dew_point.label("weather_dew_point"),
             TelemetryLog.weather_humidity.label("weather_humidity"),
             TelemetryLog.weather_wind_speed.label("weather_wind_speed"),
             TelemetryLog.weather_wind_gust.label("weather_wind_gust"),
@@ -2108,8 +2110,19 @@ async def compute_mission_routes_internal(
     if clean_drone_id:
         drone_obj = drones_by_id.get(clean_drone_id) or await db.get(Drone, clean_drone_id)
         if not drone_obj and clean_drone_id.isdigit():
-            alt_id = f"DRN-{int(clean_drone_id):04d}"
+            num_suffix = f"{int(clean_drone_id):04d}"
+            alt_id = f"DRN-{num_suffix}"
             drone_obj = drones_by_id.get(alt_id) or await db.get(Drone, alt_id)
+            if not drone_obj:
+                drone_obj = next(
+                    (d for did, d in drones_by_id.items() if did.endswith(f"-DRN{num_suffix}")),
+                    None,
+                )
+                if not drone_obj:
+                    d_res = await db.execute(
+                        select(Drone).where(Drone.id.like(f"%-DRN{num_suffix}")).limit(1)
+                    )
+                    drone_obj = d_res.scalar_one_or_none()
             if drone_obj:
                 suggested_drone_id = drone_obj.id
 
