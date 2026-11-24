@@ -10,6 +10,7 @@ Quy ước ngôn ngữ:
 - Toàn bộ thông điệp trả về FE (HTTPException, SHAP labels/impacts/counterfactuals, summary): Tiếng Anh kỹ thuật tự nhiên.
 """
 
+import copy
 import inspect
 from typing import Any, Awaitable, Callable, Optional
 from fastapi import HTTPException
@@ -844,6 +845,54 @@ async def _evaluate_fleet_for_order(
             and (not compat_models or (b.battery_model and b.battery_model in compat_models))
         ]
 
+    route_group_cache: dict[tuple, tuple[str, Optional[str], Optional[str], list[RouteOptionSchema], list[dict]]] = {}
+
+    def _pick_best_bat_for_drone(d: Drone, bats_list: list[Battery]) -> Optional[Battery]:
+        if not bats_list:
+            return None
+        return min(
+            bats_list,
+            key=lambda b: (
+                -(_compute_battery_wh_local(b)[2]),
+                0 if b.drone_id == d.id else 1,
+                -(b.charge_level_pct or 0),
+                -float(b.capacity_wh or 0.0),
+                b.id,
+            ),
+        )
+
+    def _clone_routes_for_drone(
+        cached_entry: tuple[str, Optional[str], Optional[str], list[RouteOptionSchema], list[dict]],
+        target_drone: Drone,
+        target_bat: Optional[Battery],
+    ) -> tuple[list[RouteOptionSchema], list[dict]]:
+        tmpl_did, tmpl_bid, tmpl_bser, tmpl_schemas, tmpl_raw = cached_entry
+        cloned_schemas = copy.deepcopy(tmpl_schemas)
+        cloned_raw = copy.deepcopy(tmpl_raw)
+        tgt_bid = target_bat.id if target_bat else None
+        tgt_bser = target_bat.serial_number if target_bat else None
+
+        for s in cloned_schemas:
+            old_did = str(s.suggestedDroneId) if s.suggestedDroneId is not None else tmpl_did
+            old_bid = s.assignedBatteryId or tmpl_bid
+            old_bser = s.assignedBatterySerial or tmpl_bser
+            if s.suggestedDroneId == tmpl_did or old_did == tmpl_did:
+                s.suggestedDroneId = target_drone.id
+                if s.assignedBatteryId == tmpl_bid and tgt_bid:
+                    s.assignedBatteryId = tgt_bid
+                    s.assignedBatterySerial = tgt_bser
+                if s.legs_detail and s.legs_detail[0].battery_id == old_bid and tgt_bid:
+                    s.legs_detail[0].battery_id = tgt_bid
+                    s.legs_detail[0].battery_serial = tgt_bser
+                if s.reason:
+                    if tmpl_did and target_drone.id != tmpl_did:
+                        s.reason = s.reason.replace(tmpl_did, target_drone.id)
+                    if old_bid and tgt_bid and tgt_bid != old_bid:
+                        s.reason = s.reason.replace(old_bid, tgt_bid)
+                    if old_bser and tgt_bser and tgt_bser != old_bser:
+                        s.reason = s.reason.replace(old_bser, tgt_bser)
+        return cloned_schemas, cloned_raw
+
     async def _evaluate_drone(d: Drone, preloaded_bats: Optional[list[Battery]] = None) -> Optional[dict[str, Any]]:
         elig_bats = preloaded_bats if preloaded_bats is not None else await _get_drone_elig_bats(d)
         is_local = d.current_hub_id == eff_origin_hub_id
@@ -859,18 +908,45 @@ async def _evaluate_fleet_for_order(
             )
         )
 
-        route_kwargs: dict[str, Any] = {
-            "db": db,
-            "order": order,
-            "drone_id": d.id,
-            "battery_id": None,
-            "strict_battery": False,
-            "override_payload_kg": total_payload_kg,
-            "recommend_mode": recommend_mode or "AUTO",
-        }
-        if supports_preloaded_ctx:
-            route_kwargs["preloaded_context"] = shared_route_ctx
-        routes_schemas, raw_list = await compute_routes_fn(**route_kwargs)
+        best_bat = _pick_best_bat_for_drone(d, elig_bats)
+        if best_bat is not None:
+            _, b_pct, b_avail_wh = _compute_battery_wh_local(best_bat)
+            bat_spec: Any = (best_bat.battery_model, round(b_avail_wh, 1), b_pct)
+        else:
+            bat_spec = None
+        # Khóa nhóm chặt theo Hub, dòng máy bay, tải trọng và thông số pin tốt nhất để không sai lệch dự phòng chặng 1
+        group_key = (
+            d.current_hub_id,
+            d.model or "",
+            round(float(d.payload_capacity_kg or 0.0), 2),
+            bat_spec,
+        )
+
+        if supports_preloaded_ctx and group_key in route_group_cache:
+            routes_schemas, raw_list = _clone_routes_for_drone(route_group_cache[group_key], d, best_bat)
+        else:
+            route_kwargs: dict[str, Any] = {
+                "db": db,
+                "order": order,
+                "drone_id": d.id,
+                "battery_id": None,
+                "strict_battery": False,
+                "override_payload_kg": total_payload_kg,
+                "recommend_mode": recommend_mode or "AUTO",
+            }
+            if supports_preloaded_ctx:
+                route_kwargs["preloaded_context"] = shared_route_ctx
+            routes_schemas, raw_list = await compute_routes_fn(**route_kwargs)
+            if supports_preloaded_ctx and routes_schemas:
+                ref_s = routes_schemas[0]
+                if str(ref_s.suggestedDroneId or d.id) == str(d.id):
+                    route_group_cache[group_key] = (
+                        str(d.id),
+                        ref_s.assignedBatteryId,
+                        ref_s.assignedBatterySerial,
+                        routes_schemas,
+                        raw_list,
+                    )
         feasible_pairs = [(s, raw) for s, raw in zip(routes_schemas, raw_list) if s.feasible]
         chosen_pair = (
             next(((s, raw) for s, raw in feasible_pairs if s.recommended), None)

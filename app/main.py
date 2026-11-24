@@ -111,6 +111,7 @@ async def _warmup_caches_background():
     2. Load sẵn model ML predict_flight_energy vào RAM.
     3. Fetch song song thời tiết Open-Meteo theo lưới 0.05° cho cả tọa độ Hub lẫn midpoint giữa các Hub.
     """
+    from sqlalchemy import text
     from app.database.db import AsyncSessionLocal
     from app.modules.missions.bundle_service import (
         get_all_hubs_cached,
@@ -118,6 +119,10 @@ async def _warmup_caches_background():
         predict_flight_energy_cached,
     )
     from app.shared.weather import fetch_weather, _weather_grid_key
+
+    async def _warm_extra_pool_conn():
+        async with AsyncSessionLocal() as extra_db:
+            await extra_db.execute(text("SELECT 1"))
 
     first_run = True
     while True:
@@ -128,7 +133,12 @@ async def _warmup_caches_background():
                 await get_compatible_battery_models_map(db)
 
             if first_run:
-                await asyncio.to_thread(predict_flight_energy_cached, 10.0, 1.0)
+                await asyncio.gather(
+                    _warm_extra_pool_conn(),
+                    _warm_extra_pool_conn(),
+                    asyncio.to_thread(predict_flight_energy_cached, 10.0, 1.0),
+                    return_exceptions=True,
+                )
                 first_run = False
 
             valid_hubs = [h for h in hubs if h.latitude is not None and h.longitude is not None]
