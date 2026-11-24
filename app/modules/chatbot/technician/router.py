@@ -18,7 +18,22 @@ from app.modules.chatbot.schemas import (
 from fastapi.responses import JSONResponse
 from app.modules.chatbot.service import execute_agent_chat, ChatRateLimitError
 from app.modules.chatbot.technician.prompts import TECHNICIAN_SYSTEM_INSTRUCTION
-from app.modules.chatbot.technician.tools import get_technician_gemini_tools, TECHNICIAN_TOOLS_MAP
+from app.modules.chatbot.technician.tools import get_technician_gemini_tools, build_technician_tools_map
+from app.shared.roles import UserRole as _UR
+
+
+def _scope_hub_for(user: CurrentUser) -> int | None:
+    """
+    Xác định phạm vi hub cho chatbot:
+    - Admin: None (không lọc, xem toàn hệ thống).
+    - Technician có hub_id: đúng hub đó.
+    - Technician không có hub_id: -1 (không khớp dữ liệu nào, tránh lộ dữ liệu toàn hệ thống).
+    """
+    if user.role == _UR.ADMIN:
+        return None
+    if user.hub_id and str(user.hub_id).isdigit():
+        return int(user.hub_id)
+    return -1
 
 router = APIRouter(
     prefix="/technician/chatbot",
@@ -45,7 +60,7 @@ async def technician_chat(
             history=body.history,
             system_instruction=TECHNICIAN_SYSTEM_INSTRUCTION,
             gemini_tools=get_technician_gemini_tools(),
-            tools_map=TECHNICIAN_TOOLS_MAP,
+            tools_map=build_technician_tools_map(_scope_hub_for(user)),
             current_user_id=str(user.id),
             conversation_id=body.conversation_id,
             rate_limit_key=f"technician:{user.id}",
