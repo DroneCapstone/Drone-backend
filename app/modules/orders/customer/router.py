@@ -536,6 +536,19 @@ async def cancel_order_with_reason(
             detail=f"Cannot cancel order in '{order.status.value}' status."
         )
 
+    # Đã lập mission (bất kỳ trạng thái nào chưa hủy) thì không cho customer hủy nữa
+    existing_mission = (await db.execute(
+        select(Mission.id).where(
+            Mission.order_id == order_id,
+            Mission.status != MissionStatus.CANCELLED,
+        ).limit(1)
+    )).scalars().first()
+    if existing_mission:
+        raise HTTPException(
+            status_code=400,
+            detail="A flight mission has already been created for this order, so it can no longer be cancelled by the customer. Contact an operator."
+        )
+
     from app.core.timezone import get_vn_naive_datetime
     now = get_vn_naive_datetime()
 
