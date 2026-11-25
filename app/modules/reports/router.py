@@ -29,7 +29,7 @@ router = APIRouter(prefix="/admin/reports", tags=["Admin - Reports"])
 allow_admin = RoleChecker([UserRole.ADMIN])
 
 _COMPLETED = [
-    MissionStatus.COMPLETED, MissionStatus.ARRIVAL_COMPLETED,
+    MissionStatus.ARRIVAL_COMPLETED,
     MissionStatus.MISSION_COMPLETED,
 ]
 

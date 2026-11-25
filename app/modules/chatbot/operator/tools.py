@@ -17,7 +17,7 @@ from app.modules.missions.models import Mission, MissionStatus, Incident
 async def tool_get_active_missions(db: AsyncSession, **kwargs) -> Dict[str, Any]:
     """Lấy danh sách các chuyến bay đang hoạt động trên bầu trời."""
     stmt = select(Mission).where(
-        Mission.status.in_([MissionStatus.FLYING, MissionStatus.IN_PROGRESS])
+        Mission.status == MissionStatus.FLYING
     )
     result = await db.execute(stmt)
     missions = result.scalars().all()
@@ -50,7 +50,6 @@ async def tool_get_operator_kpi(db: AsyncSession, **kwargs) -> Dict[str, Any]:
             func.count(Mission.id),
             func.count(case((comp_cond, 1))),
             func.count(case((Mission.status == MissionStatus.CANCELLED, 1))),
-            func.count(case((Mission.status == MissionStatus.REJECTED, 1))),
             func.coalesce(func.sum(case((and_(comp_cond, Mission.delivery_fee.isnot(None)), Mission.delivery_fee), else_=0.0)), 0.0),
         )
     )).one()
@@ -58,9 +57,9 @@ async def tool_get_operator_kpi(db: AsyncSession, **kwargs) -> Dict[str, Any]:
     total = int(row[0] or 0)
     completed = int(row[1] or 0)
     cancelled = int(row[2] or 0)
-    rejected = int(row[3] or 0)
+    rejected = 0
     finished = completed + cancelled + rejected
-    revenue = float(row[4] or 0.0)
+    revenue = float(row[3] or 0.0)
 
     return {
         "success": True,

@@ -303,7 +303,7 @@ class CustomerStatusService:
             }
 
         # 2. Mission Failed
-        if mis_status in (MissionStatus.FAILED, MissionStatus.REJECTED, MissionStatus.INCIDENT_RETURN):
+        if mis_status in (MissionStatus.FAILED, MissionStatus.INCIDENT_RETURN):
             return {
                 "customer_status": "delivery_issue",
                 "status_label": "Delivery issue / Needs support",
@@ -337,11 +337,7 @@ class CustomerStatusService:
             }
 
         # 5. Mission in progress OR handoff in transit -> In delivery
-        if ord_status == OrderStatus.IN_DELIVERY or mis_status in (
-            MissionStatus.IN_PROGRESS,
-            MissionStatus.FLYING,
-            MissionStatus.ACTIVE_MISSION,
-        ):
+        if ord_status == OrderStatus.IN_DELIVERY or mis_status == MissionStatus.FLYING:
             return {
                 "customer_status": "in_delivery",
                 "status_label": "In delivery",
@@ -350,11 +346,7 @@ class CustomerStatusService:
             }
 
         # 6. Mission scheduled
-        if mis_status in (
-            MissionStatus.SCHEDULED,
-            MissionStatus.APPROVED,
-            MissionStatus.PENDING_APPROVAL,
-        ):
+        if mis_status == MissionStatus.SCHEDULED:
             return {
                 "customer_status": "scheduled",
                 "status_label": "Scheduled",

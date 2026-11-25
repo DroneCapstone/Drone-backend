@@ -172,10 +172,7 @@ def resolve_compatible_models_from_map(
 
 ACTIVE_MISSION_STATUSES = [
     MissionStatus.SCHEDULED,
-    MissionStatus.IN_PROGRESS,
-    MissionStatus.APPROVED,
     MissionStatus.FLYING,
-    MissionStatus.ACTIVE_MISSION,
 ]
 
 async def get_active_mission_order_ids(db: AsyncSession) -> set[str]:

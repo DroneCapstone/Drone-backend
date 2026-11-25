@@ -869,9 +869,7 @@ async def tool_check_cancellation_eligibility(
         eligible = False
         reason = "The package has already been handed over at the Origin Hub and cannot be cancelled directly."
     elif mission and mission.status in (
-        MissionStatus.IN_PROGRESS,
         MissionStatus.FLYING,
-        MissionStatus.ACTIVE_MISSION,
         MissionStatus.ARRIVAL_COMPLETED,
         MissionStatus.MISSION_COMPLETED,
     ):

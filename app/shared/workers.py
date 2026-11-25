@@ -56,12 +56,14 @@ async def run_approval_deadline_watcher(db: AsyncSession):
     Worker 1: Quản lý đếm ngược (Approval Deadline Watcher)
     Tự động hủy các chuyến bay chưa được duyệt khi đã quá giờ scheduled_time.
     """
+    from datetime import timedelta
     now = get_vn_naive_datetime()
+    overdue_cutoff = now - timedelta(days=3)
     result = await db.execute(
         select(Mission).where(
             and_(
-                Mission.status == MissionStatus.PENDING_APPROVAL,
-                Mission.scheduled_time <= now
+                Mission.status == MissionStatus.SCHEDULED,
+                Mission.scheduled_time <= overdue_cutoff
             )
         )
     )
@@ -112,11 +114,7 @@ async def run_telemetry_signal_loss_watcher(db: AsyncSession):
     flying_missions_result = await db.execute(
         select(Mission).where(
             and_(
-                Mission.status.in_([
-                    MissionStatus.FLYING,
-                    MissionStatus.IN_PROGRESS,
-                    MissionStatus.ACTIVE_MISSION,
-                ]),
+                Mission.status == MissionStatus.FLYING,
                 or_(
                     Mission.handling_status.is_(None),
                     Mission.handling_status == HandlingStatus.INCOMING,
@@ -560,10 +558,7 @@ async def run_critical_order_notifier(db: AsyncSession):
                 Mission.order_id.in_(overdue_ids),
                 Mission.status.in_([
                     MissionStatus.SCHEDULED,
-                    MissionStatus.APPROVED,
                     MissionStatus.FLYING,
-                    MissionStatus.IN_PROGRESS,
-                    MissionStatus.ACTIVE_MISSION,
                 ])
             )
         )
@@ -675,10 +670,7 @@ async def run_deadline_alert_watcher(db: AsyncSession):
                 Mission.order_id.in_(all_ids),
                 Mission.status.in_([
                     MissionStatus.SCHEDULED,
-                    MissionStatus.APPROVED,
                     MissionStatus.FLYING,
-                    MissionStatus.IN_PROGRESS,
-                    MissionStatus.ACTIVE_MISSION,
                 ])
             )
         )

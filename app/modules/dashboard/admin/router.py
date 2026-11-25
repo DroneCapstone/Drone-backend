@@ -74,9 +74,8 @@ async def admin_dashboard(
     total_missions = sum(mission_by_status.values())
     m_completed = mission_by_status.get(MissionStatus.ARRIVAL_COMPLETED.value, 0) + mission_by_status.get(MissionStatus.MISSION_COMPLETED.value, 0)
     m_cancelled = 0
-    m_rejected = mission_by_status.get(MissionStatus.REJECTED.value, 0)
     m_failed = mission_by_status.get(MissionStatus.FAILED.value, 0)
-    m_terminal = m_completed + m_cancelled + m_rejected + m_failed
+    m_terminal = m_completed + m_cancelled + m_failed
     m_success = round(m_completed / m_terminal * 100, 2) if m_terminal else 0.0
     missions = AdminMissions(total=total_missions, by_status=mission_by_status, success_rate=m_success)
 

@@ -1,8 +1,8 @@
 # Database Schema Documentation
 Đây là tài liệu Single Source of Truth cho cấu trúc cơ sở dữ liệu của dự án Drone-backend, được tự động cập nhật và đồng bộ theo models và các bản migration mới nhất (tuân thủ quy định `GEMINI.md`).
 
-> **Kiến trúc Cơ sở dữ liệu Chuẩn hóa (Database Schema - 22 Bảng)**:
-> Hệ thống gồm **22 bảng chính thức** lưu trữ và điều phối toàn bộ chu trình vận hành bay, phân phối trạm, bảo trì, quản lý pin, vật tư linh kiện, yêu cầu thay thế, đơn hàng và nhật ký hệ thống.
+> **Kiến trúc Cơ sở dữ liệu Chuẩn hóa (Database Schema - 25 Bảng)**:
+> Hệ thống gồm **25 bảng chính thức** lưu trữ và điều phối toàn bộ chu trình vận hành bay, phân phối trạm, bảo trì, quản lý pin, vật tư linh kiện, yêu cầu thay thế, đơn hàng, đánh giá giao hàng, sổ địa chỉ, thống kê hoạt động drone theo ngày và nhật ký hệ thống.
 > *(Các bảng cũ `audit_logs`, `hub_inventories`, `inventory_transactions` đã được thay thế/đổi tên hoàn toàn sang `activity_logs`, `system_logs`, `hub_supplies`, `supply_transactions` và xóa khỏi Database).*
 
 > **Lưu ý về Múi giờ (Timezone)**: 
@@ -15,7 +15,7 @@
 
 ---
 
-## I. Cấu trúc 22 Bảng Hệ Thống (Database Tables)
+## I. Cấu trúc 25 Bảng Hệ Thống (Database Tables)
 
 ### 1. Bảng accounts (trước đây là users)
 | Cột | Kiểu dữ liệu | Khóa / Ràng buộc |
@@ -101,6 +101,8 @@ Catalog model pin chuẩn với giá nhập và danh sách dòng drone tương t
 | current_hub_id | BIGINT | Nullable |
 | battery_level_pct | BIGINT | Nullable |
 | utilization_pct | FLOAT | Nullable |
+| total_flight_hours | FLOAT | Non-nullable, Default `0.0` (Backfill từ giờ bay của các mission đã hoàn thành) |
+| last_maintenance_at | TIMESTAMP | Nullable |
 
 > **Quy tắc chuẩn hóa tên hiển thị Drone (drones.name):**
 > - **Light (<= 1.0kg - DJI Matrice 100 / Mã ID `M100`)**: Swift XX (Swift 01 - Swift 72)
@@ -205,7 +207,7 @@ Số lượng linh kiện / vật tư tại từng Hub. Không có kho trung tâ
 | payload_weight | FLOAT | Nullable |
 | distance_m | FLOAT | Nullable |
 | delivery_fee | FLOAT | Nullable |
-| status | VARCHAR(50) | Non-nullable (`missions_status`) |
+| status | VARCHAR(50) | Non-nullable (`missions_status`: `Scheduled`, `Flying`, `Arrival completed`, `Mission completed`, `Incident return`, `Failed`, `Cancelled`) |
 | handling_status | VARCHAR(50) | Nullable (`missions_handling_status`) |
 | scheduled_time | TIMESTAMP | Nullable |
 | start_time | TIMESTAMP | Nullable |
@@ -241,6 +243,7 @@ Số lượng linh kiện / vật tư tại từng Hub. Không có kho trung tâ
 | id | VARCHAR(50) | **PK**, Non-nullable |
 | customer_id | VARCHAR(50) | Nullable |
 | sender_phone | VARCHAR(20) | Nullable |
+| sender_email | VARCHAR(255) | Nullable |
 | receiver_name | VARCHAR(100) | Nullable |
 | receiver_phone | VARCHAR(20) | Nullable |
 | package_label | VARCHAR(255) | Nullable |
@@ -279,6 +282,7 @@ Số lượng linh kiện / vật tư tại từng Hub. Không có kho trung tâ
 | refund_amount | FLOAT | Nullable |
 | refund_reason | VARCHAR(255) | Nullable |
 | refund_status | VARCHAR(50) | Nullable (`refund_status_enum`), Default `'PENDING'` |
+| cancellation_reason | VARCHAR(500) | Nullable |
 
 ### 16. Bảng part_categories
 Danh mục loại linh kiện / vật tư — dùng chung toàn hệ thống.
@@ -415,6 +419,55 @@ Yêu cầu thay thế pin hoặc linh kiện từ Technician (được Admin c�
 | supplied_item_id | VARCHAR | Nullable |
 | supplied_at | TIMESTAMPTZ | Nullable |
 | created_at | TIMESTAMPTZ | Non-nullable |
+
+### 23. Bảng delivery_ratings
+Đánh giá trải nghiệm giao hàng của Customer sau khi đơn hàng hoàn tất. Mỗi đơn hàng chỉ được đánh giá 1 lần.
+
+| Cột | Kiểu dữ liệu | Khóa / Ràng buộc |
+| :--- | :--- | :--- |
+| id | BIGSERIAL | **PK**, Non-nullable |
+| order_id | VARCHAR(50) | **FK** (`orders.id`), Unique, Non-nullable |
+| customer_id | VARCHAR(50) | **FK** (`accounts.id`), Non-nullable |
+| rating | INTEGER | Non-nullable (`CHECK (rating BETWEEN 1 AND 5)`) |
+| comment | VARCHAR(1000) | Nullable |
+| created_at | TIMESTAMP | Non-nullable |
+
+> Indexes: `idx_delivery_ratings_order (order_id)`, `idx_delivery_ratings_customer (customer_id)`, `idx_delivery_ratings_rating (rating)`.
+
+### 24. Bảng saved_addresses
+Danh bạ địa chỉ giao hàng của Customer — lưu thông tin người nhận thường dùng.
+
+| Cột | Kiểu dữ liệu | Khóa / Ràng buộc |
+| :--- | :--- | :--- |
+| id | BIGSERIAL | **PK**, Non-nullable |
+| customer_id | VARCHAR(50) | **FK** (`accounts.id`), Non-nullable |
+| label | VARCHAR(100) | Non-nullable |
+| recipient_name | VARCHAR(100) | Non-nullable |
+| recipient_phone | VARCHAR(20) | Non-nullable |
+| recipient_email | VARCHAR(255) | Nullable |
+| hub_id | BIGINT | **FK** (`hubs.id`), Nullable |
+| is_default | BOOLEAN | Non-nullable, Default `false` |
+| created_at | TIMESTAMP | Non-nullable |
+
+> Index: `idx_saved_addresses_customer (customer_id)`.
+
+### 25. Bảng drone_daily_stats
+Thống kê hoạt động drone theo ngày — được tổng hợp cuối mỗi ngày bởi worker.
+
+| Cột | Kiểu dữ liệu | Khóa / Ràng buộc |
+| :--- | :--- | :--- |
+| id | BIGSERIAL | **PK**, Non-nullable |
+| drone_id | VARCHAR(50) | **FK** (`drones.id`), Non-nullable |
+| stat_date | TIMESTAMP | Non-nullable |
+| mission_count | INTEGER | Non-nullable, Default `0` |
+| completed_count | INTEGER | Non-nullable, Default `0` |
+| incident_count | INTEGER | Non-nullable, Default `0` |
+| total_distance_km | FLOAT | Non-nullable, Default `0.0` |
+| total_flight_min | FLOAT | Non-nullable, Default `0.0` |
+| total_energy_wh | FLOAT | Non-nullable, Default `0.0` |
+| created_at | TIMESTAMP | Non-nullable |
+
+> Index: `idx_drone_daily_drone_date (drone_id, stat_date)`.
 
 ---
 

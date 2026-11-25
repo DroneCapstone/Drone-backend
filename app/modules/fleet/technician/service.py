@@ -188,7 +188,7 @@ async def run_drone_daily_stats(db: AsyncSession):
         return 0  # Đã tính rồi
 
     # Lấy missions của hôm qua theo drone
-    _COMPLETED = [MissionStatus.COMPLETED, MissionStatus.ARRIVAL_COMPLETED, MissionStatus.MISSION_COMPLETED]
+    _COMPLETED = [MissionStatus.ARRIVAL_COMPLETED, MissionStatus.MISSION_COMPLETED]
 
     missions = (await db.execute(
         select(Mission).where(

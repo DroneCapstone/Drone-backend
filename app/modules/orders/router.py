@@ -46,11 +46,7 @@ ACTIVE_MISSION_STATUS_STRINGS = {
 
 ACTIVE_MISSION_STATUSES = [
     MissionStatus.SCHEDULED,
-    MissionStatus.IN_PROGRESS,
-    MissionStatus.APPROVED,
     MissionStatus.FLYING,
-    MissionStatus.ACTIVE_MISSION,
-    MissionStatus.PENDING_APPROVAL,
 ]
 
 COMPLETED_MISSION_STATUS_STRINGS = {
@@ -1122,9 +1118,7 @@ async def cancel_order(
         select(Mission).where(
             Mission.order_id == order_id,
             Mission.status.in_([
-                MissionStatus.IN_PROGRESS,
                 MissionStatus.FLYING,
-                MissionStatus.ACTIVE_MISSION,
                 MissionStatus.ARRIVAL_COMPLETED,
                 MissionStatus.MISSION_COMPLETED,
             ])
@@ -1140,11 +1134,7 @@ async def cancel_order(
     sched_m_res = await db.execute(
         select(Mission).where(
             Mission.order_id == order_id,
-            Mission.status.in_([
-                MissionStatus.SCHEDULED,
-                MissionStatus.PENDING_APPROVAL,
-                MissionStatus.APPROVED,
-            ])
+            Mission.status == MissionStatus.SCHEDULED
         )
     )
     for m in sched_m_res.scalars().all():

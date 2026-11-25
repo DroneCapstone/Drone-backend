@@ -50,9 +50,7 @@ _ENUM_WARMUP_SQL = (
     "SELECT "
     "NULL::orders_status_enum, "
     "NULL::payment_status_enum, "
-    "NULL::payments_status, "
     "NULL::delivery_mode_enum, "
-    "NULL::payment_method, "
     "NULL::refund_status_enum, "
     "NULL::drone_status, "
     "NULL::batteries_status, "
@@ -61,7 +59,13 @@ _ENUM_WARMUP_SQL = (
     "NULL::mission_leg_status_enum, "
     "NULL::notifications_type, "
     "NULL::incidents_status, "
-    "NULL::risk_level"
+    "NULL::risk_level, "
+    "NULL::work_orders_status, "
+    "NULL::part_category_type_enum, "
+    "NULL::parts_request_status_enum, "
+    "NULL::replacement_status_enum, "
+    "NULL::replacement_type_enum, "
+    "NULL::supply_txn_reason_enum"
 )
 
 
@@ -70,7 +74,6 @@ def _warm_asyncpg_enum_codecs(dbapi_connection, connection_record):
     """
     [PERF NOTE] Nạp sẵn toàn bộ codec PostgreSQL ENUM cho connection mới ngay lúc mở
     trong 1 lượt duy nhất, tránh việc asyncpg dò pg_type lặp lại (~1.25s/bảng) trong API request.
-    Bọc try/except để an toàn tuyệt đối nếu có môi trường DB thiếu một kiểu ENUM nào đó.
     """
     try:
         driver_conn = getattr(dbapi_connection, "_connection", None) or getattr(
@@ -78,8 +81,8 @@ def _warm_asyncpg_enum_codecs(dbapi_connection, connection_record):
         )
         if driver_conn is not None and hasattr(dbapi_connection, "await_"):
             dbapi_connection.await_(driver_conn.fetchrow(_ENUM_WARMUP_SQL))
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[DB WARMUP WARN] Enum codec warmup failed: {exc}")
 
 
 AsyncSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False)

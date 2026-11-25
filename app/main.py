@@ -29,7 +29,6 @@ import app.modules.auth.models  # noqa: F401
 import app.modules.fleet.models  # noqa: F401
 import app.modules.missions.models  # noqa: F401 — includes DeliveryRating
 import app.modules.system.models  # noqa: F401
-import app.modules.inventory.models  # noqa: F401 — backward-compat, keeps old tables mapped
 import app.modules.supplies.models   # noqa: F401
 
 # Import routers từ các module
@@ -52,7 +51,6 @@ from app.modules.reports.router import router as reports_router
 from app.database.router import router as db_router
 
 import asyncio
-from app.database.db import async_engine, Base
 from app.database.cron_db import run_with_retry
 from app.modules.fleet.technician.service import run_maintenance_alerts_logic, run_battery_overdue_alerts_logic, run_preventive_maintenance_scheduler, run_drone_daily_stats
 from app.shared.workers import run_approval_deadline_watcher, run_telemetry_signal_loss_watcher, run_battery_charging_simulation, run_pickup_reminder_watcher, run_aging_priority_watcher, run_critical_order_notifier, run_deadline_alert_watcher
@@ -289,7 +287,8 @@ app.include_router(addresses_router, prefix=settings.API_V1_STR)
 app.include_router(payments_router, prefix=settings.API_V1_STR)
 app.include_router(rag_router, prefix=settings.API_V1_STR)
 app.include_router(reports_router, prefix=settings.API_V1_STR)
-app.include_router(db_router)
+if os.getenv("ENABLE_DEV_DB_ROUTER", "").lower() == "true":
+    app.include_router(db_router)
 
 # Tự động include các router của các roles
 import importlib
