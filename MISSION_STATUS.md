@@ -43,7 +43,7 @@
 
 ```
 [Origin Hub - Technician]
-  Operator tạo mission
+  Operator tạo & gọi Assign mission
   → mission.status = SCHEDULED
   → mission.handling_status = AT_HUB
   
@@ -54,7 +54,7 @@
   
   Technician bấm Dispatch
   POST /missions/{id}/dispatch
-  → mission.status = FLYING (auto-normalized từ SCHEDULED)
+  → mission.status = FLYING (auto-normalize từ SCHEDULED)
   → mission.handling_status = INCOMING
   → drone.status = IN_FLIGHT
   → drone.current_hub_id = NULL
