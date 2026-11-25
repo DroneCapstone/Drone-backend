@@ -181,6 +181,31 @@ async def get_incoming_drones(
 
         response = []
         seen_ids = set()
+        
+        # Batch-fetch all batteries needed for next_leg display
+        all_next_leg_bat_ids = set()
+        legs_map_by_mid: dict[str, list] = {}
+        for row in rows:
+            m_id = row[0]
+            if m_id in seen_ids:
+                continue
+            legs = legs_by_mid.get(m_id, [])
+            if legs:
+                for i, leg in enumerate(legs):
+                    if leg.status in [MissionLegStatus.IN_PROGRESS, MissionLegStatus.COMPLETED]:
+                        if i + 1 < len(legs) and legs[i + 1].battery_id:
+                            all_next_leg_bat_ids.add(legs[i + 1].battery_id)
+                        break
+        
+        # Fetch all next_leg batteries in bulk
+        next_leg_bats: dict[str, Battery] = {}
+        if all_next_leg_bat_ids:
+            bat_res = await db.execute(
+                select(Battery).where(Battery.id.in_(list(all_next_leg_bat_ids)))
+            )
+            for bat in bat_res.scalars().all():
+                next_leg_bats[bat.id] = bat
+        
         for row in rows:
             (
                 m_id,
@@ -232,7 +257,7 @@ async def get_incoming_drones(
                             "battery_id": leg.battery_id,
                             "status": leg.status.value if hasattr(leg.status, "value") else leg.status,
                         }
-                        # Next leg info (battery_id = null - technician chọn qua swap-battery)
+                        # Next leg info (may have battery_id assigned during mission planning)
                         if i + 1 < len(legs):
                             next_leg = legs[i + 1]
                             next_leg_info = {
@@ -240,9 +265,14 @@ async def get_incoming_drones(
                                 "sequence_no": next_leg.sequence_no,
                                 "from_hub_id": next_leg.from_hub_id,
                                 "to_hub_id": next_leg.to_hub_id,
-                                "battery_id": None,
+                                "battery_id": next_leg.battery_id,  # Use actual battery_id from leg (may be None if not planned yet)
                                 "status": next_leg.status.value if hasattr(next_leg.status, "value") else next_leg.status,
                             }
+                            # Add battery details if battery was pre-selected during mission planning
+                            if next_leg.battery_id and next_leg.battery_id in next_leg_bats:
+                                bat = next_leg_bats[next_leg.battery_id]
+                                next_leg_info["battery_code"] = bat.serial_number
+                                next_leg_info["battery_percent"] = bat.charge_level_pct
                         break
 
             response.append({
