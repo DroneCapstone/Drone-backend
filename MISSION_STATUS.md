@@ -7,9 +7,7 @@
 | Enum Value | Display Text | Ý nghĩa | Khi nào được set |
 |---|---|---|---|
 | `SCHEDULED` | Scheduled | Operator đã tạo mission, chờ Technician chuẩn bị | Lúc create mission (operator) |
-| `IN_PROGRESS` | In Progress | Mission đang được xử lý (chuẩn bị/bay) | Auto-normalize từ SCHEDULED trước dispatch |
-| `FLYING` | Flying | Drone đang bay | Dispatcher gọi / auto-normalize |
-| `ACTIVE_MISSION` | Active mission | Mission đang hoạt động (legacy) | Compat - normalize sang FLYING |
+| `FLYING` | Flying | Drone đang bay | Dispatcher gọi / auto-normalize từ SCHEDULED |
 | `ARRIVAL_COMPLETED` | Arrival completed | Drone đáp hub (relay hoặc đích) | After confirm-relay-arrival hoặc confirm-arrival |
 | `MISSION_COMPLETED` | Mission completed | Mission hoàn tất hoàn toàn | After confirm-arrival (clean delivery) |
 | `INCIDENT_RETURN` | Incident return | Drone quay về do sự cố | Simulator phát hiện incident, Technician confirm |
@@ -51,12 +49,11 @@
   
   Technician lắp pin, kiểm tra drone
   POST /missions/{id}/ready
-  → mission.status = IN_PROGRESS (nếu chưa là)
   → mission.handling_status = READY
   
   Technician bấm Dispatch
   POST /missions/{id}/dispatch
-  → mission.status = FLYING (auto-normalize từ SCHEDULED/IN_PROGRESS)
+  → mission.status = FLYING (auto-normalize từ SCHEDULED)
   → mission.handling_status = INCOMING
   → drone.status = IN_FLIGHT
   → drone.current_hub_id = NULL
