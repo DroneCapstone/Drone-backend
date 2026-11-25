@@ -21,7 +21,7 @@ router = APIRouter(prefix="/operator/dashboard", tags=["Operator - Dashboard"])
 allow_operator = RoleChecker([UserRole.OPERATOR, UserRole.ADMIN])
 
 _COMPLETED = (MissionStatus.ARRIVAL_COMPLETED, MissionStatus.MISSION_COMPLETED)
-_ACTIVE = (MissionStatus.FLYING, MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION)
+_ACTIVE = (MissionStatus.FLYING,)
 
 
 @router.get("", response_model=OperatorDashboardResponse)
@@ -38,7 +38,7 @@ async def operator_dashboard(
     dist_cond = and_(Mission.distance_m.isnot(None), Mission.distance_m != 0)
     pay_cond = and_(Mission.payload_weight.isnot(None), Mission.payload_weight != 0)
     overdue_cond = and_(
-        Mission.status == MissionStatus.PENDING_APPROVAL,
+        Mission.status == MissionStatus.SCHEDULED,
         Mission.scheduled_time.isnot(None),
         Mission.scheduled_time <= now,
     )
@@ -70,8 +70,6 @@ async def operator_dashboard(
         total += cnt_i
         if st in _COMPLETED:
             completed += cnt_i
-        if st == MissionStatus.REJECTED:
-            rejected += cnt_i
         if st == MissionStatus.FAILED:
             failed += cnt_i
         if st in _ACTIVE:

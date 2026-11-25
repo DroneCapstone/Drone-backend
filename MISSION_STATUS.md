@@ -49,6 +49,7 @@
   
   Technician lắp pin, kiểm tra drone
   POST /missions/{id}/ready
+  → mission.status = SCHEDULED
   → mission.handling_status = READY
   
   Technician bấm Dispatch

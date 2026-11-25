@@ -36,7 +36,6 @@ async def get_mission_kpi(
         select(
             func.count(),
             func.count(case((comp_cond, 1))),
-            func.count(case((Mission.status == MissionStatus.REJECTED, 1))),
             func.coalesce(func.sum(case((dist_cond, Mission.distance_m), else_=0.0)), 0.0),
             func.count(case((dist_cond, 1))),
             func.coalesce(func.sum(case((pay_cond, Mission.payload_weight), else_=0.0)), 0.0),
@@ -48,11 +47,11 @@ async def get_mission_kpi(
     total = int(row[0] or 0)
     completed = int(row[1] or 0)
     cancelled = 0
-    rejected = int(row[2] or 0)
+    rejected = 0
     finished = completed + cancelled + rejected
-    dist_sum, dist_cnt = float(row[3] or 0.0), int(row[4] or 0)
-    pay_sum, pay_cnt = float(row[5] or 0.0), int(row[6] or 0)
-    total_rev = float(row[7] or 0.0)
+    dist_sum, dist_cnt = float(row[2] or 0.0), int(row[3] or 0)
+    pay_sum, pay_cnt = float(row[4] or 0.0), int(row[5] or 0)
+    total_rev = float(row[6] or 0.0)
 
     return MissionKPIResponse(
         total_missions=total,
@@ -104,11 +103,7 @@ async def get_active_flights(
     """
     result = await db.execute(
         select(Mission).where(
-            Mission.status.in_([
-                MissionStatus.FLYING,
-                MissionStatus.IN_PROGRESS,
-                MissionStatus.ACTIVE_MISSION,
-            ])
+            Mission.status == MissionStatus.FLYING
         )
     )
     missions = result.scalars().all()

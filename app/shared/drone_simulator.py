@@ -728,7 +728,7 @@ async def simulate_mission_flight(mission_id: str) -> None:
                 return
 
             # Mission phải đang FLYING (hoặc tự động chuẩn hóa về FLYING) mới chạy simulator
-            if mission.status in (MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION):
+            if mission.status != MissionStatus.FLYING:
                 mission.status = MissionStatus.FLYING
                 await db.commit()
             elif mission.status != MissionStatus.FLYING:

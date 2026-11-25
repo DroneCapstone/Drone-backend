@@ -246,11 +246,7 @@ async def get_live_tracking(
     flying_result = await db.execute(
         select(Mission).where(
             or_(
-                Mission.status.in_([
-                    MissionStatus.FLYING,
-                    MissionStatus.IN_PROGRESS,
-                    MissionStatus.ACTIVE_MISSION,
-                ]),
+                Mission.status == MissionStatus.FLYING,
                 and_(
                     Mission.status == MissionStatus.INCIDENT_RETURN,
                     Mission.arrived_at.is_(None),
@@ -316,6 +312,8 @@ async def get_live_tracking(
             TelemetryLog.energy_consumed_wh.label("energy_consumed_wh"),
             TelemetryLog.wind_speed.label("wind_speed"),
             TelemetryLog.weather_temperature.label("weather_temperature"),
+            TelemetryLog.weather_apparent_temp.label("weather_apparent_temp"),
+            TelemetryLog.weather_dew_point.label("weather_dew_point"),
             TelemetryLog.weather_humidity.label("weather_humidity"),
             TelemetryLog.weather_wind_speed.label("weather_wind_speed"),
             TelemetryLog.weather_wind_gust.label("weather_wind_gust"),
@@ -461,7 +459,7 @@ async def get_live_tracking(
         inc_desc = (inc.description or "") if inc else ""
         inc_desc_upper = inc_desc.upper()
         is_airborne_stale = bool(
-            mission.status in (MissionStatus.FLYING, MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION)
+            mission.status == MissionStatus.FLYING
             and mission.handling_status in (None, HandlingStatus.INCOMING)
             and log is not None
             and log.timestamp is not None
@@ -778,18 +776,18 @@ async def collect_telemetry(
         
     actual_mission_id = mission.id
 
-    if mission.status not in (MissionStatus.APPROVED, MissionStatus.FLYING):
+    if mission.status not in (MissionStatus.SCHEDULED, MissionStatus.FLYING):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot ingest telemetry for mission in '{mission.status.value}' status. "
-                   f"Only APPROVED or FLYING missions are accepted."
+                   f"Only SCHEDULED or FLYING missions are accepted."
         )
 
-    # ── 1. Xử lý chuyển trạng thái APPROVED → FLYING ───────────────────────────
+    # ── 1. Xử lý chuyển trạng thái SCHEDULED → FLYING ───────────────────────────
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    if mission.status == MissionStatus.APPROVED:
+    if mission.status == MissionStatus.SCHEDULED:
         mission.status = MissionStatus.FLYING
         mission.start_time = now
         mission.departed_at = now
@@ -1185,10 +1183,7 @@ async def _get_reserved_battery_info_map(
     """
     active_statuses = [
         MissionStatus.SCHEDULED,
-        MissionStatus.IN_PROGRESS,
-        MissionStatus.APPROVED,
         MissionStatus.FLYING,
-        MissionStatus.ACTIVE_MISSION,
     ]
     info_map: dict[str, dict] = {}
 
@@ -1245,10 +1240,7 @@ async def _get_reserved_battery_info_map(
 
 _ACTIVE_HOLD_MISSION_STATUSES = [
     MissionStatus.SCHEDULED,
-    MissionStatus.IN_PROGRESS,
-    MissionStatus.APPROVED,
     MissionStatus.FLYING,
-    MissionStatus.ACTIVE_MISSION,
 ]
 
 
@@ -2108,8 +2100,19 @@ async def compute_mission_routes_internal(
     if clean_drone_id:
         drone_obj = drones_by_id.get(clean_drone_id) or await db.get(Drone, clean_drone_id)
         if not drone_obj and clean_drone_id.isdigit():
-            alt_id = f"DRN-{int(clean_drone_id):04d}"
+            num_suffix = f"{int(clean_drone_id):04d}"
+            alt_id = f"DRN-{num_suffix}"
             drone_obj = drones_by_id.get(alt_id) or await db.get(Drone, alt_id)
+            if not drone_obj:
+                drone_obj = next(
+                    (d for did, d in drones_by_id.items() if did.endswith(f"-DRN{num_suffix}")),
+                    None,
+                )
+                if not drone_obj:
+                    d_res = await db.execute(
+                        select(Drone).where(Drone.id.like(f"%-DRN{num_suffix}")).limit(1)
+                    )
+                    drone_obj = d_res.scalar_one_or_none()
             if drone_obj:
                 suggested_drone_id = drone_obj.id
 
@@ -3845,9 +3848,6 @@ async def build_missions_response_list(
     responses: list[MissionResponse] = []
     for m in missions:
         m_dict = {c.name: getattr(m, c.name) for c in m.__table__.columns}
-        # Chuẩn hóa trạng thái đang bay về MissionStatus.FLYING để FE hiển thị thống nhất
-        if m.status in (MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION):
-            m_dict["status"] = MissionStatus.FLYING
         payload = float(m.payload_weight or 0.0)
         drone_obj = drone_by_id.get(m.drone_id) if m.drone_id else None
 
@@ -4922,10 +4922,7 @@ async def _create_mission_internal(
 
     active_statuses = {
         MissionStatus.SCHEDULED,
-        MissionStatus.IN_PROGRESS,
-        MissionStatus.APPROVED,
         MissionStatus.FLYING,
-        MissionStatus.ACTIVE_MISSION,
     }
     active_status_list = list(active_statuses)
 
@@ -5841,9 +5838,6 @@ async def transit_confirm(
     # Validate trạng thái mission
     valid_statuses = {
         MissionStatus.FLYING,
-        MissionStatus.IN_PROGRESS,
-        MissionStatus.ACTIVE_MISSION,
-        MissionStatus.APPROVED,
         MissionStatus.SCHEDULED,
     }
     if mission.status not in valid_statuses:
@@ -6000,9 +5994,6 @@ async def emergency_land(
 
     active_statuses = {
         MissionStatus.FLYING,
-        MissionStatus.IN_PROGRESS,
-        MissionStatus.ACTIVE_MISSION,
-        MissionStatus.APPROVED,
     }
     if mission.status not in active_statuses:
         raise HTTPException(
@@ -6413,9 +6404,6 @@ async def execute_mission_failsafe(
 
     active_statuses = {
         MissionStatus.FLYING,
-        MissionStatus.IN_PROGRESS,
-        MissionStatus.ACTIVE_MISSION,
-        MissionStatus.APPROVED,
     }
     if mission.status not in active_statuses:
         raise HTTPException(

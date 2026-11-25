@@ -51,23 +51,13 @@ class LegDestinationType(str, enum.Enum):
 
 
 class MissionStatus(str, enum.Enum):
-    # FE Operator Spec VI Statuses — viết thường khớp với DB
-    SCHEDULED    = "Scheduled"
-    IN_PROGRESS  = "In Progress"
-    COMPLETED    = "Completed"
-    CANCELLED    = "Cancelled"
-    FAILED       = "Failed"
-    # Legacy Statuses (Kept for backwards compatibility)
-    PENDING_APPROVAL = "Pending Approval"
-    APPROVED         = "Approved"
-    FLYING           = "Flying"
-    REJECTED         = "Rejected"
-    ACTIVE_MISSION   = "Active mission"
-    ARRIVAL_COMPLETED = "Arrival completed"  # Drone tới hub (confirm-arrival)
-    MISSION_COMPLETED = "Mission completed"  # Khách lấy hàng xong (confirm-pickup)
-    INCIDENT_RETURN  = "Incident return"
-    # Awaiting Payment
-    AWAITING_PAYMENT = "Awaiting Payment"
+    SCHEDULED         = "Scheduled"
+    FLYING            = "Flying"
+    ARRIVAL_COMPLETED = "Arrival completed"
+    MISSION_COMPLETED = "Mission completed"
+    INCIDENT_RETURN   = "Incident return"
+    FAILED            = "Failed"
+    CANCELLED         = "Cancelled"
 
 
 class HandlingStatus(str, enum.Enum):
