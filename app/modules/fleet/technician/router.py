@@ -107,8 +107,6 @@ async def get_incoming_drones(
             .where(
                 Mission.status.in_([
                     MissionStatus.FLYING,
-                    MissionStatus.IN_PROGRESS,
-                    MissionStatus.ACTIVE_MISSION,
                     MissionStatus.INCIDENT_RETURN,
                     MissionStatus.FAILED,
                     MissionStatus.ARRIVAL_COMPLETED,
@@ -234,7 +232,7 @@ async def get_incoming_drones(
                 mission_state = "Incident"
             elif m_status in (MissionStatus.ARRIVAL_COMPLETED, MissionStatus.MISSION_COMPLETED):
                 mission_state = "Completed"
-            elif m_status in (MissionStatus.FLYING, MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION):
+            elif m_status == MissionStatus.FLYING:
                 mission_state = "Flying"
             else:
                 mission_state = None
@@ -1285,18 +1283,6 @@ async def mark_battery_charged(
     }
 
 
-@router.get("/drones/{drone_id}/maintenance-history", response_model=list[MaintenanceHistoryItem])
-async def get_drone_maintenance_history(
-    drone_id: str,
-    user: CurrentUser = Depends(allow_technician),
-    db: AsyncSession = Depends(get_async_db),
-):
-    result = await db.execute(
-        select(WorkOrder).where(WorkOrder.drone_id == drone_id).order_by(WorkOrder.id.desc())
-    )
-    return result.scalars().all()
-
-
 # ── Maintenance Records ───────────────────────────────────────────────────────
 
 @router.get("/maintenance-records/{drone_id}", response_model=list[MaintenanceRecordResponse])
@@ -1984,11 +1970,8 @@ async def confirm_relay_arrival(
             detail="Drone is still in transit on the incoming leg and has not landed at the Relay Hub yet. Please wait for the drone to land before confirming!"
         )
     if mission.status not in [
-        MissionStatus.IN_PROGRESS,
         MissionStatus.FLYING,
-        MissionStatus.ACTIVE_MISSION,
         MissionStatus.SCHEDULED,
-        MissionStatus.APPROVED,
     ]:
         raise HTTPException(
             status_code=400,
@@ -2035,7 +2018,7 @@ async def confirm_relay_arrival(
         )
 
     # Đảm bảo mission đang ở FLYING (khớp với bảng flow FE và live-tracking/telemetry)
-    if mission.status in [MissionStatus.SCHEDULED, MissionStatus.APPROVED, MissionStatus.IN_PROGRESS]:
+    if mission.status == MissionStatus.SCHEDULED:
         mission.status = MissionStatus.FLYING
         mission.start_time = mission.start_time or now
         mission.departed_at = mission.departed_at or now
@@ -2171,10 +2154,7 @@ async def swap_battery_at_relay(
 
     active_statuses = [
         MissionStatus.SCHEDULED,
-        MissionStatus.IN_PROGRESS,
-        MissionStatus.APPROVED,
         MissionStatus.FLYING,
-        MissionStatus.ACTIVE_MISSION,
     ]
     # Tập các mã pin đã được giữ bởi các Mission active KHÁC (gồm cả Mission.battery_id và MissionLeg.battery_id)
     other_mission_bats_res = await db.execute(

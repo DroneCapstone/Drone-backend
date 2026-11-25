@@ -651,7 +651,7 @@ async def track_delivery(
 
     current_mission_status = None
     if mission:
-        if mission.status in (MissionStatus.FLYING, MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION):
+        if mission.status == MissionStatus.FLYING:
             current_mission_status = MissionStatus.FLYING.value
         else:
             current_mission_status = mission.status.value if hasattr(mission.status, "value") else str(mission.status)
@@ -1184,7 +1184,7 @@ async def get_live_position(
 
     mission = await _latest_mission_for_order(db, order_id)
 
-    flying_statuses = {MissionStatus.FLYING, MissionStatus.IN_PROGRESS, MissionStatus.ACTIVE_MISSION}
+    flying_statuses = {MissionStatus.FLYING}
     is_flying = bool(mission and mission.status in flying_statuses)
 
     # Latest telemetry log

@@ -159,11 +159,7 @@ async def get_outbound_deliveries(
                     Mission.order_id == Order.id,
                     Mission.status.in_([
                         MissionStatus.SCHEDULED,
-                        MissionStatus.APPROVED,
-                        MissionStatus.PENDING_APPROVAL,
-                        MissionStatus.IN_PROGRESS,
                         MissionStatus.FLYING,
-                        MissionStatus.ACTIVE_MISSION,
                     ])
                 )
             )
@@ -324,11 +320,7 @@ async def receive_outbound_delivery(
     premature_missions_res = await db.execute(
         select(Mission).where(
             Mission.order_id == order.id,
-            Mission.status.in_([
-                MissionStatus.SCHEDULED,
-                MissionStatus.PENDING_APPROVAL,
-                MissionStatus.APPROVED,
-            ])
+            Mission.status == MissionStatus.SCHEDULED
         )
     )
     for pm in premature_missions_res.scalars().all():
@@ -442,12 +434,7 @@ async def prepare_battery_for_delivery(
             mission_fallback = await db.execute(
                 select(Mission).where(
                     Mission.order_id == order.id,
-                    Mission.status.in_([
-                        MissionStatus.APPROVED,
-                        MissionStatus.IN_PROGRESS,
-                        MissionStatus.FLYING,
-                        MissionStatus.ACTIVE_MISSION,
-                    ])
+                    Mission.status == MissionStatus.FLYING
                 ).order_by(Mission.id.desc()).limit(1)
             )
             mission = mission_fallback.scalars().first()
@@ -580,10 +567,7 @@ async def prepare_battery_for_delivery(
             Mission.id != mission.id,
             Mission.status.in_([
                 MissionStatus.SCHEDULED,
-                MissionStatus.IN_PROGRESS,
-                MissionStatus.APPROVED,
                 MissionStatus.FLYING,
-                MissionStatus.ACTIVE_MISSION
             ])
         )
     )

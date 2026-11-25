@@ -9,7 +9,7 @@
 | `Scheduled` | Operator đã tạo mission, chờ Technician chuẩn bị | Technician |
 | `Flying` | Drone đang bay | Operator (live tracking) |
 | `Incident return` | Drone quay về do sự cố | Technician (xử lý sự cố) |
-| `Completed` | Drone đáp hub đích, chờ Technician confirm | Technician |
+| `Arrival completed` | Drone đáp hub (relay hoặc đích), chờ xử lý tiếp | Technician |
 | `Mission completed` | Mission hoàn tất hoàn toàn | Lịch sử |
 | `Cancelled` | Hủy bỏ | Lịch sử |
 | `Failed` | Thất bại | Lịch sử |
