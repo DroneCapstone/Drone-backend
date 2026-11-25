@@ -860,15 +860,12 @@ async def simulate_mission_flight(mission_id: str) -> None:
         approaching_hub = progress >= 0.9  # Lần 10% cuối là gần hub
         
         if approaching_hub:
-            # Giảm tốc từ CRUISE_SPEED → 2 m/s (chuẩn bị hạ cánh)
+            # Giảm tốc từ CRUISE_SPEED → 0 m/s (chạm đất)
             descent_factor = (progress - 0.9) / 0.1  # 0.0 → 1.0 khi từ 90% → 100%
-            target_speed = CRUISE_SPEED * (1 - descent_factor * 0.8) + 2 * descent_factor  # Giảm từ cruise → 2 m/s
+            speed = round(CRUISE_SPEED * (1 - descent_factor), 2)  # Giảm từ cruise → 0 m/s
             
-            # Giảm độ cao từ CRUISE_ALTITUDE → 5m (hạ cánh)
-            target_altitude = CRUISE_ALTITUDE * (1 - descent_factor * 0.9) + 5 * descent_factor  # Giảm → 5m
-            
-            altitude = round(target_altitude, 2)
-            speed = round(target_speed, 2)
+            # Giảm độ cao từ CRUISE_ALTITUDE → 0m (chạm đất)
+            altitude = round(CRUISE_ALTITUDE * (1 - descent_factor), 2)  # Giảm → 0m
         else:
             # Giả lập sensor values chuẩn hóa lúc bay bình thường
             altitude     = round(CRUISE_ALTITUDE + math.sin(idx * 0.3) * 3, 2)
