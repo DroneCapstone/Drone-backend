@@ -6,17 +6,15 @@
 
 | Enum Value | Display Text | Ý nghĩa | Khi nào được set |
 |---|---|---|---|
-| `PENDING_APPROVAL` | Pending Approval | Operator đã tạo mission, chờ duyệt | Lúc tạo mission |
-| `APPROVED` | Approved | Operator đã duyệt, chờ Technician chuẩn bị | After approve |
-| `SCHEDULED` | Scheduled | Operator đã xếp lịch, chờ Technician chuẩn bị | After schedule |
-| `IN_PROGRESS` | In Progress | Mission đang được xử lý (chuẩn bị/bay) | Technician bấm ready/dispatch |
-| `FLYING` | Flying | Drone đang bay | Dispatcher gọi (auto normalize từ IN_PROGRESS/ACTIVE_MISSION) |
-| `ACTIVE_MISSION` | Active mission | Mission đang hoạt động | Legacy status (compat) |
-| `ARRIVAL_COMPLETED` | Arrival completed | Drone đáp hub (relay hoặc đích) | After confirm-arrival/confirm-relay-arrival |
-| `MISSION_COMPLETED` | Mission completed | Mission hoàn tất hoàn toàn, khách lấy hàng | After confirm-pickup |
-| `INCIDENT_RETURN` | Incident return | Drone quay về do sự cố (tự động hoặc emergency) | Simulator/failsafe trigger, Technician xác nhận |
-| `FAILED` | Failed | Mission thất bại (crash/lost) | Simulator detect crash |
-| `CANCELLED` | Cancelled | Mission bị hủy (manual hoặc overdue) | Manual cancel hoặc auto-cancel (>3 ngày) |
+| `SCHEDULED` | Scheduled | Operator đã tạo mission, chờ Technician chuẩn bị | Lúc create mission (operator) |
+| `IN_PROGRESS` | In Progress | Mission đang được xử lý (chuẩn bị/bay) | Auto-normalize từ SCHEDULED trước dispatch |
+| `FLYING` | Flying | Drone đang bay | Dispatcher gọi / auto-normalize |
+| `ACTIVE_MISSION` | Active mission | Mission đang hoạt động (legacy) | Compat - normalize sang FLYING |
+| `ARRIVAL_COMPLETED` | Arrival completed | Drone đáp hub (relay hoặc đích) | After confirm-relay-arrival hoặc confirm-arrival |
+| `MISSION_COMPLETED` | Mission completed | Mission hoàn tất hoàn toàn | After confirm-arrival (clean delivery) |
+| `INCIDENT_RETURN` | Incident return | Drone quay về do sự cố | Simulator phát hiện incident, Technician confirm |
+| `FAILED` | Failed | Mission thất bại (crash/lost) | Simulator phát hiện crash |
+| `CANCELLED` | Cancelled | Mission bị hủy (manual hoặc overdue) | Manual cancel hoặc auto-cancel (>3 ngày overdue) |
 
 ---
 
@@ -47,21 +45,18 @@
 
 ```
 [Origin Hub - Technician]
-  Operator tạo mission
-  → mission.status = PENDING_APPROVAL
+  Operator tạo & gọi Assign mission
+  → mission.status = SCHEDULED
   → mission.handling_status = AT_HUB
-  
-  Operator duyệt mission
-  → mission.status = APPROVED
   
   Technician lắp pin, kiểm tra drone
   POST /missions/{id}/ready
-  → mission.status = SCHEDULED (hoặc APPROVED → IN_PROGRESS)
+  → mission.status = IN_PROGRESS (nếu chưa là)
   → mission.handling_status = READY
   
   Technician bấm Dispatch
   POST /missions/{id}/dispatch
-  → mission.status = FLYING (auto-normalized từ SCHEDULED/IN_PROGRESS)
+  → mission.status = FLYING (auto-normalize từ SCHEDULED/IN_PROGRESS)
   → mission.handling_status = INCOMING
   → drone.status = IN_FLIGHT
   → drone.current_hub_id = NULL
