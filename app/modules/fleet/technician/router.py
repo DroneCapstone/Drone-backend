@@ -540,6 +540,9 @@ async def confirm_arrival(
     # Ghi nhận arrival_confirmed_at khi drone đáp hub (bình thường hay incident)
     mission.arrival_confirmed_at = now
     mission.arrival_confirmed_by = user.id
+    
+    # ── Ensure mission is tracked for update ──
+    db.add(mission)
 
     # ── Tích lũy giờ bay thực tế vào drone.total_flight_hours ────────────────
     if drone and mission.departed_at:
