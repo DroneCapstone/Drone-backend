@@ -873,6 +873,28 @@ async def confirm_arrival(
                                 ))
                     except Exception as _ae:
                         print(f"[ARRIVAL] Failed to notify hub technicians: {_ae}")
+
+                    # ── Notify Operators: technician confirmed the package arrived at the final hub ──
+                    try:
+                        from app.modules.system.models import Notification as _ONotif, NotificationType as _ONT
+                        from app.shared.workers import get_operator_ids as _get_op_ids
+                        _o_hub_name = hub_name or f"Hub #{receiving_hub_id}"
+                        async with db.begin_nested():
+                            for _oid in await _get_op_ids(db):
+                                db.add(_ONotif(
+                                    user_id=str(_oid),
+                                    title=f"Package arrived at {_o_hub_name} — Mission #{mission.id}",
+                                    message=(
+                                        f"Technician confirmed arrival of order #{order_obj.id} at {_o_hub_name} "
+                                        f"(Mission #{mission.id})."
+                                    ),
+                                    notifications_type=_ONT.MISSION_STATUS,
+                                    reference_id=f"PACKAGE_ARRIVED_OP_{mission.id}",
+                                    mission_id=str(mission.id),
+                                    created_at=now,
+                                ))
+                    except Exception as _oe:
+                        print(f"[ARRIVAL] Failed to notify operators: {_oe}")
     except Exception as e:
         print(f"[ORDER_CONFIRM] Lỗi cập nhật đơn hàng: {e}")
 
