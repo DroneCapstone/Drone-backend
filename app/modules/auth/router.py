@@ -300,7 +300,7 @@ async def google_callback(code: str, state: str, db: AsyncSession = Depends(get_
     # Kiểm tra state để xác định client type
     state_info = oauth_state_store.get(state)
     if not state_info:
-        return RedirectResponse(url="https://droneoptai.vercel.app/login?error=invalid_state")
+        return RedirectResponse(url=f"{settings.GOOGLE_CALLBACK_WEB}?error=invalid_state")
     
     # Xóa state sau khi sử dụng (one-time use)
     del oauth_state_store[state]
@@ -312,9 +312,9 @@ async def google_callback(code: str, state: str, db: AsyncSession = Depends(get_
     except Exception as e:
         print(f"[AUTH] Google exchange code failed: {e}")
         if client_type == "mobile":
-            return RedirectResponse(url="droneoptai://auth/google/callback?error=google_failed")
+            return RedirectResponse(url=f"{settings.GOOGLE_CALLBACK_MOBILE}?error=google_failed")
         else:
-            return RedirectResponse(url="https://droneoptai.vercel.app/login?error=google_failed")
+            return RedirectResponse(url=f"{settings.GOOGLE_CALLBACK_WEB}?error=google_failed")
 
     user = await service.get_or_create_google_user(db, google_info)
     
@@ -325,7 +325,7 @@ async def google_callback(code: str, state: str, db: AsyncSession = Depends(get_
     if client_type == "mobile":
         # Deep Link cho Mobile
         redirect_url = (
-            f"droneoptai://auth/google/callback"
+            f"{settings.GOOGLE_CALLBACK_MOBILE}"
             f"?access_token={access_token}"
             f"&refresh_token={refresh_token}"
             f"&token_type=bearer"
@@ -334,7 +334,7 @@ async def google_callback(code: str, state: str, db: AsyncSession = Depends(get_
     else:
         # Web URL
         redirect_url = (
-            f"https://droneoptai.vercel.app/auth/google/callback"
+            f"{settings.GOOGLE_CALLBACK_WEB}"
             f"?access_token={access_token}"
             f"&refresh_token={refresh_token}"
             f"&token_type=bearer"

@@ -34,8 +34,8 @@ from app.modules.fleet.models import Drone, Battery
 
 # ── Cấu hình ─────────────────────────────────────────────────────────────────
 
-INTERVAL_SEC = 3        # Giây giữa mỗi điểm telemetry
-STEPS_PER_LEG = 20      # Số điểm nội suy mỗi chặng (tăng lên để mượt hơn)
+INTERVAL_SEC = 1        # Giây giữa mỗi điểm telemetry (giảm từ 3s để mượt hơn, không khựng)
+STEPS_PER_LEG = 60      # Số điểm nội suy mỗi chặng (tăng để có đủ điểm giữa updates)
 
 # Thông số tĩnh không đô thị & bay an toàn (Theo chuẩn QCVN & Luật Phòng không)
 CRUISE_ALTITUDE = 50.0  # Độ cao bay hành trình tĩnh không đô thị chuẩn (50m - 80m)
@@ -855,13 +855,13 @@ async def simulate_mission_flight(mission_id: str) -> None:
         effective_interval = simulator_config.interval_sec / simulator_config.speed_multiplier
         await asyncio.sleep(effective_interval)
 
-        # ── Hạ cánh mượt mà: Bắt đầu giảm từ 80% quãng đường ──
+        # ── Hạ cánh mượt mà: Bắt đầu giảm từ 50% quãng đường ──
         progress = (idx + 1) / total_points  # 0.0 → 1.0
-        is_descending = progress >= 0.8  # Bắt đầu giảm từ 80% (20% cuối quãng đường)
+        is_descending = progress >= 0.5  # Bắt đầu giảm từ 50% (mượt mà hơn)
         
         if is_descending:
-            # descent_factor: từ 0.0 (80%) → 1.0 (100%)
-            descent_factor = (progress - 0.8) / 0.2  
+            # descent_factor: từ 0.0 (50%) → 1.0 (100%)
+            descent_factor = (progress - 0.5) / 0.5  
             speed = round(CRUISE_SPEED * (1 - descent_factor), 2)  # Giảm từ cruise → 0 m/s
             altitude = round(CRUISE_ALTITUDE * (1 - descent_factor), 2)  # Giảm → 0m
         else:
