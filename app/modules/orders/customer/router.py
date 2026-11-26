@@ -451,7 +451,9 @@ async def get_my_customer_orders(
 ):
     """BE - GET /api/v1/customer/orders: Luôn filter theo `current_user.id` từ JWT Token."""
     from app.modules.chatbot.customer.tools import tool_get_my_orders
-    res = await tool_get_my_orders(db=db, limit=limit, current_user_id=str(current_user.id))
+    res = await tool_get_my_orders(
+        db=db, limit=limit, current_user_id=str(current_user.id), include_cancelled=True
+    )
     res.pop("_actions", None)
     return res
 
@@ -464,7 +466,9 @@ async def get_my_customer_order_detail(
 ):
     """BE - GET /api/v1/customer/orders/{order_id}: Kiểm tra quyền sở hữu `order.customer_id == current_user.id`."""
     from app.modules.chatbot.customer.tools import tool_get_order_detail
-    res = await tool_get_order_detail(db=db, order_id=order_id, current_user_id=str(current_user.id))
+    res = await tool_get_order_detail(
+        db=db, order_id=order_id, current_user_id=str(current_user.id), include_cancelled=True
+    )
     if not res.get("success"):
         code = res.get("code", "ORDER_NOT_FOUND")
         status_code = 403 if code == "ORDER_ACCESS_DENIED" else 404
