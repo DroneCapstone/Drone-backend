@@ -1,6 +1,8 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+import secrets
+import json
 
 from app.core.config import settings
 from app.database.db import get_async_db, AsyncSessionLocal
@@ -8,6 +10,10 @@ from app.modules.auth import service
 from app.modules.auth.schemas import LoginRequest, RegisterRequest, TokenResponse, UserResponse, ForgotPasswordRequest, ResetPasswordRequest, ChangePasswordRequest
 from app.modules.system.service import log_activity
 from app.shared.dependencies import get_current_user, CurrentUser
+
+# ── Lưu trữ state tạm thời (OAuth state) ──
+# Trong production, dùng Redis thay vì dict
+oauth_state_store = {}
 
 
 async def _log_login_activity_bg(user_id: str, user_email: str, role_value: str) -> None:
@@ -34,6 +40,7 @@ GOOGLE_AUTH_URL = (
     "&scope=openid%20email%20profile"
     "&client_id={client_id}"
     "&redirect_uri={redirect_uri}"
+    "&state={state}"
 )
 
 
@@ -210,40 +217,90 @@ async def refresh_token(refresh_token: str, db: AsyncSession = Depends(get_async
 # ── Google OAuth ─────────────────────────────────────────────────────────────
 
 @router.get("/google")
-async def google_login():
+async def google_login(client_type: str = "web"):
     """
     Bắt đầu quá trình đăng nhập qua Google.
-    Chuyển hướng người dùng đến trang xác thực của Google.
+    
+    Query params:
+    - client_type: "web" (default) hoặc "mobile"
+    
+    Chuyển hướng người dùng đến trang xác thực của Google kèm state parameter.
     """
+    # Xác thực client_type
+    if client_type not in ("web", "mobile"):
+        client_type = "web"
+    
+    # Tạo state token để bảo vệ CSRF
+    state = secrets.token_urlsafe(32)
+    oauth_state_store[state] = {
+        "client_type": client_type,
+        "timestamp": __import__("time").time()
+    }
+    
+    # Backend URL để callback
+    backend_url = settings.BACKEND_URL.rstrip("/")
+    redirect_uri = f"{backend_url}/api/v1/auth/google/callback"
+    
     url = GOOGLE_AUTH_URL.format(
         client_id=settings.GOOGLE_CLIENT_ID,
-        redirect_uri=settings.GOOGLE_REDIRECT_URI,
+        redirect_uri=redirect_uri,
+        state=state,
     )
     return RedirectResponse(url)
 
 
 @router.get("/google/callback")
-async def google_callback(code: str, db: AsyncSession = Depends(get_async_db)):
+async def google_callback(code: str, state: str, db: AsyncSession = Depends(get_async_db)):
     """
     Xử lý callback từ Google sau khi xác thực thành công.
-    Redirect về FE kèm access_token trong URL params.
+    Redirect về Deep Link (mobile) hoặc Web URL (web) kèm access_token.
+    
+    Query params:
+    - code: Authorization code từ Google
+    - state: State parameter để xác định client type (web/mobile)
     """
+    # Kiểm tra state để xác định client type
+    state_info = oauth_state_store.get(state)
+    if not state_info:
+        return RedirectResponse(url="https://droneoptai.vercel.app/login?error=invalid_state")
+    
+    # Xóa state sau khi sử dụng (one-time use)
+    del oauth_state_store[state]
+    
+    client_type = state_info.get("client_type", "web")
+    
     try:
         google_info = await service.exchange_google_code(code)
-    except Exception:
-        frontend_url = settings.FRONTEND_URL.rstrip("/")
-        return RedirectResponse(url=f"{frontend_url}/login?error=google_failed")
+    except Exception as e:
+        print(f"[AUTH] Google exchange code failed: {e}")
+        if client_type == "mobile":
+            return RedirectResponse(url="droneoptai://auth/google/callback?error=google_failed")
+        else:
+            return RedirectResponse(url="https://droneoptai.vercel.app/login?error=google_failed")
 
     user = await service.get_or_create_google_user(db, google_info)
     
     access_token = service.create_access_token(user.id, user.role.value)
     refresh_token = service.create_refresh_token(user.id)
     
-    frontend_url = settings.FRONTEND_URL.rstrip("/")
-    redirect_url = (
-        f"{frontend_url}/auth/google/callback"
-        f"?access_token={access_token}"
-        f"&refresh_token={refresh_token}"
-        f"&token_type=bearer"
-    )
+    # Redirect đến URL phù hợp với client type
+    if client_type == "mobile":
+        # Deep Link cho Mobile
+        redirect_url = (
+            f"droneoptai://auth/google/callback"
+            f"?access_token={access_token}"
+            f"&refresh_token={refresh_token}"
+            f"&token_type=bearer"
+            f"&role={user.role.value.lower()}"
+        )
+    else:
+        # Web URL
+        redirect_url = (
+            f"https://droneoptai.vercel.app/auth/google/callback"
+            f"?access_token={access_token}"
+            f"&refresh_token={refresh_token}"
+            f"&token_type=bearer"
+            f"&role={user.role.value.lower()}"
+        )
+    
     return RedirectResponse(url=redirect_url)
