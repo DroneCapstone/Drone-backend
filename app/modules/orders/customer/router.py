@@ -662,7 +662,7 @@ async def track_delivery(
     điểm đầu/cuối tuyến, đường đã bay (polyline) và số checkpoint đã qua.
     """
     order = await db.get(Order, order_id)
-    if not order or order.status == OrderStatus.CANCELLED:
+    if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     if order.customer_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not your order")
@@ -769,6 +769,9 @@ async def track_delivery(
         mission_id=mission.id if mission else None,
         mission_status=current_mission_status,
         drone_id=mission.drone_id if mission else None,
+        order_status=order.status.value if hasattr(order.status, "value") else str(order.status or ""),
+        cancelled_at=order.cancelled_at,
+        cancellation_reason=order.cancellation_reason,
     )
 
     # Thu thập toàn bộ Hub ID (từ order và mission legs)
