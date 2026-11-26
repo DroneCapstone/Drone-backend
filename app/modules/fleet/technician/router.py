@@ -247,22 +247,34 @@ async def get_incoming_drones(
                 # Tìm leg đang active: IN_PROGRESS hoặc COMPLETED (khi technician confirm-relay-arrival)
                 for i, leg in enumerate(legs):
                     if leg.status in [MissionLegStatus.IN_PROGRESS, MissionLegStatus.COMPLETED]:
+                        # Lấy hub names cho current leg
+                        from_hub = await db.get(Hub, leg.from_hub_id) if leg.from_hub_id else None
+                        to_hub = await db.get(Hub, leg.to_hub_id) if leg.to_hub_id else None
+                        
                         current_leg_info = {
                             "id": leg.id,
                             "sequence_no": leg.sequence_no,
                             "from_hub_id": leg.from_hub_id,
+                            "from_hub_name": from_hub.name if from_hub else None,
                             "to_hub_id": leg.to_hub_id,
+                            "to_hub_name": to_hub.name if to_hub else None,
                             "battery_id": leg.battery_id,
                             "status": leg.status.value if hasattr(leg.status, "value") else leg.status,
                         }
                         # Next leg info (may have battery_id assigned during mission planning)
                         if i + 1 < len(legs):
                             next_leg = legs[i + 1]
+                            # Lấy hub names cho next leg
+                            next_from_hub = await db.get(Hub, next_leg.from_hub_id) if next_leg.from_hub_id else None
+                            next_to_hub = await db.get(Hub, next_leg.to_hub_id) if next_leg.to_hub_id else None
+                            
                             next_leg_info = {
                                 "id": next_leg.id,
                                 "sequence_no": next_leg.sequence_no,
                                 "from_hub_id": next_leg.from_hub_id,
+                                "from_hub_name": next_from_hub.name if next_from_hub else None,
                                 "to_hub_id": next_leg.to_hub_id,
+                                "to_hub_name": next_to_hub.name if next_to_hub else None,
                                 "battery_id": next_leg.battery_id,  # Use actual battery_id from leg (may be None if not planned yet)
                                 "status": next_leg.status.value if hasattr(next_leg.status, "value") else next_leg.status,
                             }
