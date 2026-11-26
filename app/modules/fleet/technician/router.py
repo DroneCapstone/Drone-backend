@@ -144,18 +144,13 @@ async def get_incoming_drones(
             
             query = query.where(
                 or_(
-                    # Show mission khi leg đang IN_PROGRESS tới hub này
+                    # Show mission khi leg đang IN_PROGRESS tới hub này (relay hoặc final destination)
                     Mission.id.in_(in_progress_leg_subq),
                     # Show mission khi leg COMPLETED tại hub này VÀ drone vẫn AT_HUB hoặc READY (chờ swap pin hoặc dispatch)
                     and_(
                         Mission.id.in_(completed_leg_at_hub_subq),
                         Mission.handling_status.in_([HandlingStatus.AT_HUB, HandlingStatus.READY]),
                         Drone.current_hub_id == tech_hub_id,
-                    ),
-                    # Show destination hub missions (không phải AT_HUB)
-                    and_(
-                        Mission.destination_hub_id == tech_hub_id,
-                        Mission.handling_status != HandlingStatus.AT_HUB,
                     ),
                 )
             )
