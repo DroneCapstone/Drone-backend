@@ -66,7 +66,7 @@ def compute_delivery_status(order: Order, mission: Optional[Mission]) -> tuple[s
             return "PAID", "Paid, Awaiting Drop-off"
         return "PENDING", "Pending"
     
-    ms_str = (mission.status.value if hasattr(mission.status, "value") else str(mission.status or "")).upper()
+    ms_str = (mission.status.value if hasattr(mission.status, "value") else str(mission.status or "")).upper().replace(" ", "_")
     if mission.arrival_confirmed_at is not None or ms_str in ("MISSION_COMPLETED", "COMPLETED"):
         return "DELIVERED", "Delivered"
     if mission.arrived_at is not None:
