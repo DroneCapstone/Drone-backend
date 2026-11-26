@@ -223,6 +223,12 @@ app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     lifespan=lifespan,
+    swagger_ui_parameters={
+        "filter": True,                  # Bật thanh tìm kiếm/lọc nhanh API ngay đầu /docs
+        "persistAuthorization": True,    # Giữ nguyên JWT Bearer token khi F5 lại /docs
+        "docExpansion": "none",          # Thu gọn các tag mặc định giúp dễ tìm & load nhanh
+        "displayRequestDuration": True,  # Hiển thị thời gian phản hồi (ms) cho mỗi request
+    },
 )
 
 
