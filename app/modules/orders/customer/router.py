@@ -561,6 +561,23 @@ async def cancel_order_with_reason(
     order.cancellation_reason = full_reason
     order.updated_at = now
 
+    # Notify admins and operators (same transaction, never breaks the cancel)
+    try:
+        from app.modules.system.models import Notification as _Notif, NotificationType as _NT
+        from app.shared.workers import get_operator_and_admin_ids
+        async with db.begin_nested():
+            for _uid in await get_operator_and_admin_ids(db):
+                db.add(_Notif(
+                    user_id=str(_uid),
+                    title=f"Order #{order_id} cancelled by customer",
+                    message=f"Customer cancelled order #{order_id}. Reason: {full_reason}.",
+                    notifications_type=_NT.MISSION_STATUS,
+                    reference_id=f"ORDER_CANCELLED_BY_CUSTOMER_{order_id}",
+                    created_at=now,
+                ))
+    except Exception as _e:
+        print(f"[NOTIFY] Failed to send order cancellation notification: {_e}")
+
     await db.commit()
 
     return {
