@@ -192,6 +192,8 @@ class WorkOrder(Base):
     record_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     inspection_items_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
     status_logs_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
+    proof_images_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)  # Proof images for work order (before/after/during/parts_replaced/incident_recovery)
+    parts_replaced_proof_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)  # Proof images for parts replaced
     # parts_replaced_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)  # Column does not exist in DB work_orders
 
 
