@@ -1205,6 +1205,59 @@ async def get_drone_maintenance_history(
     return maintenance_records
 
 
+@router.get("/drones/{drone_id}/battery-history", response_model=list, summary="Lịch pin của drone")
+async def get_drone_battery_history(
+    drone_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    user: CurrentUser = Depends(allow_technician),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Lấy lịch pin của drone (Battery History).
+    
+    - TECHNICIAN: chỉ xem drone tại hub của mình
+    - Trả về danh sách BatteryHistoryEntry từ activity_logs
+    """
+    # Kiểm tra drone có tại hub của technician không
+    drone = await db.get(Drone, drone_id)
+    if not drone:
+        raise HTTPException(status_code=404, detail="Drone not found")
+    if user.hub_id and drone.current_hub_id != int(user.hub_id):
+        raise HTTPException(status_code=403, detail="Drone is not at your hub")
+    
+    # Lấy battery history từ activity_logs (resource_type=drone, action=BATTERY_INSTALLED_ON_DRONE hoặc BATTERY_SWAPPED)
+    from app.modules.system.models import ActivityLog
+    query = (
+        select(ActivityLog)
+        .where(
+            ActivityLog.resource_type == "drone",
+            ActivityLog.resource_id == drone_id,
+            ActivityLog.action.in_(["BATTERY_INSTALLED_ON_DRONE", "BATTERY_SWAPPED"])
+        )
+        .order_by(ActivityLog.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    
+    result = await db.execute(query)
+    logs = result.scalars().all()
+    
+    battery_history = []
+    for log in logs:
+        entry = {
+            "id": log.id,
+            "stage": log.action,
+            "action": "install" if log.action == "BATTERY_INSTALLED_ON_DRONE" else "swap",
+            "details": log.details_json,
+            "recorded_at": log.created_at,
+            "technician_id": log.details_json.get("technician_id") if log.details_json else None,
+        }
+        battery_history.append(entry)
+    
+    return battery_history
+
+
 @router.patch("/drones/{drone_id}/status", response_model=DroneProfileResponse)
 async def update_drone_status(
     drone_id: str,
@@ -1230,6 +1283,36 @@ async def update_drone_status(
                 status_code=400,
                 detail="Cannot set drone status to Available while there is an unresolved Pending Maintenance Alert. Please resolve the alert first."
             )
+    
+    # ── Mục 9: Log drone status change ───────────────────────────────────
+    old_status = drone.status
+    now = get_vn_naive_datetime()
+    
+    if old_status != body.status:
+        try:
+            from app.modules.system.models import ActivityLog
+            
+            db.add(ActivityLog(
+                user_id=str(user.id),
+                user_email=user.email,
+                role=user.role.value if user.role else None,
+                action="DRONE_STATUS_CHANGED",
+                resource_type="drone",
+                resource_id=drone_id,
+                description=f"Drone {drone_id} status changed from {old_status.value if hasattr(old_status, 'value') else str(old_status)} to {body.status.value if hasattr(body.status, 'value') else str(body.status)}",
+                status="success",
+                details_json={
+                    "stage": "DRONE_STATUS_CHANGED",
+                    "old_status": old_status.value if hasattr(old_status, "value") else str(old_status),
+                    "new_status": body.status.value if hasattr(body.status, "value") else str(body.status),
+                    "reason": getattr(body, 'reason', None),
+                    "drone_id": drone_id,
+                    "technician_id": str(user.id),
+                },
+                created_at=now,
+            ))
+        except Exception as e:
+            print(f"[ACTIVITY LOG ERROR] Failed to log drone status change: {e}")
     
     drone.status = body.status
     await db.commit()
@@ -1360,6 +1443,56 @@ async def mark_battery_charged(
     }
 
 
+@router.get("/batteries/{battery_id}/history", response_model=list, summary="Lịch pin")
+async def get_battery_history(
+    battery_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    user: CurrentUser = Depends(allow_technician),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Lấy lịch tải/dỡ/kiểm tra của pin (Battery History).
+    
+    - Trả về danh sách BatteryHistoryEntry từ activity_logs
+    - Bao gồm: install, remove, swap, inspection actions
+    """
+    battery = await db.get(Battery, battery_id)
+    if not battery:
+        raise HTTPException(status_code=404, detail="Battery not found")
+    
+    # Lấy battery history từ activity_logs (resource_type=battery, action=BATTERY_INSTALLED_ON_DRONE hoặc BATTERY_SWAPPED)
+    from app.modules.system.models import ActivityLog
+    query = (
+        select(ActivityLog)
+        .where(
+            ActivityLog.resource_type == "battery",
+            ActivityLog.resource_id == battery_id,
+            ActivityLog.action.in_(["BATTERY_INSTALLED_ON_DRONE", "BATTERY_SWAPPED", "BATTERY_CHARGED"])
+        )
+        .order_by(ActivityLog.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    
+    result = await db.execute(query)
+    logs = result.scalars().all()
+    
+    battery_history = []
+    for log in logs:
+        entry = {
+            "id": log.id,
+            "action": log.action,
+            "details": log.details_json,
+            "recorded_at": log.created_at,
+            "technician_id": log.details_json.get("technician_id") if log.details_json else None,
+            "drone_id": log.details_json.get("drone_id") if log.details_json else None,
+        }
+        battery_history.append(entry)
+    
+    return battery_history
+
+
 # ── Maintenance Records ───────────────────────────────────────────────────────
 
 @router.get("/maintenance-records/{drone_id}", response_model=list[MaintenanceRecordResponse])
@@ -1454,6 +1587,38 @@ async def get_work_order_logs(
         raise HTTPException(status_code=404, detail="Work order not found")
     logs = list(reversed(wo.status_logs_json or []))
     return logs
+
+
+@router.get("/work-orders/{work_order_id}/proof-images", response_model=dict, summary="Lịch ảnh minh chứng công việc")
+async def get_work_order_proof_images(
+    work_order_id: int,
+    user: CurrentUser = Depends(allow_technician),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Lấy tất cả ảnh minh chứng và lịch trạng thái của một Work Order.
+    
+    Trả về:
+    - proof_images: Danh sách ảnh minh chứng (before/after/during/parts_replaced/incident_recovery)
+    - parts_replaced_images: Danh sách ảnh minh chứng thay thế linh kiện
+    - inspection_items: Danh sách items kiểm tra
+    - status_logs: Danh sách thay đổi trạng thái
+    """
+    wo = await db.get(WorkOrder, work_order_id)
+    if not wo:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    
+    return {
+        "work_order_id": wo.id,
+        "drone_id": wo.drone_id,
+        "status": wo.status.value if wo.status else None,
+        "proof_images": list(reversed(wo.proof_images_json or [])),
+        "parts_replaced_images": list(reversed(wo.parts_replaced_proof_json or [])),
+        "inspection_items": wo.inspection_items_json or [],
+        "status_logs": list(reversed(wo.status_logs_json or [])),
+        "created_at": wo.created_at,
+        "resolved_at": wo.resolved_at,
+    }
 
 
 # ── Maintenance Schedules ─────────────────────────────────────────────────────
@@ -1928,6 +2093,32 @@ async def update_inspection(
         wo.resulting_drone_status = body.resulting_drone_status
     now = get_vn_naive_datetime()
     
+    # ── Log proof images to work_order.proof_images_json ────────────────────────
+    if body.proof_image_url:
+        proof_image_entry = {
+            "type": "before" if body.status == WorkOrderStatus.IN_PROGRESS else "after",
+            "proof_image_url": body.proof_image_url,
+            "description": f"Proof image at {body.status.value}",
+            "recorded_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
+        }
+        cur_proof_images = list(wo.proof_images_json or [])
+        cur_proof_images.append(proof_image_entry)
+        wo.proof_images_json = cur_proof_images
+    
+    if body.parts_replaced_proof_url:
+        parts_proof_entry = {
+            "proof_image_url": body.parts_replaced_proof_url,
+            "description": "Parts replaced proof",
+            "recorded_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
+        }
+        cur_parts_proof = list(wo.parts_replaced_proof_json or [])
+        cur_parts_proof.append(parts_proof_entry)
+        wo.parts_replaced_proof_json = cur_parts_proof
+    
+    # ── Update inspection_items_json if provided ──────────────────────────────
+    if body.inspection_items:
+        wo.inspection_items_json = body.inspection_items
+    
     if body.status == WorkOrderStatus.COMPLETED:
         wo.resolved_at = now
         
@@ -1959,6 +2150,31 @@ async def update_inspection(
                 alert.acknowledged_by = user.id
                 alert.acknowledged_at = now
                 print(f"[MAINTENANCE] Alert #{alert.id} acknowledged by technician {user.id}")
+        
+        # ── Log to activity_logs with resource_type=drone ──────────────────────
+        try:
+            from app.modules.system.models import ActivityLog
+            if wo.drone_id:
+                activity_log = ActivityLog(
+                    resource_type="drone",
+                    resource_id=wo.drone_id,
+                    action="INSPECTION_COMPLETED",
+                    details_json={
+                        "work_order_id": wo.id,
+                        "technician_id": user.id,
+                        "action_taken": body.action_taken,
+                        "diagnosis": body.diagnosis,
+                        "resulting_drone_status": body.resulting_drone_status,
+                        "proof_image_url": body.proof_image_url,
+                        "parts_replaced_proof_url": body.parts_replaced_proof_url,
+                        "inspection_items": body.inspection_items,
+                        "timestamp": now.isoformat() if hasattr(now, "isoformat") else str(now),
+                    },
+                    created_at=now,
+                )
+                db.add(activity_log)
+        except Exception as e:
+            print(f"[ERROR] Failed to log inspection to activity_logs: {e}")
     
     new_log = {
         "id": len(wo.status_logs_json or []) + 1,
@@ -2361,6 +2577,87 @@ async def swap_battery_at_relay(
 
     # Cập nhật handling_status → READY
     mission.handling_status = HandlingStatus.READY
+
+    # ── Mục 9: Log battery swap history ───────────────────────────────────
+    if old_battery_id and old_battery_id != new_battery.id:
+        try:
+            from app.modules.system.models import ActivityLog
+            old_battery = await db.get(Battery, old_battery_id)
+            old_pct = old_battery.charge_level_pct if old_battery else None
+            
+            # Log for drone resource
+            db.add(ActivityLog(
+                user_id=str(user.id),
+                user_email=user.email,
+                role=user.role.value if user.role else None,
+                action="BATTERY_SWAPPED",
+                resource_type="drone",
+                resource_id=mission.drone_id,
+                description=f"Battery swapped on Drone {mission.drone_id}: {old_battery_id} → {new_battery.id}",
+                status="success",
+                details_json={
+                    "stage": "BATTERY_INSTALLED_ON_DRONE",
+                    "action": "swap",
+                    "removed_battery_id": old_battery_id,
+                    "installed_battery_id": new_battery.id,
+                    "battery_pct_before": old_pct,
+                    "battery_pct_after": new_battery.charge_level_pct,
+                    "drone_id": mission.drone_id,
+                    "mission_id": mission.id,
+                    "hub_id": relay_hub_id,
+                },
+                created_at=now,
+            ))
+            
+            # Log for old battery resource
+            db.add(ActivityLog(
+                user_id=str(user.id),
+                user_email=user.email,
+                role=user.role.value if user.role else None,
+                action="BATTERY_REMOVED",
+                resource_type="battery",
+                resource_id=old_battery_id,
+                description=f"Battery {old_battery_id} removed from Drone {mission.drone_id}",
+                status="success",
+                details_json={
+                    "stage": "BATTERY_REMOVED",
+                    "battery_id": old_battery_id,
+                    "drone_id": mission.drone_id,
+                    "mission_id": mission.id,
+                    "hub_id": relay_hub_id,
+                    "charge_level_pct": old_pct,
+                },
+                created_at=now,
+            ))
+            
+            # Log for new battery resource
+            db.add(ActivityLog(
+                user_id=str(user.id),
+                user_email=user.email,
+                role=user.role.value if user.role else None,
+                action="BATTERY_INSTALLED",
+                resource_type="battery",
+                resource_id=new_battery.id,
+                description=f"Battery {new_battery.id} installed on Drone {mission.drone_id}",
+                status="success",
+                details_json={
+                    "stage": "BATTERY_INSTALLED_ON_DRONE",
+                    "battery_id": new_battery.id,
+                    "drone_id": mission.drone_id,
+                    "mission_id": mission.id,
+                    "hub_id": relay_hub_id,
+                    "charge_level_pct": new_battery.charge_level_pct,
+                },
+                created_at=now,
+            ))
+            
+            # Update battery image URLs if provided
+            if body and body.proof_image_url:
+                new_battery.image_url = body.proof_image_url
+                drone.image_url = body.proof_image_url
+                
+        except Exception as e:
+            print(f"[ACTIVITY LOG ERROR] Failed to log battery swap: {e}")
 
     await db.commit()
 

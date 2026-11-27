@@ -667,6 +667,68 @@ async def prepare_battery_for_delivery(
     if leg1:
         leg1.battery_id = battery.id
 
+    # ── Mục 9: Log battery installation history ────────────────────────────
+    if mission.battery_id:
+        try:
+            from app.modules.system.models import ActivityLog
+            battery_pct_before = None
+            # Get old battery pct if battery was swapped
+            if mission.battery_id != battery.id:
+                old_battery = await db.get(Battery, mission.battery_id)
+                battery_pct_before = old_battery.charge_level_pct if old_battery else None
+            
+            db.add(ActivityLog(
+                user_id=str(user.id),
+                user_email=user.email,
+                role=user.role.value if user.role else None,
+                action="BATTERY_INSTALLED",
+                resource_type="drone",
+                resource_id=mission.drone_id,
+                description=f"Battery {battery.id} installed on Drone {mission.drone_id} for Mission {mission.id}",
+                status="success",
+                details_json={
+                    "stage": "BATTERY_INSTALLED_ON_DRONE",
+                    "installed_battery_id": battery.id,
+                    "battery_pct": battery.charge_level_pct,
+                    "drone_id": mission.drone_id,
+                    "mission_id": mission.id,
+                    "hub_id": hub_id,
+                },
+                created_at=get_vn_naive_datetime(),
+            ))
+            
+            # Also log for battery resource
+            db.add(ActivityLog(
+                user_id=str(user.id),
+                user_email=user.email,
+                role=user.role.value if user.role else None,
+                action="BATTERY_INSTALLED",
+                resource_type="battery",
+                resource_id=battery.id,
+                description=f"Battery {battery.id} installed on Drone {mission.drone_id}",
+                status="success",
+                details_json={
+                    "stage": "BATTERY_INSTALLED_ON_DRONE",
+                    "battery_id": battery.id,
+                    "drone_id": mission.drone_id,
+                    "mission_id": mission.id,
+                    "hub_id": hub_id,
+                    "charge_level_pct": battery.charge_level_pct,
+                },
+                created_at=get_vn_naive_datetime(),
+            ))
+            
+            # Update battery image_url (most recent state)
+            if body and body.proof_image_url:
+                battery.image_url = body.proof_image_url
+            
+            # Update drone image_url
+            if body and body.proof_image_url:
+                drone.image_url = body.proof_image_url
+                
+        except Exception as e:
+            print(f"[ACTIVITY LOG ERROR] Failed to log battery installation: {e}")
+
     await db.commit()
     await db.refresh(mission)
     await db.refresh(battery)
