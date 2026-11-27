@@ -28,6 +28,7 @@ from app.modules.fleet.technician.schemas import (
     HubInventoryCreate, HubInventoryUpdate, HubInventoryResponse, HubInventoryDetailedResponse
 )
 from app.modules.missions.models import Mission, MissionStatus, HandlingStatus, Incident, IncidentStatus, Order, MissionLeg, MissionLegStatus
+from app.modules.missions.schemas import OrderProofImageCreate, build_order_proof_image_entry
 from app.core.config import settings
 
 router = APIRouter(prefix="/technician/fleet", tags=["Fleet"])
@@ -436,7 +437,7 @@ async def get_transit_history(
 async def confirm_arrival(
     mission_id: str,
     background_tasks: BackgroundTasks,
-    body: Optional[ConfirmArrivalRequest] = None,
+    body: Optional[BaseModel] = None,
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -906,6 +907,51 @@ async def confirm_arrival(
                         print(f"[ARRIVAL] Failed to notify operators: {_oe}")
     except Exception as e:
         print(f"[ORDER_CONFIRM] Lỗi cập nhật đơn hàng: {e}")
+
+    # ── Mục 8: Log hình ảnh minh chứng PACKAGE_UNLOADED_FROM_DRONE ──────────
+    if body and hasattr(body, 'proof_image_url') and body.proof_image_url and mission.order_id:
+        order_obj = await db.get(OrderModel, mission.order_id)
+        if order_obj:
+            proof_entry = build_order_proof_image_entry(
+                stage="PACKAGE_UNLOADED_FROM_DRONE",
+                checklist=getattr(body, 'checklist', None),
+                proof_image_url=body.proof_image_url,
+                hub_id=receiving_hub_id,
+                mission_id=mission.id,
+                drone_id=mission.drone_id,
+                note=getattr(body, 'note', None),
+                technician_id=str(user.id),
+                recorded_at=now,
+            )
+            
+            # Thêm vào mảng proof_images_json của order
+            if not order_obj.proof_images_json:
+                order_obj.proof_images_json = []
+            order_obj.proof_images_json.append(proof_entry)
+            
+            # Ghi log vào activity_logs
+            try:
+                from app.modules.system.models import ActivityLog
+                db.add(ActivityLog(
+                    user_id=str(user.id),
+                    user_email=user.email,
+                    role=user.role.value if user.role else None,
+                    action="RECORD_PROOF_IMAGE",
+                    resource_type="order",
+                    resource_id=order_obj.id,
+                    description=f"Recorded proof image at PACKAGE_UNLOADED_FROM_DRONE stage for mission {mission.id}",
+                    status="success",
+                    details_json={
+                        "stage": "PACKAGE_UNLOADED_FROM_DRONE",
+                        "mission_id": mission.id,
+                        "hub_id": receiving_hub_id,
+                        "has_image": bool(body.proof_image_url),
+                        "checklist_items": len(getattr(body, 'checklist', [])) if hasattr(body, 'checklist') else 0,
+                    },
+                    created_at=now,
+                ))
+            except Exception as e:
+                print(f"[ACTIVITY LOG ERROR] Failed to log proof image for confirm-arrival: {e}")
 
     await db.commit()
     from app.modules.missions.bundle_service import invalidate_route_analysis_cache
@@ -2378,6 +2424,7 @@ async def mark_mission_ready(
 @router.post("/missions/{mission_id}/dispatch", summary="Dispatch drone bay tiếp chặng kế tiếp")
 async def dispatch_drone(
     mission_id: str,
+    body: Optional[OrderProofImageCreate] = None,
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -2529,6 +2576,53 @@ async def dispatch_drone(
             ))
     except Exception as e:
         print(f"[NOTIFICATION] Lỗi gửi thông báo dispatch cho Operator: {e}")
+
+    # ── Mục 8: Log hình ảnh minh chứng PACKAGE_LOADED_TO_DRONE cho tất cả orders ────
+    if body and body.proof_image_url and mission.order_id:
+        # Lấy order từ mission
+        order_obj = await db.get(OrderModel, mission.order_id)
+        if order_obj:
+            proof_entry = build_order_proof_image_entry(
+                stage="PACKAGE_LOADED_TO_DRONE",
+                checklist=body.checklist,
+                proof_image_url=body.proof_image_url,
+                hub_id=mission.origin_hub_id,
+                mission_id=mission.id,
+                drone_id=mission.drone_id,
+                note=body.note,
+                technician_id=str(user.id),
+                recorded_at=now,
+            )
+            
+            # Thêm vào mảng proof_images_json của order
+            if not order_obj.proof_images_json:
+                order_obj.proof_images_json = []
+            order_obj.proof_images_json.append(proof_entry)
+            
+            # Ghi log vào activity_logs
+            try:
+                from app.modules.system.models import ActivityLog
+                db.add(ActivityLog(
+                    user_id=str(user.id),
+                    user_email=user.email,
+                    role=user.role.value if user.role else None,
+                    action="RECORD_PROOF_IMAGE",
+                    resource_type="order",
+                    resource_id=order_obj.id,
+                    description=f"Recorded proof image at PACKAGE_LOADED_TO_DRONE stage for mission {mission.id}",
+                    status="success",
+                    details_json={
+                        "stage": "PACKAGE_LOADED_TO_DRONE",
+                        "mission_id": mission.id,
+                        "drone_id": mission.drone_id,
+                        "hub_id": mission.origin_hub_id,
+                        "has_image": bool(body.proof_image_url),
+                        "checklist_items": len(body.checklist) if body.checklist else 0,
+                    },
+                    created_at=now,
+                ))
+            except Exception as e:
+                print(f"[ACTIVITY LOG ERROR] Failed to log proof image for dispatch: {e}")
 
     await db.commit()
 
