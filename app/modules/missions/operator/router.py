@@ -4230,6 +4230,11 @@ async def build_missions_response_list(
         m_dict["suggestedDroneId"] = m.drone_id
         m_dict["scheduled_route"] = scheduled_route
         m_dict["routes"] = [scheduled_route]
+        from app.modules.missions.bundle_service import extract_mission_bundle_info
+        bundle_info = extract_mission_bundle_info(m)
+        m_dict["is_bundled"] = bundle_info["is_bundled"]
+        m_dict["bundled_order_ids"] = bundle_info["bundled_order_ids"]
+        m_dict["total_orders_count"] = bundle_info["order_count"]
         meta_info = extract_mission_override_and_compensation(m)
         m_dict["route_override_info"] = meta_info.get("route_override")
         m_dict["late_delivery_compensation"] = meta_info.get("late_delivery_compensation")
@@ -5037,6 +5042,7 @@ def _build_created_mission_response(
         "suggestedDroneId": mission.drone_id,
         "scheduled_route": scheduled_route,
         "routes": [scheduled_route],
+        "is_bundled": len(all_mission_order_ids) > 1,
         "bundled_order_ids": all_mission_order_ids,
         "total_orders_count": len(all_mission_order_ids),
         "route_override_info": extract_mission_override_and_compensation(mission).get("route_override"),
@@ -5416,6 +5422,10 @@ async def _create_mission_internal(
     duration_min = selected_schema.predictedDurationMin if selected_schema else 0
     route_str = selected_schema.route_string if selected_schema else ""
 
+    from app.modules.missions.bundle_service import build_bundled_orders_checkpoint_entry
+    bundled_orders_entry = build_bundled_orders_checkpoint_entry(order.id, all_mission_order_ids)
+    initial_checkpoints = [e for e in (route_override_entry, bundled_orders_entry) if e]
+
     # 1. Tạo bản ghi Mission (dùng eff_origin_hub_id để đồng bộ Hub xuất phát khi Replan, vẫn giữ nguyên order.origin_hub_id)
     mission = Mission(
         id=mission_id,
@@ -5432,7 +5442,7 @@ async def _create_mission_internal(
         status=MissionStatus.SCHEDULED,
         handling_status=HandlingStatus.AT_HUB,
         operator_id=user.id,
-        checkpoints_json=[route_override_entry] if route_override_entry else [],
+        checkpoints_json=initial_checkpoints,
     )
     db.add(mission)
 

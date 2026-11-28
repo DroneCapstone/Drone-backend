@@ -103,6 +103,7 @@ async def get_incoming_drones(
                 Battery.serial_number.label("battery_code"),
                 Battery.charge_level_pct.label("battery_percent"),
                 Mission.arrival_confirmed_at,
+                Mission.checkpoints_json.label("checkpoints_json"),
             )
             .outerjoin(Drone, Mission.drone_id == Drone.id)
             .outerjoin(Battery, Mission.battery_id == Battery.id)
@@ -201,6 +202,13 @@ async def get_incoming_drones(
             for bat in bat_res.scalars().all():
                 next_leg_bats[bat.id] = bat
         
+        from types import SimpleNamespace as _SNS
+        from app.modules.missions.bundle_service import (
+            extract_mission_bundle_info,
+            get_all_hubs_cached,
+        )
+        hub_name_map = {h.id: h.name for h in await get_all_hubs_cached(db)}
+
         for row in rows:
             (
                 m_id,
@@ -217,6 +225,7 @@ async def get_incoming_drones(
                 battery_code,
                 battery_percent,
                 arrival_confirmed_at,
+                checkpoints_json,
             ) = row
             if m_id in seen_ids:
                 continue
@@ -244,34 +253,26 @@ async def get_incoming_drones(
                 # Tìm leg đang active: IN_PROGRESS hoặc COMPLETED (khi technician confirm-relay-arrival)
                 for i, leg in enumerate(legs):
                     if leg.status in [MissionLegStatus.IN_PROGRESS, MissionLegStatus.COMPLETED]:
-                        # Lấy hub names cho current leg
-                        from_hub = await db.get(Hub, leg.from_hub_id) if leg.from_hub_id else None
-                        to_hub = await db.get(Hub, leg.to_hub_id) if leg.to_hub_id else None
-                        
                         current_leg_info = {
                             "id": leg.id,
                             "sequence_no": leg.sequence_no,
                             "from_hub_id": leg.from_hub_id,
-                            "from_hub_name": from_hub.name if from_hub else None,
+                            "from_hub_name": hub_name_map.get(leg.from_hub_id) if leg.from_hub_id else None,
                             "to_hub_id": leg.to_hub_id,
-                            "to_hub_name": to_hub.name if to_hub else None,
+                            "to_hub_name": hub_name_map.get(leg.to_hub_id) if leg.to_hub_id else None,
                             "battery_id": leg.battery_id,
                             "status": leg.status.value if hasattr(leg.status, "value") else leg.status,
                         }
                         # Next leg info (may have battery_id assigned during mission planning)
                         if i + 1 < len(legs):
                             next_leg = legs[i + 1]
-                            # Lấy hub names cho next leg
-                            next_from_hub = await db.get(Hub, next_leg.from_hub_id) if next_leg.from_hub_id else None
-                            next_to_hub = await db.get(Hub, next_leg.to_hub_id) if next_leg.to_hub_id else None
-                            
                             next_leg_info = {
                                 "id": next_leg.id,
                                 "sequence_no": next_leg.sequence_no,
                                 "from_hub_id": next_leg.from_hub_id,
-                                "from_hub_name": next_from_hub.name if next_from_hub else None,
+                                "from_hub_name": hub_name_map.get(next_leg.from_hub_id) if next_leg.from_hub_id else None,
                                 "to_hub_id": next_leg.to_hub_id,
-                                "to_hub_name": next_to_hub.name if next_to_hub else None,
+                                "to_hub_name": hub_name_map.get(next_leg.to_hub_id) if next_leg.to_hub_id else None,
                                 "battery_id": next_leg.battery_id,  # Use actual battery_id from leg (may be None if not planned yet)
                                 "status": next_leg.status.value if hasattr(next_leg.status, "value") else next_leg.status,
                             }
@@ -282,11 +283,17 @@ async def get_incoming_drones(
                                 next_leg_info["battery_percent"] = bat.charge_level_pct
                         break
 
+            bundle_info = extract_mission_bundle_info(
+                _SNS(order_id=order_id, checkpoints_json=checkpoints_json)
+            )
             response.append({
                 "id": str(m_id),
                 "mission_id": str(m_id),
                 "mission_code": str(m_id),
                 "order_id": order_id,
+                "is_bundled": bundle_info["is_bundled"],
+                "bundled_order_ids": bundle_info["bundled_order_ids"],
+                "total_orders_count": bundle_info["order_count"],
                 "origin_hub_id": origin_hub_id,
                 "destination_hub_id": dest_hub_id,
                 "drone_id": drone_id,
@@ -838,6 +845,32 @@ async def confirm_arrival(
                         confirm_msg = "Arrival confirmed at destination hub. Order delivered cleanly; drone placed into Maintenance for technical inspection."
                     order_obj.status = OrderStatus.DELIVERED_TO_HUB
                     order_obj.updated_at = now
+
+                    # Đồng bộ DELIVERED_TO_HUB cho tất cả các đơn gộp phụ (nếu mission là chuyến bay gộp đơn)
+                    from app.modules.missions.bundle_service import extract_mission_bundle_info
+                    _bundle_arr_info = extract_mission_bundle_info(mission)
+                    _sec_arr_ids = _bundle_arr_info.get("secondary_order_ids") or []
+                    if _sec_arr_ids:
+                        _sec_arr_orders = (
+                            await db.execute(select(OrderModel).where(OrderModel.id.in_(_sec_arr_ids)))
+                        ).scalars().all()
+                        for _so in _sec_arr_orders:
+                            _so.status = OrderStatus.DELIVERED_TO_HUB
+                            _so.updated_at = now
+                            if _so.customer_id:
+                                from app.modules.system.models import Notification as _BNotif, NotificationType as _BNT
+                                db.add(_BNotif(
+                                    user_id=_so.customer_id,
+                                    title="Drone Arrived at Hub — Your Package Is Ready!",
+                                    message=(
+                                        f"Your bundled order #{_so.id} has been delivered by drone to "
+                                        f"{hub_name or 'the destination hub'}. Please pick up your package at your earliest convenience."
+                                    ),
+                                    notifications_type=_BNT.MISSION_STATUS,
+                                    reference_id=f"DRONE_ARRIVED_{mission.id}",
+                                    mission_id=str(mission.id),
+                                    created_at=now,
+                                ))
 
                     # ── Mục 6: Kiểm tra giao trễ hạn & tính đền bù khi chọn Route khác EXPRESS ──
                     try:
@@ -2876,12 +2909,17 @@ async def dispatch_drone(
         mission.leg_destination_type = "destination"  # Bay đến destination cuối
     mission.handling_status = HandlingStatus.INCOMING
 
-    # Nếu Order đang ở AT_HUB, chuyển sang IN_DELIVERY khi drone cất cánh
-    if mission.order_id:
-        order_obj = await db.get(OrderModel, mission.order_id)
-        if order_obj and order_obj.status == OrderStatus.AT_HUB:
-            order_obj.status = OrderStatus.IN_DELIVERY
-            order_obj.updated_at = now
+    # Nếu Order (và các đơn gộp phụ nếu có) đang ở AT_HUB, chuyển sang IN_DELIVERY khi drone cất cánh
+    from app.modules.missions.bundle_service import extract_mission_bundle_info
+    _dispatch_bundle_ids = extract_mission_bundle_info(mission).get("bundled_order_ids") or []
+    if _dispatch_bundle_ids:
+        _disp_orders = (
+            await db.execute(select(OrderModel).where(OrderModel.id.in_(_dispatch_bundle_ids)))
+        ).scalars().all()
+        for _do in _disp_orders:
+            if _do.status == OrderStatus.AT_HUB:
+                _do.status = OrderStatus.IN_DELIVERY
+                _do.updated_at = now
 
     # Drone cất cánh → In Flight, rời hub
     if mission.drone_id:

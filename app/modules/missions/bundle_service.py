@@ -175,15 +175,80 @@ ACTIVE_MISSION_STATUSES = [
     MissionStatus.FLYING,
 ]
 
+def build_bundled_orders_checkpoint_entry(
+    primary_order_id: str,
+    all_order_ids: list[str],
+) -> Optional[dict[str, Any]]:
+    """
+    Tạo entry metadata lưu danh sách đơn gộp vào `missions.checkpoints_json` (không cần đổi schema DB).
+    Chỉ tạo entry khi chuyến bay có từ 2 đơn trở lên.
+    """
+    clean_ids = list(dict.fromkeys([str(oid).strip() for oid in (all_order_ids or []) if str(oid).strip()]))
+    if len(clean_ids) <= 1:
+        return None
+    primary = str(primary_order_id).strip()
+    if primary and primary not in clean_ids:
+        clean_ids.insert(0, primary)
+    return {
+        "type": "bundled_orders",
+        "is_bundled": True,
+        "primary_order_id": primary or clean_ids[0],
+        "bundled_order_ids": clean_ids,
+        "secondary_order_ids": [oid for oid in clean_ids if oid != (primary or clean_ids[0])],
+        "order_count": len(clean_ids),
+    }
+
+
+def extract_mission_bundle_info(mission: Any) -> dict[str, Any]:
+    """
+    Trích xuất thông tin gộp đơn chính thức từ `mission.checkpoints_json`.
+    Luôn trả về dict chuẩn {is_bundled, bundled_order_ids, secondary_order_ids, order_count}.
+    """
+    primary_id = str(getattr(mission, "order_id", None) or "").strip()
+    checkpoints = getattr(mission, "checkpoints_json", None)
+    if isinstance(checkpoints, list):
+        for entry in checkpoints:
+            if isinstance(entry, dict) and entry.get("type") == "bundled_orders":
+                raw_ids = entry.get("bundled_order_ids") or []
+                clean_ids = list(dict.fromkeys([str(x).strip() for x in raw_ids if str(x).strip()]))
+                if primary_id and primary_id not in clean_ids:
+                    clean_ids.insert(0, primary_id)
+                sec_ids = [oid for oid in clean_ids if oid != primary_id]
+                return {
+                    "is_bundled": len(clean_ids) > 1,
+                    "bundled_order_ids": clean_ids,
+                    "secondary_order_ids": sec_ids,
+                    "order_count": len(clean_ids),
+                }
+
+    default_ids = [primary_id] if primary_id else []
+    return {
+        "is_bundled": False,
+        "bundled_order_ids": default_ids,
+        "secondary_order_ids": [],
+        "order_count": len(default_ids),
+    }
+
+
 async def get_active_mission_order_ids(db: AsyncSession) -> set[str]:
-    """Lấy danh sách order_id của tất cả các Mission đang hoạt động."""
+    """Lấy danh sách toàn bộ order_id (cả đơn chính lẫn đơn gộp phụ) của các Mission đang hoạt động."""
     res = await db.execute(
-        select(Mission.order_id).where(
+        select(Mission.order_id, Mission.checkpoints_json).where(
             Mission.status.in_(ACTIVE_MISSION_STATUSES),
-            Mission.order_id.isnot(None)
+            Mission.order_id.isnot(None),
         )
     )
-    return set(res.scalars().all())
+    active_ids: set[str] = set()
+    for oid, checkpoints in res.all():
+        if oid:
+            active_ids.add(str(oid))
+        if isinstance(checkpoints, list):
+            for entry in checkpoints:
+                if isinstance(entry, dict) and entry.get("type") == "bundled_orders":
+                    for bid in (entry.get("bundled_order_ids") or []):
+                        if bid:
+                            active_ids.add(str(bid))
+    return active_ids
 
 
 def resolve_effective_origin_from_missions(

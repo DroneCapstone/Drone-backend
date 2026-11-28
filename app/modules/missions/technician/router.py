@@ -765,6 +765,7 @@ async def get_confirmations(
             Battery.serial_number.label("battery_serial"),
             User.full_name.label("customer_name"),
             Order.proof_images_json.label("proof_images_json"),
+            Mission.checkpoints_json.label("checkpoints_json"),
         ).outerjoin(
             Hub, Mission.destination_hub_id == Hub.id  # ← Join với destination hub
         ).outerjoin(
@@ -791,11 +792,21 @@ async def get_confirmations(
         result = await db.execute(query.order_by(Mission.id.desc()))
         rows = result.all()
 
-        return [
-            {
+        from types import SimpleNamespace as _SNS
+        from app.modules.missions.bundle_service import extract_mission_bundle_info
+
+        items = []
+        for row in rows:
+            b_info = extract_mission_bundle_info(
+                _SNS(order_id=row.order_id, checkpoints_json=row.checkpoints_json)
+            )
+            items.append({
                 "id": row.id,
                 "order_id": row.order_id,
                 "order_code": row.order_id,
+                "is_bundled": b_info["is_bundled"],
+                "bundled_order_ids": b_info["bundled_order_ids"],
+                "total_orders_count": b_info["order_count"],
                 "mission_code": row.mission_code,
                 "origin_hub": row.origin_hub_name,  # ← Hub gốc
                 "destination_hub": row.destination_hub_name,  # ← Hub đích
@@ -805,8 +816,8 @@ async def get_confirmations(
                 "status": getattr(row.status, "value", row.status),
                 "handling_status": getattr(row.handling_status, "value", row.handling_status),
                 "order_proof_images": row.proof_images_json or [],
-            } for row in rows
-        ]
+            })
+        return items
     except Exception as e:
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=500, content={"error": str(e), "trace": traceback.format_exc()})
@@ -840,7 +851,10 @@ async def confirm_pickup(
     mission.status = MissionStatus.MISSION_COMPLETED
     mission.handling_status = None
     
-    # Update order status and timestamp when customer picks up
+    # Update order status and timestamp when customer picks up (kèm đồng bộ đơn gộp phụ nếu có)
+    from app.modules.missions.bundle_service import extract_mission_bundle_info
+    _pickup_bundle_info = extract_mission_bundle_info(mission)
+    _pickup_sec_ids = _pickup_bundle_info.get("secondary_order_ids") or []
     if mission.order_id:
         order = await db.get(OrderModel, mission.order_id)
         if order:
@@ -848,6 +862,15 @@ async def confirm_pickup(
             order.destination_received_at = now
             order.destination_received_by = user.id
             order.updated_at = now
+            if _pickup_sec_ids:
+                _sec_pickup_orders = (
+                    await db.execute(select(OrderModel).where(OrderModel.id.in_(_pickup_sec_ids)))
+                ).scalars().all()
+                for _spo in _sec_pickup_orders:
+                    _spo.status = OrderStatus.DELIVERED_TO_CUSTOMER
+                    _spo.destination_received_at = now
+                    _spo.destination_received_by = user.id
+                    _spo.updated_at = now
 
             # ── Mục 8: Log hình ảnh minh chứng CUSTOMER_PICKUP_CONFIRMED ────────
             if body and body.proof_image_url:
