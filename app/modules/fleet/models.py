@@ -132,6 +132,7 @@ class Drone(Base):
     # ── Preventive maintenance tracking ──────────────────────────────
     total_flight_hours: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0.0")
     last_maintenance_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     batteries = relationship("Battery", back_populates="drone")
 
@@ -156,6 +157,7 @@ class Battery(Base):
     # Thời điểm pin gần nhất được sạc đầy 100% (ghi bởi charging worker hoặc manual mark-charged)
     last_charged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     work_order_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     
     drone = relationship("Drone", back_populates="batteries")
 
@@ -192,6 +194,8 @@ class WorkOrder(Base):
     record_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     inspection_items_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
     status_logs_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
+    proof_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parts_replaced_proof_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # parts_replaced_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)  # Column does not exist in DB work_orders
 
 

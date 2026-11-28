@@ -665,6 +665,7 @@ async def confirm_arrival(
 
     # ── 5. Order: DELIVERED_TO_HUB (nếu bình thường hoặc sự cố đáp đúng Hub Đích) hoặc AT_HUB + replan (nếu đáp Hub khác) ──
     confirm_msg = "Arrival confirmed. Mission completed, drone returned to Hub Fleet, and battery moved to Battery Management."
+    late_comp_result = None
     if is_incident_flight and receiving_hub_id:
         mission.destination_hub_id = receiving_hub_id
 
@@ -675,6 +676,7 @@ async def confirm_arrival(
             )
             order_obj = order_result.scalar_one_or_none()
             if order_obj:
+                hub = None
                 hub_name = None
                 if receiving_hub_id:
                     hub = await db.get(HubModel, receiving_hub_id)
@@ -824,6 +826,51 @@ async def confirm_arrival(
                     order_obj.status = OrderStatus.DELIVERED_TO_HUB
                     order_obj.updated_at = now
 
+                    # ── Mục 6: Kiểm tra giao trễ hạn & tính đền bù khi chọn Route khác EXPRESS ──
+                    try:
+                        from app.modules.missions.compensation_service import (
+                            apply_late_delivery_compensation_if_applicable,
+                            extract_mission_override_and_compensation,
+                        )
+                        orig_hub_comp = (
+                            await db.get(HubModel, order_obj.origin_hub_id)
+                            if order_obj.origin_hub_id else None
+                        )
+                        actual_arr_ts = mission.arrived_at or now
+                        late_comp_result = await apply_late_delivery_compensation_if_applicable(
+                            db=db,
+                            mission=mission,
+                            order_obj=order_obj,
+                            actual_arrival_at=actual_arr_ts,
+                            origin_hub=orig_hub_comp,
+                            dest_hub=hub,
+                        )
+                        # Xử lý thêm cho các đơn gộp EXPRESS khác (nếu có) trong route_override
+                        ro_meta = extract_mission_override_and_compensation(mission).get("route_override") or {}
+                        extra_exp_ids = [
+                            str(eid) for eid in (ro_meta.get("affected_express_order_ids") or [])
+                            if str(eid) != str(order_obj.id)
+                        ]
+                        if extra_exp_ids:
+                            extra_orders = list(
+                                (await db.execute(select(OrderModel).where(OrderModel.id.in_(extra_exp_ids)))).scalars().all()
+                            )
+                            for eo in extra_orders:
+                                eo_orig = (
+                                    await db.get(HubModel, eo.origin_hub_id)
+                                    if eo.origin_hub_id else orig_hub_comp
+                                )
+                                await apply_late_delivery_compensation_if_applicable(
+                                    db=db,
+                                    mission=mission,
+                                    order_obj=eo,
+                                    actual_arrival_at=actual_arr_ts,
+                                    origin_hub=eo_orig,
+                                    dest_hub=hub,
+                                )
+                    except Exception as _comp_err:
+                        print(f"[ARRIVAL] Failed to evaluate late delivery compensation: {_comp_err}")
+
                     if order_obj.receiver_email:
                         pending_bg_emails.append((
                             send_hub_arrival_email,
@@ -928,6 +975,7 @@ async def confirm_arrival(
         "hub_id": receiving_hub_id,
         "battery_released": released_battery_id,
         "legs_completed": len(legs),
+        "late_delivery_compensation": late_comp_result,
     }
 
 

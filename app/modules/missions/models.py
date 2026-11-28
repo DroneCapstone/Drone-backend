@@ -226,6 +226,8 @@ class Order(Base):
     aging_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # ── Cancellation ──────────────────────────────────────────────────────────
     cancellation_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # ── Order Lifecycle Proof Images (Mục 8) ─────────────────────────────────
+    proof_images_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
 
 
 class MissionLeg(Base):
