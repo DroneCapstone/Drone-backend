@@ -375,6 +375,38 @@ async def get_transit_history(
         query = query.order_by(Mission.arrived_at.desc().nullslast(), Mission.id.desc())
         result = await db.execute(query)
         rows = result.all()
+        
+        # ── Load all orders để tránh N+1 query ──────────────────────
+        order_ids = [row[1] for row in rows if row[1]]
+        order_map = {}
+        if order_ids:
+            orders = await db.execute(select(OrderModel).where(OrderModel.id.in_(order_ids)))
+            for order in orders.scalars():
+                order_map[order.id] = order
+        
+        # ── Load all drones để tránh N+1 query ──────────────────────
+        drone_ids = [row[8] for row in rows if row[8]]
+        drone_map = {}
+        if drone_ids:
+            drones = await db.execute(select(Drone).where(Drone.id.in_(drone_ids)))
+            for drone in drones.scalars():
+                drone_map[drone.id] = drone
+        
+        # ── Load all batteries để tránh N+1 query ──────────────────────
+        battery_ids = [row[11] for row in rows if row[11]]
+        battery_map = {}
+        if battery_ids:
+            batteries = await db.execute(select(Battery).where(Battery.id.in_(battery_ids)))
+            for battery in batteries.scalars():
+                battery_map[battery.id] = battery
+        
+        # ── Load all hubs để tránh N+1 query ──────────────────────
+        dest_hub_ids = [row[3] for row in rows if row[3]]
+        hub_map = {}
+        if dest_hub_ids:
+            hubs = await db.execute(select(Hub).where(Hub.id.in_(dest_hub_ids)))
+            for hub in hubs.scalars():
+                hub_map[hub.id] = hub
 
         response = []
         for row in rows:
@@ -398,9 +430,21 @@ async def get_transit_history(
                 origin_hub_name,
             ) = row
             
-            # Lấy tên hub đích từ DB
-            dest_hub = await db.get(Hub, dest_hub_id) if dest_hub_id else None
+            # Lấy tên hub đích từ RAM map
+            dest_hub = hub_map.get(dest_hub_id) if dest_hub_id else None
             dest_hub_name = dest_hub.name if dest_hub else None
+            
+            # Lấy proof images từ Order map
+            order = order_map.get(order_id) if order_id else None
+            proof_images = order.proof_images_json if order else None
+            
+            # Lấy drone image từ drone map
+            drone = drone_map.get(drone_id) if drone_id else None
+            drone_image_url = drone.image_url if drone else None
+            
+            # Lấy battery image từ battery map
+            battery = battery_map.get(battery_id) if battery_id else None
+            battery_image_url = battery.image_url if battery else None
             
             status_val = m_status.value if hasattr(m_status, "value") else m_status
             handling_val = m_handling.value if hasattr(m_handling, "value") else m_handling
@@ -410,9 +454,9 @@ async def get_transit_history(
                 "mission_code": str(m_id),
                 "order_id": order_id,
                 "origin_hub_id": origin_hub_id,
-                "origin_hub_name": origin_hub_name,  # ← Thêm tên hub gốc
+                "origin_hub_name": origin_hub_name,
                 "destination_hub_id": dest_hub_id,
-                "destination_hub_name": dest_hub_name,  # ← Thêm tên hub đích
+                "destination_hub_name": dest_hub_name,
                 "arrived_at": arrived_at.isoformat() if arrived_at else None,
                 "end_time": end_time.isoformat() if end_time else None,
                 "drone_id": drone_id,
@@ -426,6 +470,9 @@ async def get_transit_history(
                 "handling_status": handling_val if m_handling else None,
                 "arrival_confirmed_at": arrival_confirmed_at.isoformat() if arrival_confirmed_at else None,
                 "destination_received_at": destination_received_at.isoformat() if destination_received_at else None,
+                "proof_images": proof_images,  # Hình ảnh bay đi, bay tới (PACKAGE_LOADED_TO_DRONE, PACKAGE_UNLOADED_FROM_DRONE)
+                "drone_image_url": drone_image_url,  # Ảnh status drone hiện tại
+                "battery_image_url": battery_image_url,  # Ảnh status battery hiện tại (lúc thay pin)
             })
         return response
     except Exception as e:
@@ -3477,6 +3524,22 @@ async def get_outbound_history(
 
         from app.modules.missions.bundle_service import get_all_hubs_cached
         hub_name_map = {h.id: h.name for h in await get_all_hubs_cached(db)}
+        
+        # ── Load all orders để tránh N+1 query ──────────────────────
+        order_ids = [row[1] for row in rows if row[1]]
+        order_map = {}
+        if order_ids:
+            orders = await db.execute(select(OrderModel).where(OrderModel.id.in_(order_ids)))
+            for order in orders.scalars():
+                order_map[order.id] = order
+        
+        # ── Load all drones để tránh N+1 query ──────────────────────
+        drone_ids = [row[8] for row in rows if row[8]]
+        drone_map = {}
+        if drone_ids:
+            drones = await db.execute(select(Drone).where(Drone.id.in_(drone_ids)))
+            for drone in drones.scalars():
+                drone_map[drone.id] = drone
 
         response = []
         for row in rows:
@@ -3489,21 +3552,31 @@ async def get_outbound_history(
             # Lấy tên hub đích từ RAM cache (diệt N+1 db.get(Hub))
             dest_hub_name = hub_name_map.get(dest_hub_id) if dest_hub_id else None
             
+            # Lấy proof images từ Order map
+            order = order_map.get(order_id) if order_id else None
+            proof_images = order.proof_images_json if order else None
+            
+            # Lấy drone image từ drone map
+            drone = drone_map.get(drone_id) if drone_id else None
+            drone_image_url = drone.image_url if drone else None
+            
             response.append({
                 "mission_id": str(m_id) if m_id else None,
                 "order_id": order_id,
                 "origin_hub_id": origin_hub_id,
-                "origin_hub_name": origin_hub_name,  # ← Thêm tên hub gốc
+                "origin_hub_name": origin_hub_name,
                 "destination_hub_id": dest_hub_id,
-                "destination_hub_name": dest_hub_name,  # ← Thêm tên hub đích
-                "customer_dropoff_at": origin_received_at.isoformat() if origin_received_at else None,  # Lúc khách gửi tại hub
-                "drone_departed_at": start_time.isoformat() if start_time else None,  # Lúc drone xuất phát
+                "destination_hub_name": dest_hub_name,
+                "customer_dropoff_at": origin_received_at.isoformat() if origin_received_at else None,
+                "drone_departed_at": start_time.isoformat() if start_time else None,
                 "status": m_status,
                 "receiver_name": receiver_name,
                 "drone_id": drone_id,
                 "drone_code": drone_code,
                 "battery_id": battery_id,
                 "battery_code": battery_code,
+                "proof_images": proof_images,  # Hình ảnh lúc nhận hàng + lúc bay đi
+                "drone_image_url": drone_image_url,  # Ảnh status drone hiện tại
             })
         
         return response
