@@ -380,7 +380,7 @@ async def get_transit_history(
         order_ids = [row[1] for row in rows if row[1]]
         order_map = {}
         if order_ids:
-            orders = await db.execute(select(OrderModel).where(OrderModel.id.in_(order_ids)))
+            orders = await db.execute(select(Order).where(Order.id.in_(order_ids)))
             for order in orders.scalars():
                 order_map[order.id] = order
         
@@ -3529,7 +3529,7 @@ async def get_outbound_history(
         order_ids = [row[1] for row in rows if row[1]]
         order_map = {}
         if order_ids:
-            orders = await db.execute(select(OrderModel).where(OrderModel.id.in_(order_ids)))
+            orders = await db.execute(select(Order).where(Order.id.in_(order_ids)))
             for order in orders.scalars():
                 order_map[order.id] = order
         
@@ -3654,7 +3654,7 @@ async def get_confirmation_history(
         order_ids = [row[1] for row in rows if row[1]]
         order_map = {}
         if order_ids:
-            orders = await db.execute(select(OrderModel).where(OrderModel.id.in_(order_ids)))
+            orders = await db.execute(select(Order).where(Order.id.in_(order_ids)))
             for order in orders.scalars():
                 order_map[order.id] = order
         
