@@ -1134,21 +1134,8 @@ def _run_demo_stabilize(conn, now_vn: dt.datetime) -> dict[str, Any]:
         dist_m = _haversine_m(float(oh["latitude"]), float(oh["longitude"]), float(dh["latitude"]), float(dh["longitude"]))
         fee, _, _ = _compute_demo_delivery_fee(dist_m, sp["kg"], sp["pkg_type"], sp["mode"])
         oid = _next_order_id(c_at)
-        proof_stage1 = [
-            {
-                "stage": "PACKAGE_RECEIVED_AT_ORIGIN_HUB",
-                "hub_id": sp["orig"],
-                "hub_name": oh["name"],
-                "captured_by": tech["id"],
-                "captured_by_email": tech["email"],
-                "captured_at": (now_tz - dt.timedelta(minutes=max(1, sp["created_ago_m"] - 5))).isoformat(),
-                "image_url": f"https://storage.droneoptai.local/proofs/{oid}_origin_received.jpg",
-                "checklist": [
-                    {"item": "Package seal intact", "passed": True},
-                    {"item": f"Verified weight ({sp['kg']} kg)", "passed": True},
-                ],
-            }
-        ]
+        # Không chèn URL giả (.local) gây broken image trên FE; để mảng rỗng chờ ảnh thật (hoặc giữ nguyên ảnh hiện có trên DB)
+        proof_stage1: list[dict[str, Any]] = []
         conn.execute(
             text("""
                 INSERT INTO orders (
@@ -2049,6 +2036,8 @@ def run_reset(
                 if seq_name:
                     conn.execute(text("SELECT setval(:seq, 1, false)"), {"seq": seq_name})
 
+            # Lưu ý: KHÔNG reset `drones.image_url` / `batteries.image_url` và KHÔNG xóa thư mục `uploads/`
+            # để toàn bộ hình ảnh thiết bị & ảnh minh chứng đã lưu trên server luôn được bảo toàn.
             res_drones = conn.execute(
                 text("""
                     UPDATE drones
