@@ -148,6 +148,7 @@ async def get_outbound_deliveries(
                 Mission.id.label("mission_id"),
                 Mission.status.label("mission_status"),
                 Mission.handling_status.label("handling_status"),
+                Mission.checkpoints_json.label("mission_checkpoints_json"),
                 Drone.id.label("drone_id"),
                 Drone.name.label("drone_name"),
                 Drone.model.label("drone_model"),
@@ -184,6 +185,52 @@ async def get_outbound_deliveries(
         result = await db.execute(query.order_by(Order.created_at.desc(), Mission.id.desc()))
         rows = result.all()
 
+        # Map các đơn gộp phụ đang AT_HUB tới đúng Mission/Drone/Pin của chuyến bay gộp
+        from types import SimpleNamespace as _SNS
+        from app.modules.missions.bundle_service import extract_mission_bundle_info
+
+        secondary_bundle_map: dict[str, dict] = {}
+        bundled_active_res = await db.execute(
+            select(
+                Mission.id.label("mission_id"),
+                Mission.order_id.label("primary_order_id"),
+                Mission.status.label("mission_status"),
+                Mission.handling_status.label("handling_status"),
+                Mission.checkpoints_json.label("checkpoints_json"),
+                Drone.id.label("drone_id"),
+                Drone.name.label("drone_name"),
+                Drone.model.label("drone_model"),
+                Battery.id.label("battery_id"),
+                Battery.serial_number.label("battery_serial"),
+                Battery.battery_model.label("battery_model"),
+            )
+            .outerjoin(Drone, Mission.drone_id == Drone.id)
+            .outerjoin(Battery, Mission.battery_id == Battery.id)
+            .where(
+                Mission.status.in_([MissionStatus.SCHEDULED, MissionStatus.FLYING]),
+                cast(Mission.checkpoints_json, String).ilike('%"bundled_orders"%'),
+            )
+            .order_by(Mission.id.desc())
+        )
+        for brow in bundled_active_res.all():
+            b_meta = extract_mission_bundle_info(
+                _SNS(order_id=brow.primary_order_id, checkpoints_json=brow.checkpoints_json)
+            )
+            for sec_oid in b_meta.get("secondary_order_ids") or []:
+                if sec_oid not in secondary_bundle_map:
+                    secondary_bundle_map[sec_oid] = {
+                        "mission_id": brow.mission_id,
+                        "mission_status": brow.mission_status,
+                        "handling_status": brow.handling_status,
+                        "drone_id": brow.drone_id,
+                        "drone_name": brow.drone_name,
+                        "drone_model": brow.drone_model,
+                        "battery_id": brow.battery_id,
+                        "battery_serial": brow.battery_serial,
+                        "battery_model": brow.battery_model,
+                        "bundle_info": b_meta,
+                    }
+
         seen_orders = set()
         items = []
         for row in rows:
@@ -194,12 +241,36 @@ async def get_outbound_deliveries(
             order_status_val = row.order_status.value if hasattr(row.order_status, "value") else row.order_status
             is_at_hub = (row.order_status == OrderStatus.AT_HUB) or (str(order_status_val) == OrderStatus.AT_HUB.value)
 
+            # Nếu đơn là đơn gộp phụ (chưa có mission.order_id trùng trực tiếp), ghép thông tin mission/drone từ chuyến bay gộp
+            sec_ctx = secondary_bundle_map.get(row.order_id) if (is_at_hub and not row.mission_id) else None
+            eff_mission_id = row.mission_id if row.mission_id else (sec_ctx["mission_id"] if sec_ctx else None)
+            eff_m_status = row.mission_status if row.mission_id else (sec_ctx["mission_status"] if sec_ctx else None)
+            eff_h_status = row.handling_status if row.mission_id else (sec_ctx["handling_status"] if sec_ctx else None)
+            eff_drone_id = row.drone_id if row.mission_id else (sec_ctx["drone_id"] if sec_ctx else None)
+            eff_drone_name = row.drone_name if row.mission_id else (sec_ctx["drone_name"] if sec_ctx else None)
+            eff_drone_model = row.drone_model if row.mission_id else (sec_ctx["drone_model"] if sec_ctx else None)
+            eff_bat_id = row.battery_id if row.mission_id else (sec_ctx["battery_id"] if sec_ctx else None)
+            eff_bat_serial = row.battery_serial if row.mission_id else (sec_ctx["battery_serial"] if sec_ctx else None)
+            eff_bat_model = row.battery_model if row.mission_id else (sec_ctx["battery_model"] if sec_ctx else None)
+
+            if sec_ctx:
+                b_info = sec_ctx["bundle_info"]
+                is_secondary_bundled = True
+            elif row.mission_id:
+                b_info = extract_mission_bundle_info(
+                    _SNS(order_id=row.order_id, checkpoints_json=row.mission_checkpoints_json)
+                )
+                is_secondary_bundled = False
+            else:
+                b_info = {"is_bundled": False, "bundled_order_ids": [row.order_id], "order_count": 1}
+                is_secondary_bundled = False
+
             # Issue #2: Chỉ hiển thị thông tin Mission & Drone khi đơn hàng đã AT_HUB
             m_status_val = (
-                row.mission_status.value if hasattr(row.mission_status, "value") else row.mission_status
+                eff_m_status.value if hasattr(eff_m_status, "value") else eff_m_status
             ) if is_at_hub else None
             h_status_val = (
-                row.handling_status.value if hasattr(row.handling_status, "value") else row.handling_status
+                eff_h_status.value if hasattr(eff_h_status, "value") else eff_h_status
             ) if is_at_hub else None
 
             items.append({
@@ -215,17 +286,21 @@ async def get_outbound_deliveries(
                 "delivery_mode": row.delivery_mode.value if hasattr(row.delivery_mode, "value") else row.delivery_mode,
                 "destination_hub": row.destination_hub_name,
                 "receiver_phone": row.receiver_phone,
-                "mission_id": row.mission_id if is_at_hub else None,
-                "mission_code": row.mission_id if is_at_hub else None,
+                "mission_id": eff_mission_id if is_at_hub else None,
+                "mission_code": eff_mission_id if is_at_hub else None,
                 "mission_status": m_status_val,
                 "status": m_status_val,
                 "handling_status": h_status_val,
-                "drone_id": row.drone_id if is_at_hub else None,
-                "drone": row.drone_name if is_at_hub else None,
-                "drone_model": row.drone_model if is_at_hub else None,
-                "battery_id": row.battery_id if is_at_hub else None,
-                "battery": row.battery_serial if is_at_hub else None,
-                "battery_model": row.battery_model if is_at_hub else None,
+                "drone_id": eff_drone_id if is_at_hub else None,
+                "drone": eff_drone_name if is_at_hub else None,
+                "drone_model": eff_drone_model if is_at_hub else None,
+                "battery_id": eff_bat_id if is_at_hub else None,
+                "battery": eff_bat_serial if is_at_hub else None,
+                "battery_model": eff_bat_model if is_at_hub else None,
+                "is_bundled": b_info["is_bundled"] if is_at_hub else False,
+                "is_secondary_bundled_order": is_secondary_bundled if is_at_hub else False,
+                "bundled_order_ids": b_info["bundled_order_ids"] if is_at_hub else [row.order_id],
+                "total_orders_count": b_info["order_count"] if is_at_hub else 1,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "order_proof_images": row.proof_images_json or [],
             })
@@ -765,6 +840,7 @@ async def get_confirmations(
             Battery.serial_number.label("battery_serial"),
             User.full_name.label("customer_name"),
             Order.proof_images_json.label("proof_images_json"),
+            Mission.checkpoints_json.label("checkpoints_json"),
         ).outerjoin(
             Hub, Mission.destination_hub_id == Hub.id  # ← Join với destination hub
         ).outerjoin(
@@ -791,11 +867,21 @@ async def get_confirmations(
         result = await db.execute(query.order_by(Mission.id.desc()))
         rows = result.all()
 
-        return [
-            {
+        from types import SimpleNamespace as _SNS
+        from app.modules.missions.bundle_service import extract_mission_bundle_info
+
+        items = []
+        for row in rows:
+            b_info = extract_mission_bundle_info(
+                _SNS(order_id=row.order_id, checkpoints_json=row.checkpoints_json)
+            )
+            items.append({
                 "id": row.id,
                 "order_id": row.order_id,
                 "order_code": row.order_id,
+                "is_bundled": b_info["is_bundled"],
+                "bundled_order_ids": b_info["bundled_order_ids"],
+                "total_orders_count": b_info["order_count"],
                 "mission_code": row.mission_code,
                 "origin_hub": row.origin_hub_name,  # ← Hub gốc
                 "destination_hub": row.destination_hub_name,  # ← Hub đích
@@ -805,8 +891,8 @@ async def get_confirmations(
                 "status": getattr(row.status, "value", row.status),
                 "handling_status": getattr(row.handling_status, "value", row.handling_status),
                 "order_proof_images": row.proof_images_json or [],
-            } for row in rows
-        ]
+            })
+        return items
     except Exception as e:
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=500, content={"error": str(e), "trace": traceback.format_exc()})
@@ -840,7 +926,10 @@ async def confirm_pickup(
     mission.status = MissionStatus.MISSION_COMPLETED
     mission.handling_status = None
     
-    # Update order status and timestamp when customer picks up
+    # Update order status and timestamp when customer picks up (kèm đồng bộ đơn gộp phụ nếu có)
+    from app.modules.missions.bundle_service import extract_mission_bundle_info
+    _pickup_bundle_info = extract_mission_bundle_info(mission)
+    _pickup_sec_ids = _pickup_bundle_info.get("secondary_order_ids") or []
     if mission.order_id:
         order = await db.get(OrderModel, mission.order_id)
         if order:
@@ -848,6 +937,15 @@ async def confirm_pickup(
             order.destination_received_at = now
             order.destination_received_by = user.id
             order.updated_at = now
+            if _pickup_sec_ids:
+                _sec_pickup_orders = (
+                    await db.execute(select(OrderModel).where(OrderModel.id.in_(_pickup_sec_ids)))
+                ).scalars().all()
+                for _spo in _sec_pickup_orders:
+                    _spo.status = OrderStatus.DELIVERED_TO_CUSTOMER
+                    _spo.destination_received_at = now
+                    _spo.destination_received_by = user.id
+                    _spo.updated_at = now
 
             # ── Mục 8: Log hình ảnh minh chứng CUSTOMER_PICKUP_CONFIRMED ────────
             if body and body.proof_image_url:
@@ -863,8 +961,11 @@ async def confirm_pickup(
                     recorded_at=now,
                 )
                 
-                # Thêm vào mảng proof_images_json của order (re-assign để SQLAlchemy luôn đánh dấu dirty)
+                # Thêm vào mảng proof_images_json của order (và toàn bộ đơn gộp phụ nếu có)
                 order.proof_images_json = list(order.proof_images_json or []) + [proof_entry]
+                if _pickup_sec_ids:
+                    for _spo in _sec_pickup_orders:
+                        _spo.proof_images_json = list(_spo.proof_images_json or []) + [proof_entry]
                 
                 # Ghi log vào activity_logs
                 try:

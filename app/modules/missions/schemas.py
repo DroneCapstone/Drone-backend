@@ -256,6 +256,7 @@ class MissionResponse(BaseModel):
     pickup_location_id: Optional[int] = None
     dropoff_location_id: Optional[int] = None
     payload_weight: Optional[float] = None
+    is_bundled: bool = False
     bundled_order_ids: Optional[list[str]] = None
     total_orders_count: Optional[int] = 1
     distance_m: Optional[float] = None

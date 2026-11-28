@@ -295,21 +295,32 @@ async def list_orders(
     hubs = await get_all_hubs_cached(db)
     hub_dict = {h.id: h.name for h in hubs}
 
-    # Lấy Mission mới nhất của từng Order để tính chính xác planningState (loại bỏ mission đã CANCELLED)
+    # Lấy Mission mới nhất của từng Order (gồm cả đơn chính lẫn đơn gộp phụ trong checkpoints_json)
+    from sqlalchemy import cast, String, or_
+    from app.modules.missions.bundle_service import extract_mission_bundle_info
+
     order_ids = [o.id for o in orders]
+    order_id_set = set(order_ids)
     mission_by_order: dict[str, Mission] = {}
     if order_ids:
         missions_result = await db.execute(
             select(Mission)
             .where(
-                Mission.order_id.in_(order_ids),
                 Mission.status != MissionStatus.CANCELLED,
+                or_(
+                    Mission.order_id.in_(order_ids),
+                    cast(Mission.checkpoints_json, String).ilike('%"bundled_orders"%'),
+                ),
             )
             .order_by(Mission.id.desc())
         )
         for m in missions_result.scalars().all():
-            if m.order_id and m.order_id not in mission_by_order:
+            if m.order_id and m.order_id in order_id_set and m.order_id not in mission_by_order:
                 mission_by_order[m.order_id] = m
+            b_info = extract_mission_bundle_info(m)
+            for bid in b_info.get("secondary_order_ids") or []:
+                if bid in order_id_set and bid not in mission_by_order:
+                    mission_by_order[bid] = m
 
     response_list = []
     hub_map_full = {h.id: h for h in hubs}
@@ -457,17 +468,26 @@ async def get_order(
     if not order or order.status == OrderStatus.CANCELLED:
         raise HTTPException(status_code=404, detail="Order not found")
         
-    # Lấy mission mới nhất của đơn hàng (loại trừ mission đã CANCELLED)
+    # Lấy mission mới nhất của đơn hàng (cả đơn chính lẫn đơn gộp phụ, loại trừ mission đã CANCELLED)
+    from sqlalchemy import cast, String, or_
+    from app.modules.missions.bundle_service import extract_mission_bundle_info
+
     mission_result = await db.execute(
         select(Mission)
         .where(
-            Mission.order_id == order_id,
             Mission.status != MissionStatus.CANCELLED,
+            or_(
+                Mission.order_id == order_id,
+                cast(Mission.checkpoints_json, String).ilike(f'%"{order_id}"%'),
+            ),
         )
         .order_by(Mission.id.desc())
-        .limit(1)
     )
-    latest_mission = mission_result.scalars().first()
+    latest_mission = None
+    for m_cand in mission_result.scalars().all():
+        if m_cand.order_id == order_id or order_id in extract_mission_bundle_info(m_cand).get("bundled_order_ids", []):
+            latest_mission = m_cand
+            break
     return await _build_order_response_detail(db, order, latest_mission)
 
 
