@@ -754,11 +754,14 @@ def build_order_proof_image_entry(
         dict: Phần tử để append vào mảng
     """
     from app.core.timezone import get_vn_naive_datetime
-    
+    from app.shared.image_storage import normalize_and_store_image
+
+    stored_url = normalize_and_store_image(proof_image_url, category="proofs")
+
     return {
         "stage": stage,
         "checklist": checklist or [],
-        "proof_image_url": proof_image_url,
+        "proof_image_url": stored_url,
         "hub_id": hub_id,
         "mission_id": mission_id,
         "drone_id": drone_id,

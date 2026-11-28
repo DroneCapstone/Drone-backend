@@ -224,7 +224,9 @@ class WorkOrder(Base):
         if not value:
             self.proof_image_url = None
         else:
-            self.proof_image_url = json.dumps(value, ensure_ascii=False)
+            from app.shared.image_storage import normalize_proof_entries
+            normalized = normalize_proof_entries(value, category="work_orders")
+            self.proof_image_url = json.dumps(normalized, ensure_ascii=False)
 
     @property
     def parts_replaced_proof_json(self) -> list:
@@ -251,7 +253,9 @@ class WorkOrder(Base):
         if not value:
             self.parts_replaced_proof_url = None
         else:
-            self.parts_replaced_proof_url = json.dumps(value, ensure_ascii=False)
+            from app.shared.image_storage import normalize_proof_entries
+            normalized = normalize_proof_entries(value, category="work_orders")
+            self.parts_replaced_proof_url = json.dumps(normalized, ensure_ascii=False)
 
 
 class MaintenanceAlert(Base):
