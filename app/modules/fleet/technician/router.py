@@ -375,6 +375,38 @@ async def get_transit_history(
         query = query.order_by(Mission.arrived_at.desc().nullslast(), Mission.id.desc())
         result = await db.execute(query)
         rows = result.all()
+        
+        # ── Load all orders để tránh N+1 query ──────────────────────
+        order_ids = [row[1] for row in rows if row[1]]
+        order_map = {}
+        if order_ids:
+            orders = await db.execute(select(OrderModel).where(OrderModel.id.in_(order_ids)))
+            for order in orders.scalars():
+                order_map[order.id] = order
+        
+        # ── Load all drones để tránh N+1 query ──────────────────────
+        drone_ids = [row[8] for row in rows if row[8]]
+        drone_map = {}
+        if drone_ids:
+            drones = await db.execute(select(Drone).where(Drone.id.in_(drone_ids)))
+            for drone in drones.scalars():
+                drone_map[drone.id] = drone
+        
+        # ── Load all batteries để tránh N+1 query ──────────────────────
+        battery_ids = [row[11] for row in rows if row[11]]
+        battery_map = {}
+        if battery_ids:
+            batteries = await db.execute(select(Battery).where(Battery.id.in_(battery_ids)))
+            for battery in batteries.scalars():
+                battery_map[battery.id] = battery
+        
+        # ── Load all hubs để tránh N+1 query ──────────────────────
+        dest_hub_ids = [row[3] for row in rows if row[3]]
+        hub_map = {}
+        if dest_hub_ids:
+            hubs = await db.execute(select(Hub).where(Hub.id.in_(dest_hub_ids)))
+            for hub in hubs.scalars():
+                hub_map[hub.id] = hub
 
         response = []
         for row in rows:
@@ -398,9 +430,21 @@ async def get_transit_history(
                 origin_hub_name,
             ) = row
             
-            # Lấy tên hub đích từ DB
-            dest_hub = await db.get(Hub, dest_hub_id) if dest_hub_id else None
+            # Lấy tên hub đích từ RAM map
+            dest_hub = hub_map.get(dest_hub_id) if dest_hub_id else None
             dest_hub_name = dest_hub.name if dest_hub else None
+            
+            # Lấy proof images từ Order map
+            order = order_map.get(order_id) if order_id else None
+            proof_images = order.proof_images_json if order else None
+            
+            # Lấy drone image từ drone map
+            drone = drone_map.get(drone_id) if drone_id else None
+            drone_image_url = drone.image_url if drone else None
+            
+            # Lấy battery image từ battery map
+            battery = battery_map.get(battery_id) if battery_id else None
+            battery_image_url = battery.image_url if battery else None
             
             status_val = m_status.value if hasattr(m_status, "value") else m_status
             handling_val = m_handling.value if hasattr(m_handling, "value") else m_handling
@@ -410,9 +454,9 @@ async def get_transit_history(
                 "mission_code": str(m_id),
                 "order_id": order_id,
                 "origin_hub_id": origin_hub_id,
-                "origin_hub_name": origin_hub_name,  # ← Thêm tên hub gốc
+                "origin_hub_name": origin_hub_name,
                 "destination_hub_id": dest_hub_id,
-                "destination_hub_name": dest_hub_name,  # ← Thêm tên hub đích
+                "destination_hub_name": dest_hub_name,
                 "arrived_at": arrived_at.isoformat() if arrived_at else None,
                 "end_time": end_time.isoformat() if end_time else None,
                 "drone_id": drone_id,
@@ -426,6 +470,9 @@ async def get_transit_history(
                 "handling_status": handling_val if m_handling else None,
                 "arrival_confirmed_at": arrival_confirmed_at.isoformat() if arrival_confirmed_at else None,
                 "destination_received_at": destination_received_at.isoformat() if destination_received_at else None,
+                "proof_images": proof_images,  # Hình ảnh bay đi, bay tới (PACKAGE_LOADED_TO_DRONE, PACKAGE_UNLOADED_FROM_DRONE)
+                "drone_image_url": drone_image_url,  # Ảnh status drone hiện tại
+                "battery_image_url": battery_image_url,  # Ảnh status battery hiện tại (lúc thay pin)
             })
         return response
     except Exception as e:
@@ -2141,31 +2188,21 @@ async def update_inspection(
         wo.resulting_drone_status = body.resulting_drone_status
     now = get_vn_naive_datetime()
     
-    # ── Log proof images to work_order.proof_images_json ────────────────────────
+    # ── Log proof images to work_order fields ──────────────────────────
     if body.proof_image_url:
-        proof_image_entry = {
-            "type": "before" if body.status == WorkOrderStatus.IN_PROGRESS else "after",
-            "proof_image_url": body.proof_image_url,
-            "description": f"Proof image at {body.status.value}",
-            "recorded_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
-        }
-        cur_proof_images = list(wo.proof_images_json or [])
-        cur_proof_images.append(proof_image_entry)
-        wo.proof_images_json = cur_proof_images
+        wo.proof_image_url = body.proof_image_url
     
     if body.parts_replaced_proof_url:
-        parts_proof_entry = {
-            "proof_image_url": body.parts_replaced_proof_url,
-            "description": "Parts replaced proof",
-            "recorded_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
-        }
-        cur_parts_proof = list(wo.parts_replaced_proof_json or [])
-        cur_parts_proof.append(parts_proof_entry)
-        wo.parts_replaced_proof_json = cur_parts_proof
+        wo.parts_replaced_proof_url = body.parts_replaced_proof_url
     
     # ── Update inspection_items_json if provided ──────────────────────────────
+    # Priority: 1. Explicit inspection_items, 2. Auto-generate from defect_type
     if body.inspection_items:
         wo.inspection_items_json = body.inspection_items
+    elif body.defect_type:
+        # Auto-generate inspection checklist from defect type
+        from app.modules.fleet.technician.schemas import build_inspection_items_from_defect_type
+        wo.inspection_items_json = build_inspection_items_from_defect_type(body.defect_type)
     
     if body.status == WorkOrderStatus.COMPLETED:
         wo.resolved_at = now
@@ -2183,6 +2220,9 @@ async def update_inspection(
                 try:
                     old_drone_status = drone.status
                     drone.status = DroneStatus(body.resulting_drone_status)
+                    # Update drone.image_url with proof image
+                    if body.proof_image_url:
+                        drone.image_url = body.proof_image_url
                     print(f"[DEBUG] Drone {wo.drone_id}: {old_drone_status} → {drone.status}")
                 except ValueError as e:
                     print(f"[ERROR] Invalid resulting_drone_status '{body.resulting_drone_status}': {e}")
@@ -2213,6 +2253,7 @@ async def update_inspection(
                         "action_taken": body.action_taken,
                         "diagnosis": body.diagnosis,
                         "resulting_drone_status": body.resulting_drone_status,
+                        "defect_type": body.defect_type,
                         "proof_image_url": body.proof_image_url,
                         "parts_replaced_proof_url": body.parts_replaced_proof_url,
                         "inspection_items": body.inspection_items,
@@ -3531,6 +3572,22 @@ async def get_outbound_history(
 
         from app.modules.missions.bundle_service import get_all_hubs_cached
         hub_name_map = {h.id: h.name for h in await get_all_hubs_cached(db)}
+        
+        # ── Load all orders để tránh N+1 query ──────────────────────
+        order_ids = [row[1] for row in rows if row[1]]
+        order_map = {}
+        if order_ids:
+            orders = await db.execute(select(OrderModel).where(OrderModel.id.in_(order_ids)))
+            for order in orders.scalars():
+                order_map[order.id] = order
+        
+        # ── Load all drones để tránh N+1 query ──────────────────────
+        drone_ids = [row[8] for row in rows if row[8]]
+        drone_map = {}
+        if drone_ids:
+            drones = await db.execute(select(Drone).where(Drone.id.in_(drone_ids)))
+            for drone in drones.scalars():
+                drone_map[drone.id] = drone
 
         response = []
         for row in rows:
@@ -3543,21 +3600,31 @@ async def get_outbound_history(
             # Lấy tên hub đích từ RAM cache (diệt N+1 db.get(Hub))
             dest_hub_name = hub_name_map.get(dest_hub_id) if dest_hub_id else None
             
+            # Lấy proof images từ Order map
+            order = order_map.get(order_id) if order_id else None
+            proof_images = order.proof_images_json if order else None
+            
+            # Lấy drone image từ drone map
+            drone = drone_map.get(drone_id) if drone_id else None
+            drone_image_url = drone.image_url if drone else None
+            
             response.append({
                 "mission_id": str(m_id) if m_id else None,
                 "order_id": order_id,
                 "origin_hub_id": origin_hub_id,
-                "origin_hub_name": origin_hub_name,  # ← Thêm tên hub gốc
+                "origin_hub_name": origin_hub_name,
                 "destination_hub_id": dest_hub_id,
-                "destination_hub_name": dest_hub_name,  # ← Thêm tên hub đích
-                "customer_dropoff_at": origin_received_at.isoformat() if origin_received_at else None,  # Lúc khách gửi tại hub
-                "drone_departed_at": start_time.isoformat() if start_time else None,  # Lúc drone xuất phát
+                "destination_hub_name": dest_hub_name,
+                "customer_dropoff_at": origin_received_at.isoformat() if origin_received_at else None,
+                "drone_departed_at": start_time.isoformat() if start_time else None,
                 "status": m_status,
                 "receiver_name": receiver_name,
                 "drone_id": drone_id,
                 "drone_code": drone_code,
                 "battery_id": battery_id,
                 "battery_code": battery_code,
+                "proof_images": proof_images,  # Hình ảnh lúc nhận hàng + lúc bay đi
+                "drone_image_url": drone_image_url,  # Ảnh status drone hiện tại
             })
         
         return response
@@ -3566,3 +3633,150 @@ async def get_outbound_history(
         import traceback
         print(f"[OUTBOUND_HISTORY] Error: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử gửi hàng: {str(e)}")
+
+
+
+# ── Confirmation History (Lịch sử xác nhận khách hàng nhận hàng) ────────────────
+@router.get("/confirmation-history", summary="Lịch sử xác nhận khách nhận hàng (kèm hình ảnh)")
+async def get_confirmation_history(
+    user: CurrentUser = Depends(allow_technician),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Lịch sử các lần khách hàng nhận hàng thành công tại hub của technician.
+    
+    Hiển thị:
+    - Lúc khách hàng nhận hàng (order.destination_received_at)
+    - Hình ảnh khách nhận hàng (proof_images_json stage=CUSTOMER_PICKUP_CONFIRMED)
+    - Thông tin drone, pin, hành trình
+    
+    Sorted by order.destination_received_at descending (nhận hàng mới nhất trước)
+    """
+    from sqlalchemy import cast, String
+    
+    try:
+        tech_hub_id = None
+        if user.hub_id and str(user.hub_id).isdigit():
+            tech_hub_id = int(user.hub_id)
+        
+        query = (
+            select(
+                Mission.id,
+                Mission.order_id,
+                Mission.origin_hub_id,
+                Mission.destination_hub_id,
+                Mission.start_time,
+                Mission.arrived_at,
+                cast(Mission.status, String).label("status"),
+                Order.destination_received_at,  # Lúc khách nhận hàng
+                Order.receiver_name,
+                Drone.id.label("drone_id"),
+                Drone.name.label("drone_code"),
+                Battery.id.label("battery_id"),
+                Battery.serial_number.label("battery_code"),
+                Hub.name.label("destination_hub_name"),  # ← Tên hub đích (nơi khách nhận)
+            )
+            .outerjoin(Drone, Mission.drone_id == Drone.id)
+            .outerjoin(Battery, Mission.battery_id == Battery.id)
+            .outerjoin(Order, Mission.order_id == Order.id)
+            .outerjoin(Hub, Mission.destination_hub_id == Hub.id)  # ← Join Hub đích
+            .where(Mission.status == MissionStatus.MISSION_COMPLETED)  # Chỉ những chuyến hoàn thành
+        )
+        
+        # Filter: chỉ chuyến bay đến hub của technician
+        if tech_hub_id is not None:
+            query = query.where(Mission.destination_hub_id == tech_hub_id)
+        else:
+            return []
+        
+        # Order by order.destination_received_at descending (khách nhận mới nhất trước)
+        query = query.order_by(Order.destination_received_at.desc().nullslast(), Mission.id.desc())
+        
+        result = await db.execute(query)
+        rows = result.all()
+
+        from app.modules.missions.bundle_service import get_all_hubs_cached
+        hub_name_map = {h.id: h.name for h in await get_all_hubs_cached(db)}
+        
+        # ── Load all orders để tránh N+1 query ──────────────────────
+        order_ids = [row[1] for row in rows if row[1]]
+        order_map = {}
+        if order_ids:
+            orders = await db.execute(select(OrderModel).where(OrderModel.id.in_(order_ids)))
+            for order in orders.scalars():
+                order_map[order.id] = order
+        
+        # ── Load all drones để tránh N+1 query ──────────────────────
+        drone_ids = [row[9] for row in rows if row[9]]
+        drone_map = {}
+        if drone_ids:
+            drones = await db.execute(select(Drone).where(Drone.id.in_(drone_ids)))
+            for drone in drones.scalars():
+                drone_map[drone.id] = drone
+        
+        # ── Load all batteries để tránh N+1 query ──────────────────────
+        battery_ids = [row[12] for row in rows if row[12]]
+        battery_map = {}
+        if battery_ids:
+            batteries = await db.execute(select(Battery).where(Battery.id.in_(battery_ids)))
+            for battery in batteries.scalars():
+                battery_map[battery.id] = battery
+
+        response = []
+        for row in rows:
+            (
+                m_id, order_id, origin_hub_id, dest_hub_id,
+                start_time, arrived_at, m_status, destination_received_at, receiver_name,
+                drone_id, drone_code, battery_id, battery_code, dest_hub_name,
+            ) = row
+
+            # Lấy tên hub gốc từ RAM cache
+            origin_hub_name = hub_name_map.get(origin_hub_id) if origin_hub_id else None
+            
+            # Lấy order để lấy proof_images_json
+            order = order_map.get(order_id) if order_id else None
+            proof_images = order.proof_images_json if order else None
+            
+            # Lấy hình ảnh CUSTOMER_PICKUP_CONFIRMED từ proof_images
+            customer_pickup_image = None
+            if proof_images:
+                for img in proof_images:
+                    if isinstance(img, dict) and img.get("stage") == "CUSTOMER_PICKUP_CONFIRMED":
+                        customer_pickup_image = img
+                        break
+            
+            # Lấy drone image từ drone map
+            drone = drone_map.get(drone_id) if drone_id else None
+            drone_image_url = drone.image_url if drone else None
+            
+            # Lấy battery image từ battery map
+            battery = battery_map.get(battery_id) if battery_id else None
+            battery_image_url = battery.image_url if battery else None
+            
+            response.append({
+                "mission_id": str(m_id) if m_id else None,
+                "order_id": order_id,
+                "origin_hub_id": origin_hub_id,
+                "origin_hub_name": origin_hub_name,
+                "destination_hub_id": dest_hub_id,
+                "destination_hub_name": dest_hub_name,
+                "drone_departed_at": start_time.isoformat() if start_time else None,
+                "drone_arrived_at": arrived_at.isoformat() if arrived_at else None,
+                "customer_pickup_at": destination_received_at.isoformat() if destination_received_at else None,  # Lúc khách nhận hàng
+                "status": m_status,
+                "receiver_name": receiver_name,
+                "drone_id": drone_id,
+                "drone_code": drone_code,
+                "battery_id": battery_id,
+                "battery_code": battery_code,
+                "customer_pickup_proof": customer_pickup_image,  # Hình ảnh + checklist lúc khách nhận hàng
+                "drone_image_url": drone_image_url,  # Ảnh status drone hiện tại
+                "battery_image_url": battery_image_url,  # Ảnh status battery hiện tại
+            })
+        
+        return response
+        
+    except Exception as e:
+        import traceback
+        print(f"[CONFIRMATION_HISTORY] Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử xác nhận: {str(e)}")
