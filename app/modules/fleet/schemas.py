@@ -96,5 +96,5 @@ class WorkOrderResponse(BaseModel):
     resulting_drone_status: Optional[str] = None  # Status technician chose after completion
     inspection_items_json: Optional[list] = None  # [{item, checked, status, note}, ...]
     status_logs_json: Optional[list] = None  # Log of status changes
-    proof_images_json: Optional[list] = None  # Proof images for work order (before/after/during/parts_replaced/incident_recovery)
-    parts_replaced_proof_json: Optional[list] = None  # Proof images for parts replaced
+    proof_image_url: Optional[str] = None  # Proof image for work order (before/after/during) - Base64 Data URL
+    parts_replaced_proof_url: Optional[str] = None  # Proof image for parts replaced - Base64 Data URL
