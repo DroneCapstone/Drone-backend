@@ -1016,8 +1016,16 @@ async def confirm_arrival(
                 recorded_at=now,
             )
             
-            # Thêm vào mảng proof_images_json của order (re-assign để SQLAlchemy luôn đánh dấu dirty)
+            # Thêm vào mảng proof_images_json của order chính và toàn bộ đơn gộp phụ (nếu có)
             order_obj.proof_images_json = list(order_obj.proof_images_json or []) + [proof_entry]
+            from app.modules.missions.bundle_service import extract_mission_bundle_info as _emb_arr
+            _sec_proof_arr_ids = _emb_arr(mission).get("secondary_order_ids") or []
+            if _sec_proof_arr_ids:
+                _sec_proof_arr_orders = (
+                    await db.execute(select(OrderModel).where(OrderModel.id.in_(_sec_proof_arr_ids)))
+                ).scalars().all()
+                for _spao in _sec_proof_arr_orders:
+                    _spao.proof_images_json = list(_spao.proof_images_json or []) + [proof_entry]
             
             # Ghi log vào activity_logs
             try:
@@ -2992,8 +3000,16 @@ async def dispatch_drone(
                 recorded_at=now,
             )
             
-            # Thêm vào mảng proof_images_json của order (re-assign để SQLAlchemy luôn đánh dấu dirty)
+            # Thêm vào mảng proof_images_json của order chính và toàn bộ đơn gộp phụ (nếu có)
             order_obj.proof_images_json = list(order_obj.proof_images_json or []) + [proof_entry]
+            from app.modules.missions.bundle_service import extract_mission_bundle_info as _emb_arr
+            _sec_proof_arr_ids = _emb_arr(mission).get("secondary_order_ids") or []
+            if _sec_proof_arr_ids:
+                _sec_proof_arr_orders = (
+                    await db.execute(select(OrderModel).where(OrderModel.id.in_(_sec_proof_arr_ids)))
+                ).scalars().all()
+                for _spao in _sec_proof_arr_orders:
+                    _spao.proof_images_json = list(_spao.proof_images_json or []) + [proof_entry]
             
             # Ghi log vào activity_logs
             try:
