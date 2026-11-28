@@ -325,6 +325,66 @@ async def _find_nearest_active_hub(
     return best_hub
 
 
+async def _consume_db_first_flight_incident_flag(mission_id: str, total_points: int) -> Optional[dict]:
+    """
+    Kiểm tra và tiêu thụ 1 lần duy nhất cờ `ARM_FIRST_FLIGHT_INCIDENT` trong `system_logs`
+    (được nạp bởi `reset_db_for_defense.py`). Nhờ lưu trong DB nên bền vững qua restart server,
+    chuyến bay demo đầu tiên sau khi clear sẽ tự động kích hoạt Incident đầy đủ thông tin rồi
+    tự động tắt để mọi chuyến bay tiếp theo thành công 100%.
+    """
+    from app.modules.system.models import SystemLog
+
+    async with AsyncSessionLocal() as db:
+        try:
+            row = (
+                await db.execute(
+                    select(SystemLog)
+                    .where(
+                        SystemLog.event == "ARM_FIRST_FLIGHT_INCIDENT",
+                        text("COALESCE((details_json->>'armed')::boolean, false) = true"),
+                    )
+                    .order_by(SystemLog.id.desc())
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalars().first()
+            if not row:
+                return None
+
+            details = dict(row.details_json or {})
+            armed_type = str(details.get("incident_type") or "DISCONNECT_CRASH").strip().upper()
+            if armed_type not in VALID_INCIDENT_TYPES:
+                armed_type = "DISCONNECT_CRASH"
+            armed_severity = str(details.get("severity") or "High")
+            armed_step = details.get("trigger_step")
+
+            details["armed"] = False
+            details["consumed_mission_id"] = str(mission_id)
+            details["consumed_at"] = get_vn_datetime().isoformat()
+            row.details_json = details
+            row.message = f"Consumed first-flight incident trigger on mission {mission_id} ({armed_type})."
+            await db.commit()
+
+            if total_points <= 1:
+                trigger_idx = 0
+            elif armed_step is not None:
+                trigger_idx = max(0, min(total_points - 1, int(armed_step) - 1))
+            else:
+                default_idx = max(simulator_config.incident_min_step, int(round(total_points * 0.65)) - 1)
+                trigger_idx = min(max(1, total_points - 2), default_idx)
+
+            return {
+                "armed": True,
+                "trigger_idx": trigger_idx,
+                "severity": armed_severity,
+                "incident_type": armed_type,
+                "source": "db_first_flight_flag",
+            }
+        except Exception as e:
+            print(f"[SIMULATOR] Lỗi kiểm tra cờ DB ARM_FIRST_FLIGHT_INCIDENT: {e}")
+            return None
+
+
 async def _trigger_disconnect_crash(
     mission_id: str,
     incident_lat: float,
@@ -339,9 +399,15 @@ async def _trigger_disconnect_crash(
     """
     from app.modules.auth.models import Account, ROLE_NAME_TO_ID
     from app.modules.fleet.models import DroneStatus, MaintenanceAlert
-    from app.modules.system.models import Notification, NotificationType
+    from app.modules.system.models import Notification, NotificationType, ActivityLog
     from app.shared.roles import UserRole
+    from app.shared.weather import fetch_weather, evaluate_weather_safety
     from app.shared.workers import get_operator_and_admin_ids
+
+    # Lấy dữ liệu thời tiết thực tế từ Open-Meteo tại tọa độ sự cố TRƯỚC khi mở DB session
+    crash_weather = await fetch_weather(incident_lat, incident_lng)
+    crash_weather_eval = evaluate_weather_safety(crash_weather, altitude_m=45.0)
+    weather_summary_txt = crash_weather_eval.get("weather_summary") or "Weather data unavailable"
 
     async with AsyncSessionLocal() as db:
         try:
@@ -353,7 +419,22 @@ async def _trigger_disconnect_crash(
             now_tz = get_vn_datetime()
             recovery_hub = await _find_nearest_active_hub(db, incident_lat, incident_lng, fallback_hub=from_hub)
 
-            # 1. Ghi 1 TelemetryLog cuối cùng tại tọa độ rơi (altitude=0, speed=0)
+            # Lấy điểm telemetry gần nhất để tổng hợp đầy đủ vào mô tả sự cố
+            last_tel = (
+                await db.execute(
+                    select(TelemetryLog)
+                    .where(TelemetryLog.mission_id == str(mission_id))
+                    .order_by(TelemetryLog.id.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            last_alt = round(float(last_tel.altitude), 1) if (last_tel and last_tel.altitude is not None) else 45.0
+            last_spd = round(float(last_tel.speed), 1) if (last_tel and last_tel.speed is not None) else 12.0
+            last_bat_pct = round(float(last_tel.battery_pct), 1) if (last_tel and last_tel.battery_pct is not None) else 78.0
+            last_volt = round(float(last_tel.battery_voltage), 2) if (last_tel and last_tel.battery_voltage is not None) else 22.8
+            last_energy = round(float(last_tel.energy_consumed_wh), 2) if (last_tel and last_tel.energy_consumed_wh is not None) else 24.5
+
+            # 1. Ghi 1 TelemetryLog cuối cùng tại tọa độ rơi (altitude=0, speed=0, đầy đủ Weather Open-Meteo)
             db.add(TelemetryLog(
                 mission_id=mission_id,
                 timestamp=now_naive,
@@ -363,8 +444,18 @@ async def _trigger_disconnect_crash(
                 speed=0.0,
                 battery_voltage=0.0,
                 battery_pct=0.0,
-                energy_consumed_wh=None,
-                wind_speed=None,
+                energy_consumed_wh=last_energy,
+                wind_speed=crash_weather.wind_speed if crash_weather else None,
+                weather_temperature=crash_weather.temperature if crash_weather else None,
+                weather_apparent_temp=crash_weather.apparent_temperature if crash_weather else None,
+                weather_dew_point=crash_weather.dew_point if crash_weather else None,
+                weather_humidity=crash_weather.humidity if crash_weather else None,
+                weather_wind_speed=crash_weather.wind_speed if crash_weather else None,
+                weather_wind_gust=crash_weather.wind_gust if crash_weather else None,
+                weather_wind_direction=crash_weather.wind_direction if crash_weather else None,
+                weather_precipitation=crash_weather.precipitation if crash_weather else None,
+                weather_pressure=crash_weather.pressure if crash_weather else None,
+                weather_cloud_cover=crash_weather.cloud_cover if crash_weather else None,
             ))
 
             # 2. Chuyển Mission → FAILED + CANNOT_CONTINUE (chưa đặt arrived_at để chờ Technician xác nhận thu hồi qua confirm-arrival)
@@ -394,7 +485,24 @@ async def _trigger_disconnect_crash(
                 if drone:
                     drone.status = DroneStatus.MAINTENANCE
 
-            # 4. Tạo Incident mức HIGH & MaintenanceAlert Pending
+            # 4. Tạo Incident mức HIGH & MaintenanceAlert Pending (đầy đủ GPS, Telemetry, Weather, Checklist ✓ ...)
+            checklist_block = (
+                "Required Technical Inspection Checklist:\n"
+                "✓ Inspect Motor #2 & ESC module for thermal damage or wiring burn\n"
+                "✓ Verify propeller blades and airframe structural integrity after hard landing\n"
+                "✓ Check battery pack casing, voltage balance, and BMS fault logs\n"
+                "✓ Run telemetry/RC link diagnostics and hover stability test before returning to Available"
+            )
+            inc_full_desc = (
+                f"[DISCONNECT / CRASH] Hardware component failure (Motor #2 / ESC overheat & thrust loss) — "
+                f"complete telemetry signal loss / drone crash at GPS ({incident_lat:.5f}, {incident_lng:.5f}) "
+                f"near {recovery_hub.name}.\n"
+                f"Last Telemetry: Altitude {last_alt}m, Speed {last_spd} m/s, Battery {last_bat_pct}% ({last_volt}V), "
+                f"Energy Consumed {last_energy} Wh.\n"
+                f"Weather (Open-Meteo): {weather_summary_txt}.\n"
+                f"Recovery Hub: {recovery_hub.name}.\n"
+                f"{checklist_block}"
+            )
             inc_res = await db.execute(
                 select(Incident).where(Incident.mission_id == str(mission_id)).limit(1)
             )
@@ -405,10 +513,7 @@ async def _trigger_disconnect_crash(
                     drone_id=str(mission.drone_id) if mission.drone_id else None,
                     reporter_id=mission.operator_id,
                     severity=IncidentSeverity.HIGH,
-                    description=(
-                        f"[DISCONNECT / CRASH] Complete telemetry signal loss / suspected drone crash at GPS "
-                        f"({incident_lat:.5f}, {incident_lng:.5f}). Field recovery assigned to {recovery_hub.name}."
-                    ),
+                    description=inc_full_desc,
                     status=IncidentStatus.OPEN,
                     reported_at=now_tz,
                     requires_technical_inspection=True,
@@ -421,20 +526,42 @@ async def _trigger_disconnect_crash(
                 source="Incident",
                 incident_id=inc.id,
                 mission_id=str(mission_id),
-                title=f"Signal lost — Potential drone crash at ({incident_lat:.5f}, {incident_lng:.5f})",
+                title=f"Motor/ESC failure & crash at ({incident_lat:.5f}, {incident_lng:.5f}) — Drone {mission.drone_id}",
                 description=(
                     f"Mission: {mission_id}\n"
                     f"Order: {mission.order_id}\n"
                     f"Drone: {mission.drone_id}\n"
-                    f"Incident Type: DISCONNECT_CRASH\n"
+                    f"Incident Type: DISCONNECT_CRASH (Motor/ESC Failure)\n"
                     f"Location: GPS ({incident_lat:.5f}, {incident_lng:.5f})\n"
+                    f"Last Telemetry: Alt {last_alt}m | Speed {last_spd} m/s | Battery {last_bat_pct}% ({last_volt}V)\n"
+                    f"Weather (Open-Meteo): {weather_summary_txt}\n"
                     f"Recovery Hub: {recovery_hub.name}\n"
-                    f"Details: Complete telemetry signal loss / suspected drone crash. Field recovery assigned."
+                    f"{checklist_block}"
                 ),
                 status="Pending",
                 created_at=now_naive,
             )
             db.add(alert)
+            db.add(ActivityLog(
+                user_id=None,
+                user_email="system@droneoptai.com",
+                role="SYSTEM",
+                action="INCIDENT_TRIGGERED",
+                resource_type="incident",
+                resource_id=str(inc.id),
+                description=inc_full_desc[:500],
+                status="warning",
+                details_json={
+                    "mission_id": str(mission_id),
+                    "order_id": mission.order_id,
+                    "drone_id": mission.drone_id,
+                    "gps": {"lat": incident_lat, "lng": incident_lng},
+                    "weather": crash_weather_eval,
+                    "recovery_hub_id": recovery_hub.id,
+                    "recovery_hub_name": recovery_hub.name,
+                },
+                created_at=now_tz,
+            ))
             await db.flush()
 
             # 5. Bắn Notification khẩn tới Operator, Admin, Technician tại Hub thu hồi và Customer
@@ -972,6 +1099,8 @@ async def simulate_mission_flight(mission_id: str) -> None:
     energy_wh     = 0.0
     total_points  = len(waypoints)
     armed_incident = simulator_config.consume_next_flight_incident(total_points)
+    if not armed_incident:
+        armed_incident = await _consume_db_first_flight_incident_flag(mission_id, total_points)
     if armed_incident:
         print(
             f"[SIMULATOR] Chuyến bay {mission_id} nhận kịch bản incident 1 lần: "

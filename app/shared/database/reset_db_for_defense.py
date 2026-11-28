@@ -884,6 +884,1014 @@ def _run_polish_cleanup(conn, now_vn: dt.datetime) -> dict[str, int]:
     return stats
 
 
+def _arm_first_flight_incident_flag(conn, mode: str) -> int:
+    """
+    Đặt cờ 1 lần duy nhất trong `system_logs` để chuyến bay demo đầu tiên sau khi clear
+    tự động kích hoạt DISCONNECT_CRASH (được `drone_simulator.py` tiêu thụ atomic 1 lần).
+    """
+    conn.execute(
+        text("""
+            UPDATE system_logs
+            SET details_json = jsonb_set(COALESCE(details_json, '{}'::jsonb), '{armed}', 'false'::jsonb, true)
+            WHERE event = 'ARM_FIRST_FLIGHT_INCIDENT'
+              AND COALESCE((details_json->>'armed')::boolean, false) = true
+        """)
+    )
+    details = {
+        "armed": True,
+        "incident_type": "DISCONNECT_CRASH",
+        "severity": "High",
+        "armed_by_mode": mode,
+        "armed_at": get_vn_datetime().isoformat(),
+    }
+    log_id = conn.execute(
+        text("""
+            INSERT INTO system_logs (source, level, event, message, details_json, created_at)
+            VALUES (
+                'reset_db_for_defense',
+                'INFO',
+                'ARM_FIRST_FLIGHT_INCIDENT',
+                'Armed first-flight DISCONNECT_CRASH incident for defense demo (auto-consumed once by drone_simulator)',
+                CAST(:details AS jsonb),
+                :now_tz
+            )
+            RETURNING id
+        """),
+        {"details": json.dumps(details, ensure_ascii=False), "now_tz": get_vn_datetime()},
+    ).scalar()
+    return int(log_id)
+
+
+def _compute_demo_delivery_fee(
+    dist_m: float,
+    payload_kg: float,
+    package_type: str = "Documents",
+    delivery_mode: str = "NORMAL",
+) -> tuple[float, float, float]:
+    """Tính (delivery_fee, core_fee, express_surcharge) chuẩn theo công thức BE."""
+    dist_km = max(1.0, dist_m / 1000.0)
+    if payload_kg <= 1.0:
+        base_fee, rate_per_km, rate_per_kg = 20000.0, 4000.0, 3000.0
+    elif payload_kg <= 3.0:
+        base_fee, rate_per_km, rate_per_kg = 30000.0, 5000.0, 4000.0
+    elif payload_kg <= 5.0:
+        base_fee, rate_per_km, rate_per_kg = 45000.0, 6000.0, 5000.0
+    else:
+        base_fee, rate_per_km, rate_per_kg = 65000.0, 8000.0, 6000.0
+
+    core_fee = base_fee + dist_km * rate_per_km + payload_kg * rate_per_kg
+    fragile_surcharge = core_fee * 0.15 if package_type.strip().lower() == "fragile" else 0.0
+    express_surcharge = core_fee * 0.25 if delivery_mode.upper() == "EXPRESS" else 0.0
+    total = round(core_fee + fragile_surcharge + express_surcharge, -3)
+    return float(total), round(core_fee, 2), round(express_surcharge, 2)
+
+
+def _run_demo_stabilize(conn, now_vn: dt.datetime) -> dict[str, Any]:
+    """
+    Chế độ DEMO-STABILIZE (Mục 7):
+    Giữ nguyên toàn bộ dữ liệu ổn định hiện có (Master Data, 205 Drones, 211+ Pin, 23 missions hoàn thành,
+    ratings, work_orders, replacement_requests...), chỉ:
+      1. Xóa các đơn AT_HUB bị quá hạn (`estimated_window_end < now_vn`), sạc pin rảnh yếu, bổ sung hub_supplies.
+      2. Seed 5 đơn AT_HUB (PAID) mới còn hạn dài (gồm 2 đơn gộp Ben Thanh -> Thu Duc nằm dưới đơn EXPRESS demo).
+      3. Seed 4 viên pin mới chưa phân bổ (2x DJI DB2000, 1x Aurelia UltraPower 12S, 1x DJI TB48D) -> Added this week = 4.
+      4. Seed 3 đơn REFUNDED có đủ nguồn gốc & minh chứng Mục 6 (1 crash 100%, 1 WEATHER_SAFETY, 1 OPERATOR_DECISION).
+      5. Seed 2 mission Failed đã đóng kín (kèm Incident Closed, Alert Resolved, WorkOrder Completed, không khóa đội bay).
+      6. Seed 6 đơn CANCELLED đa dạng 5 lý do chuẩn BE để đủ 6 thanh trên Cancellation Statistics.
+      7. Bật cờ ARM_FIRST_FLIGHT_INCIDENT trong system_logs để chuyến bay demo đầu tiên tự động xảy ra incident.
+    """
+    import re
+
+    now_tz = get_vn_datetime()
+    stats: dict[str, Any] = {}
+
+    # ── Helper cấp ID không trùng theo ngày ────────────────────────────────────
+    ord_seq_cache: dict[str, int] = {}
+    msn_seq_cache: dict[str, int] = {}
+
+    def _next_order_id(dt_ref: dt.datetime) -> str:
+        tag = dt_ref.strftime("%Y%m%d")
+        if tag not in ord_seq_cache:
+            rows = conn.execute(text("SELECT id FROM orders WHERE id LIKE :p"), {"p": f"ORD-{tag}-%"}).fetchall()
+            mx = 0
+            for (oid,) in rows:
+                try:
+                    mx = max(mx, int(str(oid).rsplit("-", 1)[-1]))
+                except ValueError:
+                    pass
+            ord_seq_cache[tag] = mx
+        ord_seq_cache[tag] += 1
+        return f"ORD-{tag}-{ord_seq_cache[tag]:04d}"
+
+    def _next_mission_id(dt_ref: dt.datetime) -> str:
+        tag = dt_ref.strftime("%Y%m%d")
+        if tag not in msn_seq_cache:
+            rows = conn.execute(text("SELECT id FROM missions WHERE id LIKE :p"), {"p": f"MSN-{tag}-%"}).fetchall()
+            mx = 0
+            for (mid,) in rows:
+                try:
+                    mx = max(mx, int(str(mid).rsplit("-", 1)[-1]))
+                except ValueError:
+                    pass
+            msn_seq_cache[tag] = mx
+        msn_seq_cache[tag] += 1
+        return f"MSN-{tag}-{msn_seq_cache[tag]:04d}"
+
+    # ── Tải danh sách tài khoản & Hub thật đang hoạt động ──────────────────────
+    hubs_map = {
+        int(r["id"]): dict(r)
+        for r in conn.execute(text("SELECT id, name, latitude, longitude FROM hubs")).mappings().fetchall()
+    }
+    customers = conn.execute(
+        text("""
+            SELECT id, full_name, email FROM accounts
+            WHERE role_id = 'CUSTOMER' AND is_active = true AND email != 'test@test.com'
+            ORDER BY created_at ASC
+        """)
+    ).mappings().fetchall()
+    operators = conn.execute(
+        text("SELECT id, full_name, email FROM accounts WHERE role_id = 'OPERATOR' AND is_active = true ORDER BY created_at ASC")
+    ).mappings().fetchall()
+    admins = conn.execute(
+        text("SELECT id, full_name, email FROM accounts WHERE role_id = 'ADMIN' AND is_active = true ORDER BY created_at ASC")
+    ).mappings().fetchall()
+    techs = conn.execute(
+        text("SELECT id, full_name, email, hub_id FROM accounts WHERE role_id = 'TECHNICIAN' AND is_active = true ORDER BY created_at ASC")
+    ).mappings().fetchall()
+
+    if not customers or not operators or not admins or not techs:
+        raise RuntimeError("Thiếu tài khoản thật (CUSTOMER/OPERATOR/ADMIN/TECHNICIAN) trong bảng accounts!")
+
+    admin_acc = admins[0]
+    operator_acc = operators[0]
+
+    def _pick_customer(idx: int) -> dict[str, Any]:
+        return dict(customers[idx % len(customers)])
+
+    def _pick_tech(hub_id: int) -> dict[str, Any]:
+        for t in techs:
+            if t["hub_id"] == hub_id:
+                return dict(t)
+        return dict(techs[0])
+
+    # ── 1. Xóa các đơn AT_HUB quá hạn + sạc pin rảnh yếu + bổ sung vật tư ─────
+    overdue_ords = [
+        r[0]
+        for r in conn.execute(
+            text("""
+                SELECT id FROM orders
+                WHERE status = 'AT_HUB'
+                  AND estimated_window_end IS NOT NULL
+                  AND estimated_window_end < :now_vn
+            """),
+            {"now_vn": now_vn},
+        ).fetchall()
+    ]
+    if overdue_ords:
+        ov_msns = [
+            r[0]
+            for r in conn.execute(
+                text("SELECT id FROM missions WHERE order_id = ANY(:oids)"),
+                {"oids": overdue_ords},
+            ).fetchall()
+        ]
+        if ov_msns:
+            conn.execute(text("DELETE FROM telemetry_logs WHERE mission_id = ANY(:mids)"), {"mids": ov_msns})
+            conn.execute(text("DELETE FROM ai_predictions WHERE mission_id = ANY(:mids)"), {"mids": ov_msns})
+            conn.execute(text("DELETE FROM mission_legs WHERE mission_id = ANY(:mids)"), {"mids": ov_msns})
+            conn.execute(text("UPDATE maintenance_alerts SET mission_id = NULL WHERE mission_id = ANY(:mids)"), {"mids": ov_msns})
+            conn.execute(text("UPDATE incidents SET mission_id = NULL WHERE mission_id = ANY(:mids)"), {"mids": ov_msns})
+            conn.execute(text("DELETE FROM missions WHERE id = ANY(:mids)"), {"mids": ov_msns})
+        conn.execute(text("DELETE FROM delivery_ratings WHERE order_id = ANY(:oids)"), {"oids": overdue_ords})
+        conn.execute(text("DELETE FROM orders WHERE id = ANY(:oids)"), {"oids": overdue_ords})
+    stats["deleted_overdue_at_hub_orders"] = len(overdue_ords)
+    stats["deleted_overdue_order_ids"] = overdue_ords
+
+    r_bat = conn.execute(
+        text("""
+            UPDATE batteries
+            SET charge_level_pct = 100, last_charged_at = :now_vn
+            WHERE drone_id IS NULL AND status = 'Active' AND charge_level_pct < 80
+        """),
+        {"now_vn": now_vn},
+    )
+    stats["recharged_idle_batteries"] = r_bat.rowcount
+
+    r_sup = conn.execute(
+        text("""
+            UPDATE hub_supplies
+            SET quantity = GREATEST(quantity, min_stock_threshold + 10, 20), updated_at = NOW()
+            WHERE quantity < min_stock_threshold
+        """)
+    )
+    stats["refilled_low_supplies"] = r_sup.rowcount
+
+    # ── 2. Seed 5 đơn AT_HUB (PAID) mới (gồm 2 đơn gộp Ben Thanh -> Thu Duc) ──
+    fresh_specs = [
+        # 2 đơn gộp Ben Thanh (1) -> Thu Duc (10): NORMAL, created_at -25m / -20m, deadline +18h
+        # Đảm bảo đơn EXPRESS tạo mới khi demo luôn nằm trên cùng!
+        {
+            "orig": 1, "dest": 10, "mode": "NORMAL", "kg": 0.6, "pkg_type": "Documents",
+            "label": "Legal Contract Bundle A", "receiver": "Tran Minh Hoang", "phone": "0908112233",
+            "created_ago_m": 25, "win_end_h": 18, "cust_idx": 0,
+        },
+        {
+            "orig": 1, "dest": 10, "mode": "NORMAL", "kg": 0.8, "pkg_type": "Electronics",
+            "label": "IoT Sensor Kit Bundle B", "receiver": "Le Thi Thanh Mai", "phone": "0908223344",
+            "created_ago_m": 20, "win_end_h": 18, "cust_idx": 1,
+        },
+        # 2 đơn tuyến dài / Hub trung gian -> Vung Tau (16)
+        {
+            "orig": 1, "dest": 16, "mode": "NORMAL", "kg": 0.7, "pkg_type": "Documents",
+            "label": "Marine Port Manifest Docs", "receiver": "Pham Quoc Bao", "phone": "0912334455",
+            "created_ago_m": 18, "win_end_h": 20, "cust_idx": 2,
+        },
+        {
+            "orig": 10, "dest": 16, "mode": "NORMAL", "kg": 0.5, "pkg_type": "Medical",
+            "label": "Diagnostic Lab Sample Box", "receiver": "Nguyen Ngoc Han", "phone": "0912445566",
+            "created_ago_m": 15, "win_end_h": 20, "cust_idx": 0,
+        },
+        # 1 đơn SCHEDULED nội thành Saigon (2) -> Gia Dinh (9)
+        {
+            "orig": 2, "dest": 9, "mode": "SCHEDULED", "kg": 0.9, "pkg_type": "Fragile",
+            "label": "Optical Calibration Lens", "receiver": "Vo Dinh Khoa", "phone": "0913556677",
+            "created_ago_m": 12, "win_end_h": 12, "cust_idx": 1,
+        },
+    ]
+    seeded_fresh_ids: list[str] = []
+    for sp in fresh_specs:
+        oh = hubs_map.get(sp["orig"])
+        dh = hubs_map.get(sp["dest"])
+        if not oh or not dh:
+            continue
+        cust = _pick_customer(sp["cust_idx"])
+        tech = _pick_tech(sp["orig"])
+        c_at = now_vn - dt.timedelta(minutes=sp["created_ago_m"])
+        recv_at = c_at + dt.timedelta(minutes=5)
+        win_start = now_vn + dt.timedelta(hours=1)
+        win_end = now_vn + dt.timedelta(hours=sp["win_end_h"])
+        req_at = (now_vn + dt.timedelta(hours=sp["win_end_h"] - 2)) if sp["mode"] == "SCHEDULED" else win_end
+        dist_m = _haversine_m(float(oh["latitude"]), float(oh["longitude"]), float(dh["latitude"]), float(dh["longitude"]))
+        fee, _, _ = _compute_demo_delivery_fee(dist_m, sp["kg"], sp["pkg_type"], sp["mode"])
+        oid = _next_order_id(c_at)
+        proof_stage1 = [
+            {
+                "stage": "PACKAGE_RECEIVED_AT_ORIGIN_HUB",
+                "hub_id": sp["orig"],
+                "hub_name": oh["name"],
+                "captured_by": tech["id"],
+                "captured_by_email": tech["email"],
+                "captured_at": (now_tz - dt.timedelta(minutes=max(1, sp["created_ago_m"] - 5))).isoformat(),
+                "image_url": f"https://storage.droneoptai.local/proofs/{oid}_origin_received.jpg",
+                "checklist": [
+                    {"item": "Package seal intact", "passed": True},
+                    {"item": f"Verified weight ({sp['kg']} kg)", "passed": True},
+                ],
+            }
+        ]
+        conn.execute(
+            text("""
+                INSERT INTO orders (
+                    id, customer_id, sender_phone, sender_email, receiver_name, receiver_phone,
+                    package_label, package_type, payload_kg, origin_hub_id, destination_hub_id,
+                    delivery_mode, requested_delivery_at, estimated_window_start, estimated_window_end,
+                    status, origin_received_at, origin_received_by,
+                    created_at, updated_at, delivery_fee, payment_status, paid_at,
+                    is_aging_priority, proof_images_json
+                ) VALUES (
+                    :id, :cust_id, '0909000111', :cust_email, :recv_name, :recv_phone,
+                    :pkg_label, :pkg_type, :kg, :orig, :dest,
+                    :mode, :req_at, :win_s, :win_e,
+                    'AT_HUB', :recv_at, :tech_id,
+                    :c_at, :recv_at, :fee, 'PAID', :c_at,
+                    false, CAST(:proof AS jsonb)
+                )
+            """),
+            {
+                "id": oid, "cust_id": cust["id"], "cust_email": cust["email"],
+                "recv_name": sp["receiver"], "recv_phone": sp["phone"],
+                "pkg_label": sp["label"], "pkg_type": sp["pkg_type"], "kg": sp["kg"],
+                "orig": sp["orig"], "dest": sp["dest"], "mode": sp["mode"],
+                "req_at": req_at, "win_s": win_start, "win_e": win_end,
+                "recv_at": recv_at, "tech_id": tech["id"],
+                "c_at": c_at, "fee": fee, "proof": json.dumps(proof_stage1, ensure_ascii=False),
+            },
+        )
+        conn.execute(
+            text("""
+                INSERT INTO activity_logs (
+                    user_id, user_email, role, action, resource_type, resource_id, description, status, created_at
+                ) VALUES
+                (:cust_id, :cust_email, 'CUSTOMER', 'CREATE_ORDER', 'order', :oid, :d1, 'success', :t1),
+                (:tech_id, :tech_email, 'TECHNICIAN', 'RECEIVE_ORDER_AT_ORIGIN_HUB', 'order', :oid, :d2, 'success', :t2)
+            """),
+            {
+                "cust_id": cust["id"], "cust_email": cust["email"], "oid": oid,
+                "d1": f"Created {sp['mode']} order {oid} ({oh['name']} -> {dh['name']}, {sp['kg']} kg)",
+                "t1": now_tz - dt.timedelta(minutes=sp["created_ago_m"]),
+                "tech_id": tech["id"], "tech_email": tech["email"],
+                "d2": f"Received package {oid} at {oh['name']} (Stage 1 proof verified)",
+                "t2": now_tz - dt.timedelta(minutes=max(1, sp["created_ago_m"] - 5)),
+            },
+        )
+        seeded_fresh_ids.append(oid)
+    stats["seeded_fresh_at_hub_orders"] = seeded_fresh_ids
+
+    # ── 3. Seed 4 viên pin mới chưa phân bổ (Added this week = 4, hết Out of stock) ─
+    max_bat_num = 0
+    for (bid,) in conn.execute(text("SELECT id FROM batteries")).fetchall():
+        m = re.search(r"BAT(\d+)$", str(bid))
+        if m:
+            max_bat_num = max(max_bat_num, int(m.group(1)))
+    max_sn_num = 0
+    for (sn,) in conn.execute(text("SELECT serial_number FROM batteries")).fetchall():
+        m = re.search(r"SN-BAT-(\d+)$", str(sn))
+        if m:
+            max_sn_num = max(max_sn_num, int(m.group(1)))
+
+    new_bat_specs = [
+        ("DB20", "DJI DB2000", 980.0, 1),
+        ("DB20", "DJI DB2000", 980.0, 2),
+        ("UP12", "Aurelia UltraPower 12S", 444.0, 2),
+        ("TB48", "DJI TB48D", 130.0, 3),
+    ]
+    seeded_battery_ids: list[str] = []
+    for pfx, model_name, cap_wh, days_ago in new_bat_specs:
+        max_bat_num += 1
+        max_sn_num += 1
+        bat_id = f"{pfx}-BAT{max_bat_num:04d}"
+        sn = f"SN-BAT-{max_sn_num:04d}"
+        c_tz = now_tz - dt.timedelta(days=days_ago, hours=2)
+        c_naive = now_vn - dt.timedelta(days=days_ago, hours=2)
+        conn.execute(
+            text("""
+                INSERT INTO batteries (
+                    id, drone_id, serial_number, capacity_wh, status,
+                    current_hub_id, charge_level_pct, create_at, update_at,
+                    battery_model, last_charged_at, work_order_id
+                ) VALUES (
+                    :id, NULL, :sn, :cap, 'Active',
+                    NULL, 100, :c_tz, :c_tz,
+                    :model, :c_naive, NULL
+                )
+            """),
+            {"id": bat_id, "sn": sn, "cap": cap_wh, "c_tz": c_tz, "model": model_name, "c_naive": c_naive},
+        )
+        conn.execute(
+            text("""
+                INSERT INTO activity_logs (
+                    user_id, user_email, role, action, resource_type, resource_id, description, status, created_at
+                ) VALUES (
+                    :uid, :uemail, 'ADMIN', 'CREATE_BATTERY', 'battery', :bid, :desc, 'success', :c_tz
+                )
+            """),
+            {
+                "uid": admin_acc["id"], "uemail": admin_acc["email"], "bid": bat_id,
+                "desc": f"Added new unassigned battery {bat_id} ({model_name}, {cap_wh:.0f} Wh) to central stock",
+                "c_tz": c_tz,
+            },
+        )
+        seeded_battery_ids.append(bat_id)
+    stats["seeded_unassigned_batteries"] = seeded_battery_ids
+
+    # ── Chuẩn bị Drone & Pin tham chiếu cho dữ liệu lịch sử (KHÔNG khóa trạng thái hiện tại) ─
+    hist_drones = conn.execute(
+        text("""
+            SELECT id, name, model, max_speed, current_hub_id FROM drones
+            WHERE operational_status = 'Available'
+            ORDER BY id ASC LIMIT 5
+        """)
+    ).mappings().fetchall()
+    hist_bats = conn.execute(
+        text("""
+            SELECT id, battery_model, capacity_wh FROM batteries
+            WHERE status = 'Active' AND current_hub_id IS NOT NULL
+            ORDER BY id ASC LIMIT 5
+        """)
+    ).mappings().fetchall()
+    if not hist_drones or not hist_bats:
+        raise RuntimeError("Không tìm thấy drone/battery để gắn nguồn gốc cho lịch sử Refund & Failed Mission!")
+
+    def _pick_hist_drone(i: int) -> dict[str, Any]:
+        return dict(hist_drones[i % len(hist_drones)])
+
+    def _pick_hist_bat(i: int) -> dict[str, Any]:
+        return dict(hist_bats[i % len(hist_bats)])
+
+    # ── 4 & 5. Seed 3 đơn REFUNDED + 2 Failed Missions đã đóng kín ─────────────
+    #   - Failed #1 (3 ngày trước) ĐỒNG THỜI là Refund #1 (hoàn 100% do sự cố kỹ thuật)
+    #   - Failed #2 (4 ngày trước): sự cố đã thu hồi & hoàn tất WorkOrder (Order CANCELLED, UNPAID hoặc đã giải quyết)
+    #   - Refund #2 (2 ngày trước): EXPRESS giao trễ do WEATHER_SAFETY (hoàn 100% phụ phí Express, có Open-Meteo snapshot)
+    #   - Refund #3 (1 ngày trước): EXPRESS giao trễ do OPERATOR_DECISION (hoàn 100% phụ phí Express + 20% core fee, SLA violation)
+    seeded_refund_ids: list[str] = []
+    seeded_failed_mids: list[str] = []
+
+    failed_specs = [
+        {
+            "days_ago": 3, "orig": 1, "dest": 10, "mode": "EXPRESS", "kg": 0.8, "pkg_type": "Electronics",
+            "label": "Telemetry Controller Module", "refund_100": True,
+            "issue": "Motor #3 ESC over-current protection triggered at 68% flight progress",
+            "diagnosis": "ESC MOSFET shorted under gust load; replaced ESC unit & Motor #3 and passed bench hover test.",
+            "cust_idx": 0, "drone_idx": 0, "bat_idx": 0,
+        },
+        {
+            "days_ago": 4, "orig": 2, "dest": 9, "mode": "NORMAL", "kg": 0.9, "pkg_type": "Documents",
+            "label": "Signed Engineering Blueprints", "refund_100": False,
+            "issue": "GPS/IMU compass interference caused forced emergency landing at 74% route",
+            "diagnosis": "Recalibrated IMU/compass module, replaced damaged landing skid, passed full pre-flight check.",
+            "cust_idx": 1, "drone_idx": 1, "bat_idx": 1,
+        },
+    ]
+    for fsp in failed_specs:
+        oh = hubs_map.get(fsp["orig"]) or next(iter(hubs_map.values()))
+        dh = hubs_map.get(fsp["dest"]) or next(iter(hubs_map.values()))
+        cust = _pick_customer(fsp["cust_idx"])
+        orig_tech = _pick_tech(oh["id"])
+        dest_tech = _pick_tech(dh["id"])
+        drn = _pick_hist_drone(fsp["drone_idx"])
+        bat = _pick_hist_bat(fsp["bat_idx"])
+
+        t_base_naive = now_vn - dt.timedelta(days=fsp["days_ago"], hours=3)
+        t_base_tz = now_tz - dt.timedelta(days=fsp["days_ago"], hours=3)
+        t_recv = t_base_naive + dt.timedelta(minutes=10)
+        t_dep = t_base_naive + dt.timedelta(minutes=20)
+        t_crash = t_base_naive + dt.timedelta(minutes=32)
+        t_confirm = t_base_naive + dt.timedelta(hours=1, minutes=10)
+        t_wo_done = t_base_naive + dt.timedelta(hours=3)
+        t_wo_done_tz = t_base_tz + dt.timedelta(hours=3)
+
+        dist_m = round(_haversine_m(float(oh["latitude"]), float(oh["longitude"]), float(dh["latitude"]), float(dh["longitude"])), 1)
+        fee, _, _ = _compute_demo_delivery_fee(dist_m, fsp["kg"], fsp["pkg_type"], fsp["mode"])
+        oid = _next_order_id(t_base_naive)
+        mid = _next_mission_id(t_base_naive)
+
+        inc_lat = round(float(oh["latitude"]) + (float(dh["latitude"]) - float(oh["latitude"])) * 0.72, 6)
+        inc_lng = round(float(oh["longitude"]) + (float(dh["longitude"]) - float(oh["longitude"])) * 0.72, 6)
+
+        pay_status = "REFUNDED" if fsp["refund_100"] else "PAID"
+        ref_amt = fee if fsp["refund_100"] else None
+        ref_reason = (
+            f"100% refund due to flight incident on mission {mid} ({fsp['issue']})"
+            if fsp["refund_100"]
+            else None
+        )
+        ref_status = "COMPLETED" if fsp["refund_100"] else None
+        ref_at = (t_confirm + dt.timedelta(minutes=20)) if fsp["refund_100"] else None
+
+        conn.execute(
+            text("""
+                INSERT INTO orders (
+                    id, customer_id, sender_phone, sender_email, receiver_name, receiver_phone,
+                    package_label, package_type, payload_kg, origin_hub_id, destination_hub_id,
+                    delivery_mode, requested_delivery_at, estimated_window_start, estimated_window_end,
+                    planning_at, status, origin_received_at, origin_received_by,
+                    created_at, updated_at, cancelled_at, delivery_fee,
+                    payment_status, paid_at, refund_at, refund_amount, refund_reason, refund_status,
+                    cancellation_reason, is_aging_priority
+                ) VALUES (
+                    :id, :cust_id, '0909123000', :cust_email, 'Nguyen Hoang Nam', '0909777888',
+                    :label, :pkg_type, :kg, :orig, :dest,
+                    :mode, :req_at, :win_s, :win_e,
+                    :plan_at, 'CANCELLED', :recv_at, :orig_tech,
+                    :c_at, :u_at, :can_at, :fee,
+                    :pay_st, :c_at, :ref_at, :ref_amt, :ref_rsn, :ref_st,
+                    'incident_recovery_cancelled', false
+                )
+            """),
+            {
+                "id": oid, "cust_id": cust["id"], "cust_email": cust["email"],
+                "label": fsp["label"], "pkg_type": fsp["pkg_type"], "kg": fsp["kg"],
+                "orig": oh["id"], "dest": dh["id"], "mode": fsp["mode"],
+                "req_at": t_base_naive + dt.timedelta(hours=1),
+                "win_s": t_base_naive + dt.timedelta(minutes=25),
+                "win_e": t_base_naive + dt.timedelta(hours=1, minutes=15),
+                "plan_at": t_recv + dt.timedelta(minutes=4),
+                "recv_at": t_recv, "orig_tech": orig_tech["id"],
+                "c_at": t_base_naive, "u_at": t_wo_done, "can_at": t_confirm, "fee": fee,
+                "pay_st": pay_status, "ref_at": ref_at, "ref_amt": ref_amt,
+                "ref_rsn": ref_reason, "ref_st": ref_status,
+            },
+        )
+        if fsp["refund_100"]:
+            seeded_refund_ids.append(oid)
+
+        cps = [
+            {"hub_id": oh["id"], "hub_name": oh["name"], "lat": float(oh["latitude"]), "lng": float(oh["longitude"]), "type": "origin"},
+            {"hub_id": dh["id"], "hub_name": dh["name"], "lat": float(dh["latitude"]), "lng": float(dh["longitude"]), "type": "destination"},
+        ]
+        conn.execute(
+            text("""
+                INSERT INTO missions (
+                    id, order_id, customer_id, operator_id, drone_id, battery_id,
+                    payload_weight, distance_m, delivery_fee,
+                    status, handling_status,
+                    scheduled_time, start_time, end_time,
+                    origin_hub_id, destination_hub_id, departed_at, arrived_at,
+                    arrival_confirmed_by, arrival_confirmed_at, battery_charge_at_arrival,
+                    leg_destination_type, checkpoints_json
+                ) VALUES (
+                    :mid, :oid, :cust_id, :op_id, :did, :bid,
+                    :kg, :dist_m, :fee,
+                    'Failed', NULL,
+                    :sched, :start_t, :end_t,
+                    :orig, :dest, :dep, :arr,
+                    :conf_by, :conf_at, 71.0,
+                    'destination', CAST(:cps AS jsonb)
+                )
+            """),
+            {
+                "mid": mid, "oid": oid, "cust_id": cust["id"], "op_id": operator_acc["id"],
+                "did": drn["id"], "bid": bat["id"], "kg": fsp["kg"], "dist_m": dist_m, "fee": fee,
+                "sched": t_dep - dt.timedelta(minutes=3), "start_t": t_dep, "end_t": t_crash,
+                "orig": oh["id"], "dest": dh["id"], "dep": t_dep, "arr": t_crash,
+                "conf_by": dest_tech["id"], "conf_at": t_confirm,
+                "cps": json.dumps(cps, ensure_ascii=False),
+            },
+        )
+        conn.execute(
+            text("""
+                INSERT INTO mission_legs (
+                    mission_id, sequence_no, from_hub_id, to_hub_id, battery_id,
+                    status, started_at, completed_at, created_at, updated_at
+                ) VALUES (
+                    :mid, 1, :orig, :dest, :bid,
+                    'COMPLETED', :st, :comp, :st, :comp
+                )
+            """),
+            {"mid": mid, "orig": oh["id"], "dest": dh["id"], "bid": bat["id"], "st": t_dep, "comp": t_confirm},
+        )
+        est_dur = round((dist_m / max(float(drn["max_speed"] or 15.0), 10.0)) / 60.0, 2)
+        est_wh = round(max(18.0, (dist_m / 1000.0) * 6.5), 2)
+        conn.execute(
+            text("""
+                INSERT INTO ai_predictions (
+                    mission_id, estimated_energy_wh, estimated_duration_m,
+                    risk_level, recommendation_content, is_recommendation_applied, predicted_at
+                ) VALUES (
+                    :mid, :ewh, :edur, 'Medium', :rec, true, :pat
+                )
+            """),
+            {
+                "mid": mid, "ewh": est_wh, "edur": est_dur,
+                "rec": f"Direct route {oh['name']} -> {dh['name']} ({dist_m/1000:.2f} km) using {drn['model']} ({drn['id']}).",
+                "pat": t_base_tz + dt.timedelta(minutes=15),
+            },
+        )
+        # 3 điểm telemetry (khởi hành, giữa chặng, điểm sự cố kèm Open-Meteo weather)
+        for frac, alt, spd, bpct, volt, ts_off in [
+            (0.05, 35.0, 14.5, 97.0, 24.9, 2),
+            (0.45, 45.0, 15.0, 84.0, 24.1, 7),
+            (0.72, 0.0, 0.0, 0.0, 0.0, 12),
+        ]:
+            lat_p = round(float(oh["latitude"]) + (float(dh["latitude"]) - float(oh["latitude"])) * frac, 6)
+            lng_p = round(float(oh["longitude"]) + (float(dh["longitude"]) - float(oh["longitude"])) * frac, 6)
+            conn.execute(
+                text("""
+                    INSERT INTO telemetry_logs (
+                        mission_id, timestamp, latitude, longitude, altitude, speed,
+                        battery_voltage, battery_pct, energy_consumed_wh, wind_speed,
+                        weather_temperature, weather_humidity, weather_wind_speed, weather_wind_gust, weather_precipitation
+                    ) VALUES (
+                        :mid, :ts, :lat, :lng, :alt, :spd,
+                        :volt, :bpct, :en, 5.8,
+                        30.5, 76.0, 5.8, 9.2, 0.4
+                    )
+                """),
+                {
+                    "mid": mid, "ts": t_dep + dt.timedelta(minutes=ts_off),
+                    "lat": lat_p, "lng": lng_p, "alt": alt, "spd": spd,
+                    "volt": volt, "bpct": bpct, "en": round(est_wh * frac, 2),
+                },
+            )
+        inc_id = conn.execute(
+            text("""
+                INSERT INTO incidents (
+                    mission_id, drone_id, reporter_id, severity, description,
+                    status, reported_at, requires_technical_inspection
+                ) VALUES (
+                    :mid, :did, :rep_id, 'High', :desc,
+                    'Closed', :rep_at, true
+                )
+                RETURNING id
+            """),
+            {
+                "mid": mid, "did": drn["id"], "rep_id": operator_acc["id"],
+                "desc": (
+                    f"[DISCONNECT / CRASH] {fsp['issue']} at GPS ({inc_lat:.5f}, {inc_lng:.5f}) near {dh['name']}. "
+                    f"Weather (Open-Meteo): 30.5°C, wind 5.8 m/s (gust 9.2 m/s), rain 0.4 mm. "
+                    f"Field recovery and maintenance completed."
+                ),
+                "rep_at": t_base_tz + dt.timedelta(minutes=32),
+            },
+        ).scalar()
+        alert_id = conn.execute(
+            text("""
+                INSERT INTO maintenance_alerts (
+                    drone_id, source, incident_id, mission_id, title, description,
+                    status, handled_by, created_at, handled_at
+                ) VALUES (
+                    :did, 'Incident', :inc_id, :mid, :title, :desc,
+                    'Resolved', :tech_id, :c_at, :h_at
+                )
+                RETURNING id
+            """),
+            {
+                "did": drn["id"], "inc_id": inc_id, "mid": mid,
+                "title": f"Resolved incident recovery — {drn['id']} ({mid})",
+                "desc": f"Mission: {mid}\nOrder: {oid}\nIssue: {fsp['issue']}\nResolution: {fsp['diagnosis']}",
+                "tech_id": dest_tech["id"], "c_at": t_crash, "h_at": t_wo_done,
+            },
+        ).scalar()
+        wo_id = conn.execute(
+            text("""
+                INSERT INTO work_orders (
+                    drone_id, battery_id, technician_id, issue_description, action_taken,
+                    status, resolved_at, alert_id, title, priority,
+                    created_by, assigned_to, scheduled_at, started_at, completed_at,
+                    diagnosis, resulting_drone_status, record_completed_at,
+                    inspection_items_json, status_logs_json, created_at
+                ) VALUES (
+                    :did, :bid, :tech_id, :issue, :diag,
+                    'Completed', :done_tz, :aid, :title, 'High',
+                    :tech_id, :tech_id, :t_conf, :t_conf, :done_naive,
+                    :diag, 'Available', :done_naive,
+                    CAST(:insp AS jsonb), CAST(:slogs AS jsonb), :c_tz
+                )
+                RETURNING id
+            """),
+            {
+                "did": drn["id"], "bid": bat["id"], "tech_id": dest_tech["id"],
+                "issue": fsp["issue"], "diag": fsp["diagnosis"], "done_tz": t_wo_done_tz,
+                "aid": alert_id, "title": f"Post-incident inspection & repair ({mid})",
+                "t_conf": t_confirm, "done_naive": t_wo_done,
+                "insp": json.dumps([
+                    {"item": "Inspect motor & ESC telemetry logs", "passed": True},
+                    {"item": "Verify airframe & propeller integrity", "passed": True},
+                    {"item": "Bench hover test passed", "passed": True},
+                ]),
+                "slogs": json.dumps([
+                    {"status": "Pending", "at": (t_base_tz + dt.timedelta(hours=1, minutes=10)).isoformat(), "by": dest_tech["id"]},
+                    {"status": "Completed", "at": t_wo_done_tz.isoformat(), "by": dest_tech["id"]},
+                ]),
+                "c_tz": t_base_tz + dt.timedelta(hours=1, minutes=10),
+            },
+        ).scalar()
+        conn.execute(
+            text("UPDATE maintenance_alerts SET work_order_id = :wid WHERE id = :aid"),
+            {"wid": wo_id, "aid": alert_id},
+        )
+        conn.execute(
+            text("""
+                INSERT INTO activity_logs (
+                    user_id, user_email, role, action, resource_type, resource_id, description, status, created_at
+                ) VALUES
+                (:tech_id, :tech_email, 'TECHNICIAN', 'COMPLETE_WORK_ORDER', 'work_order', :wid_s, :d1, 'success', :t_done)
+            """),
+            {
+                "tech_id": dest_tech["id"], "tech_email": dest_tech["email"],
+                "wid_s": str(wo_id), "d1": f"Completed repair WO #{wo_id} for {drn['id']} after incident on {mid}",
+                "t_done": t_wo_done_tz,
+            },
+        )
+        if fsp["refund_100"]:
+            conn.execute(
+                text("""
+                    INSERT INTO activity_logs (
+                        user_id, user_email, role, action, resource_type, resource_id, description, status, created_at
+                    ) VALUES (
+                        :adm_id, :adm_email, 'ADMIN', 'REFUND_ORDER', 'order', :oid, :desc, 'success', :t_ref
+                    )
+                """),
+                {
+                    "adm_id": admin_acc["id"], "adm_email": admin_acc["email"], "oid": oid,
+                    "desc": f"Processed 100% refund ({int(fee):,} VND) for {oid} after failed mission {mid}",
+                    "t_ref": t_base_tz + dt.timedelta(hours=1, minutes=30),
+                },
+            )
+            conn.execute(
+                text("""
+                    INSERT INTO notifications (
+                        user_id, title, message, notifications_type, reference_id, is_read, created_at, mission_id
+                    ) VALUES (
+                        :uid, :title, :msg, 'Payment', :oid, true, :t_ref, :mid
+                    )
+                """),
+                {
+                    "uid": cust["id"], "title": f"Refund completed — Order {oid}",
+                    "msg": f"Full refund of {int(fee):,} VND has been processed for Order {oid} due to technical incident on {mid}.",
+                    "oid": oid, "t_ref": t_base_tz + dt.timedelta(hours=1, minutes=30), "mid": mid,
+                },
+            )
+        seeded_failed_mids.append(mid)
+
+    stats["seeded_closed_failed_missions"] = seeded_failed_mids
+
+    # ── Refund #2 (WEATHER_SAFETY) & Refund #3 (OPERATOR_DECISION) — khớp Mục 6 ─
+    express_refund_specs = [
+        {
+            "days_ago": 2, "orig": 1, "dest": 10, "kg": 0.7, "pkg_type": "Documents",
+            "label": "Express Legal Filing (Weather Detour)",
+            "reason_type": "WEATHER_SAFETY", "strategy": "SAFE", "late_min": 18.5,
+            "note": "Heavy gust & rain cells detected along direct FAST corridor; rerouted via SAFE corridor.",
+            "weather": {
+                "source": "Open-Meteo",
+                "latitude": 10.8124, "longitude": 106.7312,
+                "temperature_c": 27.4, "wind_speed": 12.8, "wind_speed_ms": 12.8,
+                "wind_gust": 18.4, "wind_gust_ms": 18.4,
+                "precipitation": 7.6, "precipitation_mm": 7.6, "humidity_pct": 91.0,
+                "condition_label": "Heavy Rain & Gusts",
+                "is_bad_weather": True,
+                "warning_message": "High wind gusts (18.4 m/s) and heavy rain (7.6 mm/h)",
+                "weather_summary": "27.4°C, Wind 12.8 m/s (Gust 18.4 m/s), Rain 7.6 mm/h",
+            },
+            "sla_violation": False, "cust_idx": 1, "drone_idx": 2, "bat_idx": 2,
+        },
+        {
+            "days_ago": 1, "orig": 2, "dest": 10, "kg": 0.9, "pkg_type": "Electronics",
+            "label": "Express Hardware Prototype (Operator Override)",
+            "reason_type": "OPERATOR_DECISION", "strategy": "ECO", "late_min": 24.0,
+            "note": "Operator manually selected ECO route instead of FAST for battery conservation.",
+            "weather": None,
+            "sla_violation": True, "cust_idx": 2, "drone_idx": 3, "bat_idx": 3,
+        },
+    ]
+    for rsp in express_refund_specs:
+        oh = hubs_map.get(rsp["orig"]) or next(iter(hubs_map.values()))
+        dh = hubs_map.get(rsp["dest"]) or next(iter(hubs_map.values()))
+        cust = _pick_customer(rsp["cust_idx"])
+        orig_tech = _pick_tech(oh["id"])
+        dest_tech = _pick_tech(dh["id"])
+        drn = _pick_hist_drone(rsp["drone_idx"])
+        bat = _pick_hist_bat(rsp["bat_idx"])
+
+        t_base_naive = now_vn - dt.timedelta(days=rsp["days_ago"], hours=4)
+        t_base_tz = now_tz - dt.timedelta(days=rsp["days_ago"], hours=4)
+        t_recv = t_base_naive + dt.timedelta(minutes=8)
+        t_dep = t_base_naive + dt.timedelta(minutes=16)
+        win_end = t_base_naive + dt.timedelta(minutes=45)
+        t_arr = win_end + dt.timedelta(minutes=rsp["late_min"])
+        t_arr_tz = t_base_tz + dt.timedelta(minutes=45 + rsp["late_min"])
+
+        dist_m = round(_haversine_m(float(oh["latitude"]), float(oh["longitude"]), float(dh["latitude"]), float(dh["longitude"])), 1)
+        fee, core_fee, exp_surcharge = _compute_demo_delivery_fee(dist_m, rsp["kg"], rsp["pkg_type"], "EXPRESS")
+        if rsp["reason_type"] == "WEATHER_SAFETY":
+            refund_amt = round(exp_surcharge, 2)
+            policy_code = "WEATHER_EXPRESS_SURCHARGE_REFUND"
+            ref_reason = (
+                f"Auto late-delivery compensation ({rsp['late_min']} min late): "
+                f"100% Express surcharge refunded ({int(refund_amt):,} VND) due to WEATHER_SAFETY route override."
+            )
+        else:
+            refund_amt = round(exp_surcharge + core_fee * 0.20, 2)
+            policy_code = "OPERATOR_OVERRIDE_EXPRESS_PLUS_20PCT_CORE_REFUND"
+            ref_reason = (
+                f"Auto late-delivery compensation ({rsp['late_min']} min late): "
+                f"100% Express surcharge + 20% core fee partial refund ({int(refund_amt):,} VND) due to OPERATOR_DECISION."
+            )
+
+        oid = _next_order_id(t_base_naive)
+        mid = _next_mission_id(t_base_naive)
+
+        weather_ev = dict(rsp["weather"], timestamp=t_base_tz.isoformat()) if rsp["weather"] else None
+        route_override_entry = {
+            "type": "route_override",
+            "delivery_mode": "EXPRESS",
+            "affected_express_order_ids": [oid],
+            "selected_route_id": f"RT-{oh['id']}-{dh['id']}-{rsp['strategy']}",
+            "selected_strategy_code": rsp["strategy"],
+            "reason_type": rsp["reason_type"],
+            "note": rsp["note"],
+            "operator_id": operator_acc["id"],
+            "recorded_at": (t_base_tz + dt.timedelta(minutes=14)).isoformat(),
+            "weather_evidence": weather_ev,
+        }
+        late_comp_entry = {
+            "type": "late_delivery_compensation",
+            "order_id": oid,
+            "mission_id": mid,
+            "delivery_mode": "EXPRESS",
+            "reason_type": rsp["reason_type"],
+            "policy_code": policy_code,
+            "operator_sla_violation": rsp["sla_violation"],
+            "late_minutes": rsp["late_min"],
+            "core_fee": core_fee,
+            "express_surcharge": exp_surcharge,
+            "refund_amount": refund_amt,
+            "refund_status": "COMPLETED",
+            "evaluated_at": t_arr_tz.isoformat(),
+            "weather_evidence": weather_ev,
+        }
+        cps = [
+            {"hub_id": oh["id"], "hub_name": oh["name"], "lat": float(oh["latitude"]), "lng": float(oh["longitude"]), "type": "origin"},
+            {"hub_id": dh["id"], "hub_name": dh["name"], "lat": float(dh["latitude"]), "lng": float(dh["longitude"]), "type": "destination"},
+            route_override_entry,
+            late_comp_entry,
+        ]
+
+        conn.execute(
+            text("""
+                INSERT INTO orders (
+                    id, customer_id, sender_phone, sender_email, receiver_name, receiver_phone,
+                    package_label, package_type, payload_kg, origin_hub_id, destination_hub_id,
+                    delivery_mode, requested_delivery_at, estimated_window_start, estimated_window_end,
+                    planning_at, status, origin_received_at, origin_received_by,
+                    destination_received_at, destination_received_by,
+                    created_at, updated_at, delivery_fee, payment_status, paid_at,
+                    refund_at, refund_amount, refund_reason, refund_status, is_aging_priority
+                ) VALUES (
+                    :id, :cust_id, '0909888111', :cust_email, 'Pham Thi Lan Anh', '0909666222',
+                    :label, :pkg_type, :kg, :orig, :dest,
+                    'EXPRESS', :win_e, :win_s, :win_e,
+                    :plan_at, 'DELIVERED_TO_HUB', :recv_at, :orig_tech,
+                    :arr_at, :dest_tech,
+                    :c_at, :arr_at, :fee, 'REFUNDED', :c_at,
+                    :arr_at, :ref_amt, :ref_rsn, 'COMPLETED', false
+                )
+            """),
+            {
+                "id": oid, "cust_id": cust["id"], "cust_email": cust["email"],
+                "label": rsp["label"], "pkg_type": rsp["pkg_type"], "kg": rsp["kg"],
+                "orig": oh["id"], "dest": dh["id"],
+                "win_s": t_base_naive + dt.timedelta(minutes=20), "win_e": win_end,
+                "plan_at": t_recv + dt.timedelta(minutes=4), "recv_at": t_recv, "orig_tech": orig_tech["id"],
+                "arr_at": t_arr, "dest_tech": dest_tech["id"],
+                "c_at": t_base_naive, "fee": fee, "ref_amt": refund_amt, "ref_rsn": ref_reason,
+            },
+        )
+        conn.execute(
+            text("""
+                INSERT INTO missions (
+                    id, order_id, customer_id, operator_id, drone_id, battery_id,
+                    payload_weight, distance_m, delivery_fee,
+                    status, handling_status,
+                    scheduled_time, start_time, end_time,
+                    origin_hub_id, destination_hub_id, departed_at, arrived_at,
+                    arrival_confirmed_by, arrival_confirmed_at, battery_charge_at_arrival,
+                    leg_destination_type, checkpoints_json
+                ) VALUES (
+                    :mid, :oid, :cust_id, :op_id, :did, :bid,
+                    :kg, :dist_m, :fee,
+                    'Mission completed', NULL,
+                    :sched, :dep, :arr,
+                    :orig, :dest, :dep, :arr,
+                    :dest_tech, :arr, 68.0,
+                    'destination', CAST(:cps AS jsonb)
+                )
+            """),
+            {
+                "mid": mid, "oid": oid, "cust_id": cust["id"], "op_id": operator_acc["id"],
+                "did": drn["id"], "bid": bat["id"], "kg": rsp["kg"], "dist_m": dist_m, "fee": fee,
+                "sched": t_dep - dt.timedelta(minutes=2), "dep": t_dep, "arr": t_arr,
+                "orig": oh["id"], "dest": dh["id"], "dest_tech": dest_tech["id"],
+                "cps": json.dumps(cps, ensure_ascii=False),
+            },
+        )
+        conn.execute(
+            text("""
+                INSERT INTO mission_legs (
+                    mission_id, sequence_no, from_hub_id, to_hub_id, battery_id,
+                    status, started_at, completed_at, created_at, updated_at
+                ) VALUES (
+                    :mid, 1, :orig, :dest, :bid,
+                    'COMPLETED', :dep, :arr, :dep, :arr
+                )
+            """),
+            {"mid": mid, "orig": oh["id"], "dest": dh["id"], "bid": bat["id"], "dep": t_dep, "arr": t_arr},
+        )
+        est_dur = round((dist_m / max(float(drn["max_speed"] or 15.0), 10.0)) / 60.0, 2)
+        est_wh = round(max(18.0, (dist_m / 1000.0) * 6.5), 2)
+        conn.execute(
+            text("""
+                INSERT INTO ai_predictions (
+                    mission_id, estimated_energy_wh, estimated_duration_m,
+                    risk_level, recommendation_content, is_recommendation_applied, predicted_at
+                ) VALUES (
+                    :mid, :ewh, :edur, :risk, :rec, false, :pat
+                )
+            """),
+            {
+                "mid": mid, "ewh": est_wh, "edur": est_dur,
+                "risk": "High" if rsp["reason_type"] == "WEATHER_SAFETY" else "Low",
+                "rec": f"FAST route recommended for EXPRESS {oid}; overridden to {rsp['strategy']} ({rsp['reason_type']}).",
+                "pat": t_base_tz + dt.timedelta(minutes=12),
+            },
+        )
+        conn.execute(
+            text("""
+                INSERT INTO activity_logs (
+                    user_id, user_email, role, action, resource_type, resource_id, description, status, created_at
+                ) VALUES (
+                    :op_id, :op_email, 'OPERATOR', :act, 'order', :oid, :desc, :st, :tat
+                )
+            """),
+            {
+                "op_id": operator_acc["id"], "op_email": operator_acc["email"],
+                "act": "OPERATOR_SLA_VIOLATION" if rsp["sla_violation"] else "LATE_DELIVERY_WEATHER_REFUND",
+                "oid": oid, "desc": ref_reason,
+                "st": "warning" if rsp["sla_violation"] else "success",
+                "tat": t_arr_tz,
+            },
+        )
+        conn.execute(
+            text("""
+                INSERT INTO notifications (
+                    user_id, title, message, notifications_type, reference_id, is_read, created_at, mission_id
+                ) VALUES (
+                    :uid, :title, :msg, 'Payment', :oid, true, :tat, :mid
+                )
+            """),
+            {
+                "uid": cust["id"], "title": f"Late delivery refund — Order {oid}",
+                "msg": ref_reason, "oid": oid, "tat": t_arr_tz, "mid": mid,
+            },
+        )
+        seeded_refund_ids.append(oid)
+
+    stats["seeded_refunded_orders"] = seeded_refund_ids
+
+    # ── 6. Seed 6 đơn CANCELLED đa dạng lý do (đủ 6 thanh Cancellation stats) ─
+    cancel_specs = [
+        ("wrong_information", 2, 1, 10, 0.5, "NORMAL", 0),
+        ("wrong_information", 3, 2, 9, 0.8, "EXPRESS", 1),
+        ("price_too_high", 4, 1, 16, 1.2, "EXPRESS", 2),
+        ("found_alternative", 5, 10, 1, 0.6, "NORMAL", 0),
+        ("delivery_too_slow", 5, 9, 10, 0.7, "SCHEDULED", 1),
+        ("other", 6, 2, 16, 1.0, "NORMAL", 2),
+    ]
+    seeded_cancelled_ids: list[str] = []
+    for reason, days_ago, orig_id, dest_id, kg, dmode, cidx in cancel_specs:
+        oh = hubs_map.get(orig_id) or next(iter(hubs_map.values()))
+        dh = hubs_map.get(dest_id) or next(iter(hubs_map.values()))
+        cust = _pick_customer(cidx)
+        c_naive = now_vn - dt.timedelta(days=days_ago, hours=2)
+        c_tz = now_tz - dt.timedelta(days=days_ago, hours=2)
+        can_naive = c_naive + dt.timedelta(minutes=15)
+        can_tz = c_tz + dt.timedelta(minutes=15)
+        dist_m = _haversine_m(float(oh["latitude"]), float(oh["longitude"]), float(dh["latitude"]), float(dh["longitude"]))
+        fee, _, _ = _compute_demo_delivery_fee(dist_m, kg, "Documents", dmode)
+        oid = _next_order_id(c_naive)
+        conn.execute(
+            text("""
+                INSERT INTO orders (
+                    id, customer_id, sender_phone, sender_email, receiver_name, receiver_phone,
+                    package_label, package_type, payload_kg, origin_hub_id, destination_hub_id,
+                    delivery_mode, requested_delivery_at, estimated_window_start, estimated_window_end,
+                    status, created_at, updated_at, cancelled_at,
+                    delivery_fee, payment_status, cancellation_reason, is_aging_priority
+                ) VALUES (
+                    :id, :cust_id, '0909333444', :cust_email, 'Tran Van Khanh', '0909555666',
+                    'Standard Parcel', 'Documents', :kg, :orig, :dest,
+                    :mode, :req_at, :win_s, :win_e,
+                    'CANCELLED', :c_at, :can_at, :can_at,
+                    :fee, 'UNPAID', :rsn, false
+                )
+            """),
+            {
+                "id": oid, "cust_id": cust["id"], "cust_email": cust["email"],
+                "kg": kg, "orig": oh["id"], "dest": dh["id"], "mode": dmode,
+                "req_at": c_naive + dt.timedelta(hours=4),
+                "win_s": c_naive + dt.timedelta(hours=1),
+                "win_e": c_naive + dt.timedelta(hours=5),
+                "c_at": c_naive, "can_at": can_naive, "fee": fee, "rsn": reason,
+            },
+        )
+        conn.execute(
+            text("""
+                INSERT INTO activity_logs (
+                    user_id, user_email, role, action, resource_type, resource_id, description, status, created_at
+                ) VALUES (
+                    :uid, :uemail, 'CUSTOMER', 'CANCEL_ORDER', 'order', :oid, :desc, 'success', :can_tz
+                )
+            """),
+            {
+                "uid": cust["id"], "uemail": cust["email"], "oid": oid,
+                "desc": f"Customer cancelled order {oid} (reason: {reason})",
+                "can_tz": can_tz,
+            },
+        )
+        conn.execute(
+            text("""
+                INSERT INTO notifications (
+                    user_id, title, message, notifications_type, reference_id, is_read, created_at
+                ) VALUES (
+                    :uid, :title, :msg, 'Mission_Status', :oid, true, :can_tz
+                )
+            """),
+            {
+                "uid": cust["id"], "title": f"Order {oid} cancelled",
+                "msg": f"Your order {oid} was cancelled (reason: {reason}).",
+                "oid": oid, "can_tz": can_tz,
+            },
+        )
+        seeded_cancelled_ids.append(oid)
+    stats["seeded_cancelled_orders"] = seeded_cancelled_ids
+
+    # ── 7. Bật cờ Incident cho chuyến bay demo đầu tiên sau khi clear ─────────
+    arm_id = _arm_first_flight_incident_flag(conn, mode="demo-stabilize")
+    stats["armed_first_flight_incident_log_id"] = arm_id
+
+    return stats
+
+
 def run_reset(
     mode: str = "polish",
     execute: bool = False,
@@ -917,6 +1925,33 @@ def run_reset(
 
     if mode == "full":
         _print_summary_table(before_counts, after=None, clear_tables=clear_tables)
+    elif mode == "demo-stabilize":
+        with engine.connect() as conn:
+            ov_preview = [
+                r[0]
+                for r in conn.execute(
+                    text("""
+                        SELECT id FROM orders
+                        WHERE status = 'AT_HUB'
+                          AND estimated_window_end IS NOT NULL
+                          AND estimated_window_end < :now_vn
+                        ORDER BY id ASC
+                    """),
+                    {"now_vn": get_vn_naive_datetime()},
+                ).fetchall()
+            ]
+        print(
+            "\n[CHẾ ĐỘ DEMO-STABILIZE — MỤC 7 (STABILIZE LIVE DB + TRACEABLE SEED + FIRST-FLIGHT INCIDENT)]"
+            "\n  - GIỮ NGUYÊN: Toàn bộ Master Data, 205 Drones, 211+ Pin, 23 missions hoàn thành, ratings, work_orders, replacement_requests."
+            f"\n  - XÓA OVERDUE: {len(ov_preview)} đơn AT_HUB quá hạn ({', '.join(ov_preview) if ov_preview else 'không có'})."
+            "\n  - SEED AT_HUB: 5 đơn PAID còn hạn dài (2 đơn gộp Ben Thanh -> Thu Duc NORMAL nằm dưới đơn EXPRESS demo, 2 đơn tuyến dài Vung Tau, 1 SCHEDULED)."
+            "\n  - SEED PIN   : 4 viên pin mới chưa phân bổ (2x DJI DB2000, 1x Aurelia UltraPower 12S, 1x DJI TB48D) -> Added this week = 4."
+            "\n  - SEED REFUND: 3 đơn REFUNDED đủ nguồn gốc (1 sự cố 100%, 1 WEATHER_SAFETY + Open-Meteo, 1 OPERATOR_DECISION + SLA violation)."
+            "\n  - SEED FAILED: 2 mission Failed đã đóng kín (Incident Closed, Alert Resolved, WorkOrder Completed, không khóa đội bay)."
+            "\n  - SEED CANCEL: 6 đơn CANCELLED đa dạng 5 lý do chuẩn BE -> đủ 6 thanh trên Cancellation Statistics."
+            "\n  - FIRST FLIGHT: Tự động bật cờ `ARM_FIRST_FLIGHT_INCIDENT` trong `system_logs` để chuyến bay demo đầu tiên xảy ra DISCONNECT_CRASH (chuyến thứ 2 trở đi 100% SUCCESS).",
+            flush=True,
+        )
     else:
         print(
             "\n[CHẾ ĐỘ POLISH & TRIM — ZERO-EMPTY CLEAN]"
@@ -959,8 +1994,15 @@ def run_reset(
     print(f"\n[{time.perf_counter()-t0:.2f}s] Bắt đầu Transaction ({mode.upper()})...", flush=True)
 
     seeded_info = None
+    stabilize_stats = None
     with engine.begin() as conn:
-        if mode == "polish":
+        if mode == "demo-stabilize":
+            stabilize_stats = _run_demo_stabilize(conn, now_vn)
+            for k, v in stabilize_stats.items():
+                print(f"  - STABILIZE {k:<32}: {v}", flush=True)
+            if reactivate_all_accounts:
+                conn.execute(text("UPDATE accounts SET is_active = true WHERE email != 'test@test.com'"))
+        elif mode == "polish":
             pstats = _run_polish_cleanup(conn, now_vn)
             for k, v in pstats.items():
                 print(f"  - POLISH {k:<28}: {v:>6}", flush=True)
@@ -1068,6 +2110,8 @@ def run_reset(
                     f"tech={seeded_info['dest_tech_email']})",
                     flush=True,
                 )
+                arm_id = _arm_first_flight_incident_flag(conn, mode="full")
+                print(f"  - ARM    {'first_flight_incident':<24}: system_logs.id={arm_id}", flush=True)
 
     # Post-Reset Health Check (Read-Only)
     print(f"\n[{time.perf_counter()-t0:.2f}s] Đang chạy Post-Reset Health Check...", flush=True)
@@ -1109,9 +2153,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=("polish", "full"),
+        choices=("polish", "full", "demo-stabilize"),
         default="polish",
-        help="Chế độ dọn DB: 'polish' (mặc định — giữ mọi chỉ số FE > 0, giữ 4 In Flight & 6 Maintenance, chỉ cắt rác/spam) hoặc 'full' (xóa trắng 17 bảng nghiệp vụ).",
+        help="Chế độ dọn DB: 'polish', 'full', hoặc 'demo-stabilize' (Mục 7: xóa overdue, seed dữ liệu demo đầy đủ nguồn gốc & bật cờ incident chuyến bay đầu tiên).",
     )
     parser.add_argument(
         "--execute",
