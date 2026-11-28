@@ -456,7 +456,7 @@ async def get_transit_history(
 async def confirm_arrival(
     mission_id: str,
     background_tasks: BackgroundTasks,
-    body: Optional[BaseModel] = None,
+    body: Optional[dict] = None,
     user: CurrentUser = Depends(allow_technician),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -514,9 +514,9 @@ async def confirm_arrival(
 
     has_issue_flag = False
     if body:
-        if body.has_issue or body.has_incident:
+        if body.get("has_issue") or body.get("has_incident"):
             has_issue_flag = True
-        if body.drone_status and str(body.drone_status).strip().lower() == "maintenance":
+        if body.get("drone_status") and str(body.get("drone_status")).strip().lower() == "maintenance":
             has_issue_flag = True
 
     is_crash_flight = (mission.status == MissionStatus.FAILED)
