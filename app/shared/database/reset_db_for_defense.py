@@ -348,7 +348,7 @@ def _seed_demo_incident_mission(
                 created_at, updated_at, delivery_fee, payment_status, paid_at, is_aging_priority
             ) VALUES (
                 :id, :cust_id, '0909123456', :cust_email, 'Nguyen Van Minh', '0918654321',
-                'Medical & Precision Electronics Kit', 'Fragile', 0.8, :orig_id, :dest_id,
+                NULL, 'Fragile', 0.8, :orig_id, :dest_id,
                 'EXPRESS', :req_at, :win_s, :win_e,
                 :plan_at, 'IN_DELIVERY', :orig_recv_at, :orig_tech,
                 :created_at, :now_naive, :fee, 'PAID', :created_at, false
@@ -1089,31 +1089,32 @@ def _run_demo_stabilize(conn, now_vn: dt.datetime) -> dict[str, Any]:
     fresh_specs = [
         # 2 đơn gộp Ben Thanh (1) -> Thu Duc (10): NORMAL, created_at -25m / -20m, deadline +18h
         # Đảm bảo đơn EXPRESS tạo mới khi demo luôn nằm trên cùng!
+        # Chuẩn FE: package_label = None khi package_type là category chuẩn (chỉ có label khi chọn 'Other').
         {
             "orig": 1, "dest": 10, "mode": "NORMAL", "kg": 0.6, "pkg_type": "Documents",
-            "label": "Legal Contract Bundle A", "receiver": "Tran Minh Hoang", "phone": "0908112233",
+            "label": None, "receiver": "Tran Minh Hoang", "phone": "0908112233",
             "created_ago_m": 25, "win_end_h": 18, "cust_idx": 0,
         },
         {
             "orig": 1, "dest": 10, "mode": "NORMAL", "kg": 0.8, "pkg_type": "Electronics",
-            "label": "IoT Sensor Kit Bundle B", "receiver": "Le Thi Thanh Mai", "phone": "0908223344",
+            "label": None, "receiver": "Le Thi Thanh Mai", "phone": "0908223344",
             "created_ago_m": 20, "win_end_h": 18, "cust_idx": 1,
         },
         # 2 đơn tuyến dài / Hub trung gian -> Vung Tau (16)
         {
             "orig": 1, "dest": 16, "mode": "NORMAL", "kg": 0.7, "pkg_type": "Documents",
-            "label": "Marine Port Manifest Docs", "receiver": "Pham Quoc Bao", "phone": "0912334455",
+            "label": None, "receiver": "Pham Quoc Bao", "phone": "0912334455",
             "created_ago_m": 18, "win_end_h": 20, "cust_idx": 2,
         },
         {
             "orig": 10, "dest": 16, "mode": "NORMAL", "kg": 0.5, "pkg_type": "Medical",
-            "label": "Diagnostic Lab Sample Box", "receiver": "Nguyen Ngoc Han", "phone": "0912445566",
+            "label": None, "receiver": "Nguyen Ngoc Han", "phone": "0912445566",
             "created_ago_m": 15, "win_end_h": 20, "cust_idx": 0,
         },
         # 1 đơn SCHEDULED nội thành Saigon (2) -> Gia Dinh (9)
         {
             "orig": 2, "dest": 9, "mode": "SCHEDULED", "kg": 0.9, "pkg_type": "Fragile",
-            "label": "Optical Calibration Lens", "receiver": "Vo Dinh Khoa", "phone": "0913556677",
+            "label": None, "receiver": "Vo Dinh Khoa", "phone": "0913556677",
             "created_ago_m": 12, "win_end_h": 12, "cust_idx": 1,
         },
     ]
@@ -1288,14 +1289,14 @@ def _run_demo_stabilize(conn, now_vn: dt.datetime) -> dict[str, Any]:
     failed_specs = [
         {
             "days_ago": 3, "orig": 1, "dest": 10, "mode": "EXPRESS", "kg": 0.8, "pkg_type": "Electronics",
-            "label": "Telemetry Controller Module", "refund_100": True,
+            "label": None, "refund_100": True,
             "issue": "Motor #3 ESC over-current protection triggered at 68% flight progress",
             "diagnosis": "ESC MOSFET shorted under gust load; replaced ESC unit & Motor #3 and passed bench hover test.",
             "cust_idx": 0, "drone_idx": 0, "bat_idx": 0,
         },
         {
             "days_ago": 4, "orig": 2, "dest": 9, "mode": "NORMAL", "kg": 0.9, "pkg_type": "Documents",
-            "label": "Signed Engineering Blueprints", "refund_100": False,
+            "label": None, "refund_100": False,
             "issue": "GPS/IMU compass interference caused forced emergency landing at 74% route",
             "diagnosis": "Recalibrated IMU/compass module, replaced damaged landing skid, passed full pre-flight check.",
             "cust_idx": 1, "drone_idx": 1, "bat_idx": 1,
@@ -1589,7 +1590,7 @@ def _run_demo_stabilize(conn, now_vn: dt.datetime) -> dict[str, Any]:
     express_refund_specs = [
         {
             "days_ago": 2, "orig": 1, "dest": 10, "kg": 0.7, "pkg_type": "Documents",
-            "label": "Express Legal Filing (Weather Detour)",
+            "label": None,
             "reason_type": "WEATHER_SAFETY", "strategy": "SAFE", "late_min": 18.5,
             "note": "Heavy gust & rain cells detected along direct FAST corridor; rerouted via SAFE corridor.",
             "weather": {
@@ -1607,7 +1608,7 @@ def _run_demo_stabilize(conn, now_vn: dt.datetime) -> dict[str, Any]:
         },
         {
             "days_ago": 1, "orig": 2, "dest": 10, "kg": 0.9, "pkg_type": "Electronics",
-            "label": "Express Hardware Prototype (Operator Override)",
+            "label": None,
             "reason_type": "OPERATOR_DECISION", "strategy": "ECO", "late_min": 24.0,
             "note": "Operator manually selected ECO route instead of FAST for battery conservation.",
             "weather": None,
@@ -1839,7 +1840,7 @@ def _run_demo_stabilize(conn, now_vn: dt.datetime) -> dict[str, Any]:
                     delivery_fee, payment_status, cancellation_reason, is_aging_priority
                 ) VALUES (
                     :id, :cust_id, '0909333444', :cust_email, 'Tran Van Khanh', '0909555666',
-                    'Standard Parcel', 'Documents', :kg, :orig, :dest,
+                    NULL, 'Documents', :kg, :orig, :dest,
                     :mode, :req_at, :win_s, :win_e,
                     'CANCELLED', :c_at, :can_at, :can_at,
                     :fee, 'UNPAID', :rsn, false
