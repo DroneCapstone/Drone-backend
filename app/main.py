@@ -287,8 +287,8 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 class PublicBaseURLMiddleware:
     """Pure ASGI middleware lưu public base URL vào ContextVar (không buffer stream)."""
 
-    def __init__(self, asgi_app):
-        self.app = asgi_app
+    def __init__(self, app):
+        self.app = app
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
