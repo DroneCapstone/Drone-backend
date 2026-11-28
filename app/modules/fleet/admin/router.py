@@ -1331,6 +1331,21 @@ async def get_admin_battery_history(
     
     Admin view toàn hệ thống - Return danh sách từ activity_logs.
     Bao gồm: install, remove, swap, inspection actions + proof images.
+    
+    Response schema theo database spec:
+    {
+        "id": int,
+        "action": str,  # BATTERY_INSTALLED_ON_DRONE | BATTERY_SWAPPED | BATTERY_CHARGED
+        "drone_id": optional[str],
+        "battery_id": str,
+        "charge_level_pct": optional[float],
+        "hub_id": optional[int],
+        "mission_id": optional[str],
+        "proof_image_url": optional[str],
+        "note": optional[str],
+        "technician_id": optional[str],
+        "recorded_at": datetime,
+    }
     """
     battery = await db.get(Battery, battery_id)
     if not battery:
@@ -1354,16 +1369,19 @@ async def get_admin_battery_history(
     
     battery_history = []
     for log in logs:
+        details = log.details_json or {}
         entry = {
             "id": log.id,
             "action": log.action,
-            "details": log.details_json,
+            "drone_id": details.get("drone_id"),
+            "battery_id": battery_id,
+            "charge_level_pct": details.get("charge_level_pct"),
+            "hub_id": details.get("hub_id"),
+            "mission_id": details.get("mission_id"),
+            "proof_image_url": details.get("proof_image_url"),
+            "note": details.get("note"),
+            "technician_id": details.get("technician_id"),
             "recorded_at": log.created_at.isoformat() if log.created_at else None,
-            "technician_id": log.details_json.get("technician_id") if log.details_json else None,
-            "drone_id": log.details_json.get("drone_id") if log.details_json else None,
-            "hub_id": log.details_json.get("hub_id") if log.details_json else None,
-            "proof_image_url": log.details_json.get("proof_image_url") if log.details_json else None,
-            "inspection_items": log.details_json.get("inspection_items") if log.details_json else None,
         }
         battery_history.append(entry)
     
@@ -1383,6 +1401,24 @@ async def get_admin_drone_battery_history(
     
     Return danh sách BatteryHistoryEntry từ activity_logs.
     Bao gồm: install, swap actions kèm proof images từ Mục 9.
+    
+    Response schema theo database spec:
+    {
+        "id": int,
+        "stage": str,  # BATTERY_INSTALLED_ON_DRONE | BATTERY_REMOVED_FROM_DRONE | BATTERY_SWAPPED
+        "action": str,  # install | remove | swap
+        "removed_battery_id": optional[str],
+        "installed_battery_id": optional[str],
+        "battery_pct_before": optional[float],
+        "battery_pct_after": optional[float],
+        "hub_id": optional[int],
+        "mission_id": optional[str],
+        "drone_id": str,
+        "technician_id": optional[str],
+        "note": optional[str],
+        "proof_image_url": optional[str],
+        "recorded_at": datetime,
+    }
     """
     drone = await db.get(Drone, drone_id)
     if not drone:
@@ -1406,19 +1442,22 @@ async def get_admin_drone_battery_history(
     
     battery_history = []
     for log in logs:
+        details = log.details_json or {}
         entry = {
             "id": log.id,
             "stage": log.action,
             "action": "install" if log.action == "BATTERY_INSTALLED_ON_DRONE" else "swap",
-            "details": log.details_json,
+            "removed_battery_id": details.get("removed_battery_id"),
+            "installed_battery_id": details.get("installed_battery_id"),
+            "battery_pct_before": details.get("battery_pct_before"),
+            "battery_pct_after": details.get("battery_pct_after"),
+            "hub_id": details.get("hub_id"),
+            "mission_id": details.get("mission_id"),
+            "drone_id": drone_id,
+            "technician_id": details.get("technician_id"),
+            "note": details.get("note"),
+            "proof_image_url": details.get("proof_image_url"),
             "recorded_at": log.created_at.isoformat() if log.created_at else None,
-            "technician_id": log.details_json.get("technician_id") if log.details_json else None,
-            "removed_battery_id": log.details_json.get("removed_battery_id") if log.details_json else None,
-            "installed_battery_id": log.details_json.get("installed_battery_id") if log.details_json else None,
-            "battery_pct_before": log.details_json.get("battery_pct_before") if log.details_json else None,
-            "battery_pct_after": log.details_json.get("battery_pct_after") if log.details_json else None,
-            "proof_image_url": log.details_json.get("proof_image_url") if log.details_json else None,
-            "hub_id": log.details_json.get("hub_id") if log.details_json else None,
         }
         battery_history.append(entry)
     
