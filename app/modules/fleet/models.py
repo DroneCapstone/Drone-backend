@@ -1,4 +1,5 @@
 import enum
+import json
 from datetime import datetime
 from sqlalchemy import BigInteger, Integer, Float, String, Text, DateTime, Boolean, ForeignKey, Enum as SAEnum, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -132,6 +133,7 @@ class Drone(Base):
     # ── Preventive maintenance tracking ──────────────────────────────
     total_flight_hours: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0.0")
     last_maintenance_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     batteries = relationship("Battery", back_populates="drone")
 
@@ -156,6 +158,7 @@ class Battery(Base):
     # Thời điểm pin gần nhất được sạc đầy 100% (ghi bởi charging worker hoặc manual mark-charged)
     last_charged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     work_order_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     
     drone = relationship("Drone", back_populates="batteries")
 
@@ -192,9 +195,63 @@ class WorkOrder(Base):
     record_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     inspection_items_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
     status_logs_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
-    proof_images_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)  # Proof images for work order (before/after/during/parts_replaced/incident_recovery)
-    parts_replaced_proof_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)  # Proof images for parts replaced
+    proof_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parts_replaced_proof_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # parts_replaced_json: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)  # Column does not exist in DB work_orders
+
+    @property
+    def proof_images_json(self) -> list:
+        """Tương thích Mục 9: đọc/ghi mảng ảnh minh chứng lưu trong cột TEXT `proof_image_url`."""
+        raw = self.proof_image_url
+        if not raw:
+            return []
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, str):
+            s = raw.strip()
+            if s.startswith("["):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list):
+                        return parsed
+                except Exception:
+                    pass
+            return [{"proof_image_url": s}]
+        return []
+
+    @proof_images_json.setter
+    def proof_images_json(self, value: list | None) -> None:
+        if not value:
+            self.proof_image_url = None
+        else:
+            self.proof_image_url = json.dumps(value, ensure_ascii=False)
+
+    @property
+    def parts_replaced_proof_json(self) -> list:
+        """Tương thích Mục 9: đọc/ghi mảng ảnh thay linh kiện lưu trong cột TEXT `parts_replaced_proof_url`."""
+        raw = self.parts_replaced_proof_url
+        if not raw:
+            return []
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, str):
+            s = raw.strip()
+            if s.startswith("["):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list):
+                        return parsed
+                except Exception:
+                    pass
+            return [{"proof_image_url": s}]
+        return []
+
+    @parts_replaced_proof_json.setter
+    def parts_replaced_proof_json(self, value: list | None) -> None:
+        if not value:
+            self.parts_replaced_proof_url = None
+        else:
+            self.parts_replaced_proof_url = json.dumps(value, ensure_ascii=False)
 
 
 class MaintenanceAlert(Base):
