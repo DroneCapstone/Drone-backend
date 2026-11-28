@@ -68,6 +68,7 @@ class InspectionUpdate(BaseModel):
     proof_image_url: Optional[str] = None  # Base64 Data URL or URL to proof image
     parts_replaced_proof_url: Optional[str] = None  # Proof image showing parts replaced
     inspection_items: Optional[list[dict]] = None  # [{item, checked, status, note}, ...]
+    defect_type: Optional[str] = None  # Auto-generate inspection_items from defect type (MOTOR_ESC, SIGNAL_LOSS, BATTERY_BMS, SENSOR_GPS, FRAME_DAMAGE, PROPELLER_DAMAGE)
 
 class WorkOrderResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

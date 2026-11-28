@@ -2101,8 +2101,13 @@ async def update_inspection(
         wo.parts_replaced_proof_url = body.parts_replaced_proof_url
     
     # ── Update inspection_items_json if provided ──────────────────────────────
+    # Priority: 1. Explicit inspection_items, 2. Auto-generate from defect_type
     if body.inspection_items:
         wo.inspection_items_json = body.inspection_items
+    elif body.defect_type:
+        # Auto-generate inspection checklist from defect type
+        from app.modules.fleet.technician.schemas import build_inspection_items_from_defect_type
+        wo.inspection_items_json = build_inspection_items_from_defect_type(body.defect_type)
     
     if body.status == WorkOrderStatus.COMPLETED:
         wo.resolved_at = now
@@ -2153,6 +2158,7 @@ async def update_inspection(
                         "action_taken": body.action_taken,
                         "diagnosis": body.diagnosis,
                         "resulting_drone_status": body.resulting_drone_status,
+                        "defect_type": body.defect_type,
                         "proof_image_url": body.proof_image_url,
                         "parts_replaced_proof_url": body.parts_replaced_proof_url,
                         "inspection_items": body.inspection_items,
