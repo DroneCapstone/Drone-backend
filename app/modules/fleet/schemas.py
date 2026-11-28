@@ -90,6 +90,7 @@ class WorkOrderResponse(BaseModel):
     scheduled_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    diagnosis: Optional[str] = None  # ← Thêm diagnosis
     drone_code: Optional[str] = None
     model: Optional[str] = None
     assigned_technician_name: Optional[str] = None
