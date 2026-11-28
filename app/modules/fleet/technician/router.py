@@ -2093,27 +2093,12 @@ async def update_inspection(
         wo.resulting_drone_status = body.resulting_drone_status
     now = get_vn_naive_datetime()
     
-    # ── Log proof images to work_order.proof_images_json ────────────────────────
+    # ── Log proof images to work_order fields ──────────────────────────
     if body.proof_image_url:
-        proof_image_entry = {
-            "type": "before" if body.status == WorkOrderStatus.IN_PROGRESS else "after",
-            "proof_image_url": body.proof_image_url,
-            "description": f"Proof image at {body.status.value}",
-            "recorded_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
-        }
-        cur_proof_images = list(wo.proof_images_json or [])
-        cur_proof_images.append(proof_image_entry)
-        wo.proof_images_json = cur_proof_images
+        wo.proof_image_url = body.proof_image_url
     
     if body.parts_replaced_proof_url:
-        parts_proof_entry = {
-            "proof_image_url": body.parts_replaced_proof_url,
-            "description": "Parts replaced proof",
-            "recorded_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
-        }
-        cur_parts_proof = list(wo.parts_replaced_proof_json or [])
-        cur_parts_proof.append(parts_proof_entry)
-        wo.parts_replaced_proof_json = cur_parts_proof
+        wo.parts_replaced_proof_url = body.parts_replaced_proof_url
     
     # ── Update inspection_items_json if provided ──────────────────────────────
     if body.inspection_items:
@@ -2135,6 +2120,9 @@ async def update_inspection(
                 try:
                     old_drone_status = drone.status
                     drone.status = DroneStatus(body.resulting_drone_status)
+                    # Update drone.image_url with proof image
+                    if body.proof_image_url:
+                        drone.image_url = body.proof_image_url
                     print(f"[DEBUG] Drone {wo.drone_id}: {old_drone_status} → {drone.status}")
                 except ValueError as e:
                     print(f"[ERROR] Invalid resulting_drone_status '{body.resulting_drone_status}': {e}")
