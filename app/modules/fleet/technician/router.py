@@ -1644,7 +1644,11 @@ async def get_work_order_logs(
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
     logs = list(reversed(wo.status_logs_json or []))
-    return logs
+    # Thêm diagnosis vào logs
+    return {
+        "diagnosis": wo.diagnosis,
+        "status_logs": logs
+    }
 
 
 @router.get("/work-orders/{work_order_id}/proof-images", response_model=dict, summary="Lịch ảnh minh chứng công việc")
@@ -1670,6 +1674,7 @@ async def get_work_order_proof_images(
         "work_order_id": wo.id,
         "drone_id": wo.drone_id,
         "status": wo.status.value if wo.status else None,
+        "diagnosis": wo.diagnosis,  # ← Thêm diagnosis
         "proof_images": list(reversed(wo.proof_images_json or [])),
         "parts_replaced_images": list(reversed(wo.parts_replaced_proof_json or [])),
         "inspection_items": wo.inspection_items_json or [],
